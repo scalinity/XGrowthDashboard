@@ -1,0 +1,31 @@
+[project]
+name = "x-growth-dashboard"
+version = "0.0.0"
+description = "Local-first X growth dashboard — single-user personal tool."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.30",
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
+    "pydantic>=2.6",
+    "sqlite-utils>=3.36",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

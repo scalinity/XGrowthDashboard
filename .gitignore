@@ -1,0 +1,30 @@
+# Secrets — NEVER commit
+.env
+
+# Local user data (private to this single-user tool; never committed)
+# Per §18 (privacy and security notes), data/ holds the user's private
+# SQLite DB, exports, and backups. Block contents but keep the directory
+# scaffolding via .gitkeep placeholders so the layout survives a clean clone.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/*
+!data/backups/.gitkeep
+data/exports/*
+!data/exports/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual env
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
+Thumbs.db
