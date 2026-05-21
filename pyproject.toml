@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pydantic>=2.6",
     "sqlite-utils>=3.36",
+    "plotly>=6.7.0",
 ]
 
 [dependency-groups]
