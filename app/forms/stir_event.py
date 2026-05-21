@@ -153,7 +153,8 @@ def render(conn: sqlite3.Connection, *, key_prefix: str = "stir_event") -> None:
         "attribution is `self_reported`."
     )
 
-    with st.form(key=f"{key_prefix}_form", clear_on_submit=True):
+    # clear_on_submit=False — validation failures must preserve typed text.
+    with st.form(key=f"{key_prefix}_form", clear_on_submit=False):
         col_cat, col_type = st.columns([1, 2])
         category = col_cat.selectbox(
             "Category", EVENT_CATEGORIES, key=f"{key_prefix}_cat"

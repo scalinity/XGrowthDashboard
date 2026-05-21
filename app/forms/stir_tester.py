@@ -104,7 +104,8 @@ def render(conn: sqlite3.Connection, *, key_prefix: str = "stir_tester") -> None
         "the correct default."
     )
 
-    with st.form(key=f"{key_prefix}_form", clear_on_submit=True):
+    # clear_on_submit=False — validation failures must preserve typed text.
+    with st.form(key=f"{key_prefix}_form", clear_on_submit=False):
         col_a, col_h = st.columns(2)
         alias = col_a.text_input("Alias (required)", key=f"{key_prefix}_alias")
         x_handle = col_h.text_input(

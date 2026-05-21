@@ -33,8 +33,23 @@ CTA_VALUES: tuple[str, ...] = ("ask", "none")
 
 
 def find_existing(conn: sqlite3.Connection, post_id: int) -> sqlite3.Row | None:
+    """Return the latest classification row for ``post_id`` or None.
+
+    Schema-wise multiple rows are *allowed* per post — ``v_lane_performance``
+    intentionally picks the latest ``classified_at`` per post so historical
+    reclassifications (e.g. from a Phase 5 CSV import) don't double-count.
+    The form-layer overwrite path UPDATEs the latest row in place; if any
+    other path inserts a second row, the view stays correct and the form
+    will surface and let the user re-overwrite the latest one.
+    """
     return conn.execute(
-        "SELECT * FROM post_classifications WHERE post_id = ? LIMIT 1",
+        """
+        SELECT *
+          FROM post_classifications
+         WHERE post_id = ?
+         ORDER BY classified_at DESC, id DESC
+         LIMIT 1
+        """,
         (post_id,),
     ).fetchone()
 

@@ -124,7 +124,9 @@ def render(conn: sqlite3.Connection, *, key_prefix: str = "correction") -> None:
     )
     snapshot = options[chosen_label]
 
-    with st.form(key=f"{key_prefix}_form", clear_on_submit=True):
+    # clear_on_submit=False so a validation failure preserves the user's
+    # typed reason/value instead of wiping it.
+    with st.form(key=f"{key_prefix}_form", clear_on_submit=False):
         field_name = st.selectbox(
             "Field to correct",
             CORRECTABLE_FIELDS,

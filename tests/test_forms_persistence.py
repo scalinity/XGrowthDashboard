@@ -88,6 +88,40 @@ def test_post_without_x_post_id_is_needs_id(db_conn: sqlite3.Connection) -> None
     assert row["type"] == "reply"
 
 
+def test_add_post_id_raises_when_post_missing(db_conn: sqlite3.Connection) -> None:
+    import pytest
+    from app.forms import FormError
+
+    with pytest.raises(FormError) as exc:
+        add_post_id(db_conn, 99999, "1234567890")
+    assert "post_id" in exc.value.field_errors
+
+
+def test_add_post_id_raises_when_x_post_id_duplicate(
+    db_conn: sqlite3.Connection,
+) -> None:
+    import pytest
+    from app.forms import FormError
+
+    pid1 = _seed_post(db_conn, text="first", x_post_id="555")
+    pid2 = submit_post(
+        db_conn,
+        {
+            "type": "reply",
+            "text": "no id yet",
+            "posted_at_utc": "2026-05-21T15:00:00Z",
+        },
+    )
+    with pytest.raises(FormError) as exc:
+        add_post_id(db_conn, pid2, "555")
+    assert "x_post_id" in exc.value.field_errors
+    # Original row should be untouched.
+    row = db_conn.execute(
+        "SELECT manual_confirmation_status FROM posts WHERE id = ?", (pid2,)
+    ).fetchone()
+    assert row["manual_confirmation_status"] == "needs_id"
+
+
 def test_add_post_id_flips_to_confirmed(db_conn: sqlite3.Connection) -> None:
     new_id = submit_post(
         db_conn,

@@ -19,8 +19,19 @@ def open_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     cheap and the project is single-user; pooling buys nothing here. The
     project's ``connect()`` wrapper sets WAL mode + foreign-key enforcement
     on every open.
+
+    Migrations are applied once per Streamlit session via the
+    ``db_initialized`` session-state flag (set by ``app/main.py``). When the
+    flag is absent (direct page entry, tests, or scripts) we apply them
+    defensively — they're idempotent so this is a safe fallback.
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = connect(path)
-    apply_migrations(conn)
+    try:
+        import streamlit as st
+        already_bootstrapped = bool(st.session_state.get("db_initialized"))
+    except Exception:  # noqa: BLE001 — running outside Streamlit
+        already_bootstrapped = False
+    if not already_bootstrapped:
+        apply_migrations(conn)
     return conn

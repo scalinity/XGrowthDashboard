@@ -59,6 +59,15 @@ def find_existing_for_date(
 
     Used by the render layer to surface the §22 "edit or correct?" affordance
     before the user even submits.
+
+    Note (TOCTOU race): the schema's UNIQUE index is on
+    ``(username, collected_at_utc)``, NOT ``(username, snapshot_date)``, so
+    nothing stops two near-simultaneous submits for the same date with
+    distinct collection timestamps. This is a single-user local app — a
+    double-submit is the only realistic case and the render layer surfaces
+    the existing row before the form is shown. If multi-user ever lands,
+    add a partial UNIQUE index on ``(username, snapshot_date) WHERE
+    source='manual'`` and let the schema raise.
     """
     return conn.execute(
         """

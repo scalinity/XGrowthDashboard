@@ -69,14 +69,18 @@ for key in PHASE_2_SETTINGS_KEYS:
     current = json.loads(row["value_json"])
     with st.expander(f"`{key}` — {row['note']}", expanded=False):
         st.caption(f"Last updated: {row['updated_at']}")
+        # `isinstance(True, int)` is True in Python, so the bool branch
+        # must come before the int branch.
         if isinstance(current, bool):
             new_value: object = st.toggle(
                 f"{key} value", value=current, key=f"set_{key}"
             )
         elif isinstance(current, int):
-            new_value = st.number_input(
+            # Cast to Python int — st.number_input can return numpy.int64
+            # in some Streamlit versions, which json.dumps rejects.
+            new_value = int(st.number_input(
                 f"{key} value", value=current, step=1, key=f"set_{key}"
-            )
+            ))
         else:
             new_value = st.text_input(
                 f"{key} value",

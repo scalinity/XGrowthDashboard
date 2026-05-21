@@ -19,9 +19,12 @@ render functions own the session-state lifecycle.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 class FormError(ValueError):
@@ -61,7 +64,14 @@ def get_setting(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
         return default
     try:
         return json.loads(row[0])
-    except (TypeError, json.JSONDecodeError):
+    except (TypeError, json.JSONDecodeError) as exc:
+        # Surface corrupt settings rows. Silent fallback to default could
+        # mask a hand-edit of settings.value_json that leaves a toggle
+        # mysteriously sticky to its default.
+        _log.warning(
+            "settings[%r] value_json failed to decode (%s); falling back to default %r.",
+            key, exc, default,
+        )
         return default
 
 

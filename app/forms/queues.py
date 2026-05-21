@@ -11,6 +11,7 @@ import sqlite3
 
 import streamlit as st
 
+from app.forms import FormError
 from app.forms.post_log import add_post_id
 
 
@@ -98,9 +99,13 @@ def render_needs_post_id(
                 )
                 if st.form_submit_button("Save ID", type="primary"):
                     try:
-                        add_post_id(conn, int(r["id"]), x_id.strip(), url.strip() or None)
-                    except Exception as exc:  # noqa: BLE001 - surface to UI
+                        add_post_id(
+                            conn, int(r["id"]), x_id.strip(), url.strip() or None
+                        )
+                    except FormError as exc:
                         st.error(str(exc))
+                        for field, msg in exc.field_errors.items():
+                            st.caption(f"• {field}: {msg}")
                         continue
                     st.success(f"Post #{r['id']} now confirmed.")
                     st.rerun()

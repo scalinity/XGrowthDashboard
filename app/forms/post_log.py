@@ -131,6 +131,10 @@ def add_post_id(
 
     Handles the §22 "Reply URL entered later" edge case. Flips
     ``manual_confirmation_status`` from ``needs_id`` → ``confirmed``.
+
+    Raises ``FormError`` when (a) ``post_id`` doesn't exist or (b)
+    ``x_post_id`` is already linked to another row (the UNIQUE constraint
+    would raise IntegrityError; we surface a friendly error first).
     """
     x_post_id = (x_post_id or "").strip()
     if not x_post_id:
@@ -138,7 +142,29 @@ def add_post_id(
             "x_post_id required.",
             field_errors={"x_post_id": "Required."},
         )
-    conn.execute(
+
+    existing = conn.execute(
+        "SELECT id FROM posts WHERE id = ?", (post_id,)
+    ).fetchone()
+    if existing is None:
+        raise FormError(
+            f"Post id={post_id} not found.",
+            field_errors={"post_id": "No such post row."},
+        )
+
+    duplicate = conn.execute(
+        "SELECT id FROM posts WHERE x_post_id = ? AND id != ?",
+        (x_post_id, post_id),
+    ).fetchone()
+    if duplicate is not None:
+        raise FormError(
+            f"x_post_id={x_post_id} is already linked to post #{duplicate['id']}.",
+            field_errors={
+                "x_post_id": f"Already linked to post #{duplicate['id']}.",
+            },
+        )
+
+    cursor = conn.execute(
         """
         UPDATE posts
            SET x_post_id = ?,
@@ -148,6 +174,12 @@ def add_post_id(
         """,
         (x_post_id, (manual_url or None), post_id),
     )
+    if cursor.rowcount != 1:
+        # Defense in depth — the SELECT above already proves the row exists.
+        raise FormError(
+            f"Failed to update post id={post_id} (rowcount={cursor.rowcount}).",
+            field_errors={"post_id": "Update affected zero rows."},
+        )
 
 
 def render(conn: sqlite3.Connection, *, key_prefix: str = "post_log") -> None:
@@ -158,7 +190,8 @@ def render(conn: sqlite3.Connection, *, key_prefix: str = "post_log") -> None:
         "If `x_post_id` is empty the row lands in the 'Needs post ID' queue (§22)."
     )
 
-    with st.form(key=f"{key_prefix}_form", clear_on_submit=True):
+    # clear_on_submit=False — validation failures must preserve typed text.
+    with st.form(key=f"{key_prefix}_form", clear_on_submit=False):
         col_type, col_when = st.columns([1, 2])
         type_ui = col_type.selectbox(
             "Type", POST_TYPES_UI, key=f"{key_prefix}_type"
