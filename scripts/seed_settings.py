@@ -47,6 +47,10 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
     ),
     (
         "target_calibration_review_date",
+        # Computed at module import time; INSERT OR IGNORE means whichever
+        # invocation seeds the row first wins, and re-running on a later day
+        # never updates the stored value. To re-calibrate, edit the row
+        # explicitly in the Settings view (Phase 3).
         (date.today() + timedelta(days=21)).isoformat(),
         "Settings prompt: review reply target adherence on this date",
     ),

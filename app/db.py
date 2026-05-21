@@ -36,14 +36,16 @@ class _PercentileAggregate:
         self._p: float | None = None
 
     def step(self, value, p) -> None:  # pragma: no cover - trivial
+        # Capture p first so finalize() still knows which percentile was
+        # requested even if every value row is NULL (returns None, correctly).
+        if self._p is None and p is not None:
+            self._p = float(p)
         if value is None:
             return
         try:
             self._values.append(float(value))
         except (TypeError, ValueError):
             return
-        if self._p is None and p is not None:
-            self._p = float(p)
 
     def finalize(self):
         if not self._values or self._p is None:
@@ -137,7 +139,9 @@ def get_st_connection():  # pragma: no cover - exercised in later phases
     from sqlalchemy import event
 
     conn = st.connection("dashboard", type="sql", url=f"sqlite:///{DEFAULT_DB_PATH}")
-    engine = conn._instance.engine
+    # Use the public SQLConnection.engine accessor; the private _instance.engine
+    # path may break across Streamlit upgrades.
+    engine = conn.engine
 
     @event.listens_for(engine, "connect")
     def _setup(dbapi_conn, _connection_record):
