@@ -246,6 +246,59 @@ def test_lane_performance_uses_latest_classification_per_post(
     assert by_lane.get(("stir", "icp", "ask")) == 4
 
 
+def test_lane_performance_stir_signal_follows_latest_classification(
+    empty_db_conn: sqlite3.Connection,
+) -> None:
+    """A reclassified post's stir_signal counts only against the NEW lane.
+
+    Regression for the bug where the stir_signal_count subquery joined
+    post_classifications directly (all historical rows), so an event attached
+    to a reclassified post would be counted in every historical lane.
+    """
+    # Post 1 starts in (stir, icp, ask)…
+    _insert_post_with_lane(
+        empty_db_conn,
+        pillar="stir", audience="icp", cta="ask",
+        created_date="2026-05-01", impressions=100, idx=1,
+    )
+    # …then gets reclassified to (build, other, none) at a later timestamp.
+    empty_db_conn.execute(
+        """
+        INSERT INTO post_classifications
+          (post_id, pillar, audience, cta, classified_at)
+        VALUES (1, 'build', 'other', 'none', '2099-01-01T00:00:00Z')
+        """
+    )
+    # Seed 5 unrelated posts in (stir, icp, ask) so that lane appears in
+    # v_lane_performance (otherwise post 1's old lane wouldn't show up at all).
+    base = date(2026, 5, 2)
+    for i in range(5):
+        d = (base + timedelta(days=i)).isoformat()
+        _insert_post_with_lane(
+            empty_db_conn,
+            pillar="stir", audience="icp", cta="ask",
+            created_date=d, impressions=100, idx=100 + i,
+        )
+    # Insert a stir event referencing post 1.
+    empty_db_conn.execute(
+        """
+        INSERT INTO stir_conversion_events
+          (occurred_at_utc, event_date, event_category, event_type,
+           attribution_method, source_data_quality, referring_post_id)
+        VALUES ('2026-06-01T00:00:00Z', '2026-06-01',
+                'acquisition', 'download',
+                'self_reported', 'manual', 1)
+        """
+    )
+    rows = empty_db_conn.execute(
+        "SELECT pillar, audience, cta, stir_signal_count FROM v_lane_performance"
+    ).fetchall()
+    by_lane = {(r["pillar"], r["audience"], r["cta"]): r["stir_signal_count"] for r in rows}
+    # Post 1 now belongs to (build, other, none); its signal counts only there.
+    assert by_lane.get(("build", "other", "none")) == 1
+    assert by_lane.get(("stir", "icp", "ask")) == 0
+
+
 def test_lane_performance_excludes_unclassified_posts(
     empty_db_conn: sqlite3.Connection,
 ) -> None:
@@ -538,6 +591,73 @@ def test_account_daily_computes_deltas_and_distances(
     assert rows[2]["distance_to_current_milestone"] == 100 - 70
     assert rows[2]["distance_to_operational_ceiling"] == 5000 - 70
     assert rows[2]["distance_to_long_arc"] == 500_000 - 70
+
+
+def test_account_daily_deltas_are_calendar_day_aware(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """A missed snapshot day must not silently shift delta_vs_yesterday or delta_7d.
+
+    Regression for the bug where LAG(N) returned the value N *rows* back in
+    the partition order, so skipping a calendar day made delta_vs_yesterday
+    compare against the day-before-the-gap snapshot.
+    """
+    def _insert(d: str, followers: int) -> None:
+        db_conn.execute(
+            """
+            INSERT INTO account_snapshots
+              (snapshot_date, collected_at_utc, username, profile_url,
+               followers_count, following_count, post_count, listed_count,
+               baseline_followers, source, data_quality)
+            VALUES (?, ?, 'dannyscalant', 'https://x.com/dannyscalant',
+                    ?, 100, 0, 0, 61, 'manual', 'manual')
+            """,
+            (d, f"{d}T09:00:00Z", followers),
+        )
+
+    # Day 0, then SKIP day 1, then day 2.
+    _insert("2026-05-01", 61)
+    _insert("2026-05-03", 65)
+
+    row = db_conn.execute(
+        "SELECT delta_vs_yesterday FROM v_account_daily WHERE snapshot_date='2026-05-03'"
+    ).fetchone()
+    # 2026-05-02 has no snapshot → calendar-day-aware delta must be NULL.
+    # (LAG(1)-by-rows would incorrectly return 4 = 65 - 61.)
+    assert row["delta_vs_yesterday"] is None
+
+
+def test_account_daily_delta_7d_skips_missing_calendar_days(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """delta_7d must be NULL when the calendar day 7 days prior is missing,
+    even if 7+ snapshots exist on other dates."""
+    def _insert(d: str, followers: int) -> None:
+        db_conn.execute(
+            """
+            INSERT INTO account_snapshots
+              (snapshot_date, collected_at_utc, username, profile_url,
+               followers_count, following_count, post_count, listed_count,
+               baseline_followers, source, data_quality)
+            VALUES (?, ?, 'dannyscalant', 'https://x.com/dannyscalant',
+                    ?, 100, 0, 0, 61, 'manual', 'manual')
+            """,
+            (d, f"{d}T09:00:00Z", followers),
+        )
+
+    # Insert 7 consecutive snapshots, then jump ahead — day-N has no snapshot
+    # for "current - 7 days".
+    base = date(2026, 5, 1)
+    for offset in range(7):
+        _insert((base + timedelta(days=offset)).isoformat(), 61 + offset)
+    # Today is base + 20 days; base + 13 days has no snapshot.
+    _insert((base + timedelta(days=20)).isoformat(), 100)
+
+    row = db_conn.execute(
+        "SELECT delta_7d FROM v_account_daily WHERE snapshot_date = ?",
+        ((base + timedelta(days=20)).isoformat(),),
+    ).fetchone()
+    assert row["delta_7d"] is None
 
 
 def test_account_daily_applies_corrections(db_conn: sqlite3.Connection) -> None:

@@ -120,24 +120,32 @@ followers_correction AS (
     FROM canonical c
 ),
 with_deltas AS (
+    -- Calendar-day-aware deltas per §12: "Today's followers minus followers
+    -- from N calendar days prior". Self-joining on the matching calendar
+    -- date returns NULL when the prior day is missing, rather than silently
+    -- comparing against an N+1-snapshot-old row (which a LAG-by-rows approach
+    -- would do when a snapshot day is skipped).
     SELECT
-        snapshot_date,
-        followers_count,
-        following_count,
-        post_count,
-        listed_count,
-        like_count,
-        media_count,
-        bio_text,
-        baseline_followers,
-        followers_count
-            - LAG(followers_count, 1) OVER (ORDER BY snapshot_date) AS delta_vs_yesterday,
-        followers_count - baseline_followers                         AS delta_vs_baseline,
-        followers_count
-            - LAG(followers_count, 7) OVER (ORDER BY snapshot_date) AS delta_7d,
-        followers_count
-            - LAG(followers_count, 30) OVER (ORDER BY snapshot_date) AS delta_30d
-    FROM followers_correction
+        fc.snapshot_date,
+        fc.followers_count,
+        fc.following_count,
+        fc.post_count,
+        fc.listed_count,
+        fc.like_count,
+        fc.media_count,
+        fc.bio_text,
+        fc.baseline_followers,
+        fc.followers_count - fc_prev.followers_count AS delta_vs_yesterday,
+        fc.followers_count - fc.baseline_followers   AS delta_vs_baseline,
+        fc.followers_count - fc_7.followers_count    AS delta_7d,
+        fc.followers_count - fc_30.followers_count   AS delta_30d
+    FROM followers_correction fc
+    LEFT JOIN followers_correction fc_prev
+        ON fc_prev.snapshot_date = DATE(fc.snapshot_date, '-1 day')
+    LEFT JOIN followers_correction fc_7
+        ON fc_7.snapshot_date    = DATE(fc.snapshot_date, '-7 days')
+    LEFT JOIN followers_correction fc_30
+        ON fc_30.snapshot_date   = DATE(fc.snapshot_date, '-30 days')
 )
 SELECT
     snapshot_date,
@@ -348,12 +356,17 @@ SELECT
     a.iqr_engagement_rate_high,
     a.total_bookmarks,
     a.total_replies,
+    -- Count stir events against the LATEST classification only. Joining
+    -- post_classifications directly would double-count reclassified posts
+    -- (one row per historical (pillar, audience, cta) tuple). v_post_latest_metrics
+    -- returns one row per post with the current lane, so each event maps to
+    -- exactly one current lane.
     (SELECT COUNT(*)
        FROM stir_conversion_events sce
-       JOIN post_classifications   pc2 ON pc2.post_id = sce.referring_post_id
-      WHERE pc2.pillar   = a.pillar
-        AND pc2.audience = a.audience
-        AND pc2.cta      = a.cta)                                       AS stir_signal_count,
+       JOIN v_post_latest_metrics  plm2 ON plm2.post_id = sce.referring_post_id
+      WHERE plm2.pillar   = a.pillar
+        AND plm2.audience = a.audience
+        AND plm2.cta      = a.cta)                                       AS stir_signal_count,
     CASE
         WHEN a.post_count < 5 OR a.days_covered < 3 THEN 'insufficient sample'
         WHEN a.post_count < 15                      THEN 'low — show scatter, do not rank'
