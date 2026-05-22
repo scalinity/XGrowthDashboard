@@ -225,18 +225,32 @@ def _draft_text_lower(draft_text: str) -> tuple[str, set[str]]:
     return low, tokens
 
 
+DESCRIPTION_TOKEN_MATCH_MINIMUM: int = 2
+"""P59A-W10: require >=2 description-token overlaps before treating a
+description match as evidence of invocation. The prior single-token
+rule over-counted in practice — a draft mentioning a common noun
+('kitchen', 'build', 'scanner') would light up every lore row that
+happened to use the same noun in its description. With the §28.21
+over-reliance banner firing at invocation_count > 8 within 30 days,
+the looser rule tripped banners spuriously. Theme substring match is
+still single-hit because the theme is the canonical handle for the
+bit; description tokens are softer signal."""
+
+
 def detect_invoked_lore(
     active_lore: list[LoreRow], draft_text: str
 ) -> list[int]:
     """Return the ids of every active lore row referenced by the draft.
 
-    Match rule (case-insensitive):
+    Match rule (case-insensitive; P59A-W10 + P59A-S2):
       * Substring match on the theme name (whole theme as a phrase), OR
-      * At least one description keyword token (length >=3, non-stopword)
-        present as an alpha token in the draft.
+      * At least ``DESCRIPTION_TOKEN_MATCH_MINIMUM`` description keyword
+        tokens (length >=3, non-stopword) present in the draft.
 
-    Over-counting is acceptable per §28.21 — a passing reference still
-    counts. Under-counting is not — the looser of the two rules wins.
+    Both checks are evaluated independently (S2 — union, no short-
+    circuit) so a row matching BOTH still gets counted exactly once
+    via natural dedup (each row.id appears at most once in `invoked`).
+    Over-counting is acceptable per §28.21; under-counting is not.
     """
     if not active_lore or not draft_text:
         return []
@@ -244,11 +258,11 @@ def detect_invoked_lore(
     invoked: list[int] = []
     for row in active_lore:
         theme_low = row.theme.lower().strip()
-        if theme_low and theme_low in draft_low:
-            invoked.append(row.id)
-            continue
+        theme_hit = bool(theme_low and theme_low in draft_low)
         desc_tokens = _tokenize_description(row.description)
-        if desc_tokens & draft_tokens:
+        desc_overlap = len(desc_tokens & draft_tokens)
+        desc_hit = desc_overlap >= DESCRIPTION_TOKEN_MATCH_MINIMUM
+        if theme_hit or desc_hit:
             invoked.append(row.id)
     return invoked
 

@@ -121,12 +121,30 @@ def test_detect_matches_theme_substring(db_conn: sqlite3.Connection) -> None:
 def test_detect_matches_description_keyword(db_conn: sqlite3.Connection) -> None:
     _seed_three_lore(db_conn)
     active = personality_lore.list_active(db_conn)
-    # "scanner" appears in the kitchen-scanner description.
+    # P59A-W10: require >=2 non-stopword tokens overlapping with the
+    # description ("scanner" + "ginger" both in the kitchen-scanner
+    # description). A single token like "scanner" alone no longer
+    # triggers — the prior single-token rule over-counted.
     invoked = personality_lore.detect_invoked_lore(
-        active, "the scanner crashed again today"
+        active, "the scanner crashed reading ginger again today"
     )
     matched_themes = {r.theme for r in active if r.id in invoked}
     assert "kitchen-scanner fail" in matched_themes
+
+
+def test_detect_single_token_no_longer_matches_description(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P59A-W10 regression: single description-token overlap must NOT
+    invoke the row. Prevents 'kitchen' (or any common noun) from
+    lighting up every lore mentioning the same word."""
+    _seed_three_lore(db_conn)
+    active = personality_lore.list_active(db_conn)
+    invoked = personality_lore.detect_invoked_lore(
+        active, "the scanner crashed today"  # only 'scanner' overlaps
+    )
+    matched_themes = {r.theme for r in active if r.id in invoked}
+    assert "kitchen-scanner fail" not in matched_themes
 
 
 def test_detect_returns_empty_on_no_match(db_conn: sqlite3.Connection) -> None:
