@@ -223,6 +223,21 @@ def _normalise_row(
             out[col] = _REDACTED_SENTINEL
             redactions.setdefault(cell_path, "tester PII; pass --include-stir-pii to opt in")
             continue
+        if table_name == "settings" and col == "value_json":
+            # The generic (key, value_json) shape of the settings table
+            # escapes the column-name regex above. Apply the same regex
+            # against the row's `key` so a future settings row like
+            # `anthropic_api_key` or `x_oauth_bearer_token` still gets
+            # redacted in the dump even though `value_json` itself is
+            # not a sensitive name.
+            key_value = row["key"] if "key" in columns else ""
+            if isinstance(key_value, str) and _is_secret_column(key_value):
+                out[col] = _REDACTED_SENTINEL
+                redactions.setdefault(
+                    f"settings[{key_value}].value_json",
+                    f"settings.key {key_value!r} matches /{_SECRET_COLUMN_PATTERN.pattern}/",
+                )
+                continue
         if (
             table_name == "raw_api_responses"
             and col in {"response_json", "request_params_json"}

@@ -288,6 +288,33 @@ def test_json_export_fail_closes_on_non_json_raw_api_response(db_conn, tmp_path:
     assert any(k.startswith("raw_api_responses.response_json") for k in cell_keys), cell_keys
 
 
+def test_json_export_redacts_settings_value_when_key_matches_secret_pattern(db_conn, tmp_path: Path) -> None:
+    """Regression for #16 / CA1 🟡 W2.
+
+    The settings table's generic (key, value_json) shape escapes the
+    column-name regex; the redactor must instead apply the regex to
+    each row's `key` and redact `value_json` when it matches.
+    """
+    db_conn.execute(
+        "INSERT INTO settings (key, value_json, note) VALUES (?, ?, ?)",
+        ("anthropic_api_key", '"sk-ant-MUSTNOTAPPEAR"', "test row"),
+    )
+    db_conn.execute(
+        "INSERT INTO settings (key, value_json, note) VALUES (?, ?, ?)",
+        ("x_oauth_bearer_token", '"OAuth-MUSTNOTAPPEAR-EITHER"', "test row"),
+    )
+
+    out = tmp_path / "settings_secrets.json"
+    result = export_database_to_json(out, conn=db_conn)
+    body = out.read_text(encoding="utf-8")
+
+    assert "sk-ant-MUSTNOTAPPEAR" not in body
+    assert "OAuth-MUSTNOTAPPEAR-EITHER" not in body
+    cell_keys = list(result.redactions.keys())
+    assert "settings[anthropic_api_key].value_json" in cell_keys
+    assert "settings[x_oauth_bearer_token].value_json" in cell_keys
+
+
 # ---------------------------------------------------------------------------
 # Test 7 — CSV round-trip preserves row count and key fields.
 # ---------------------------------------------------------------------------
