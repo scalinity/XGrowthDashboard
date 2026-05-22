@@ -46,7 +46,7 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.agent import audit, confirmation
+from app.agent import audit, audit_log, confirmation
 from app.db import transaction
 
 X_POST_MAX_CHARS: int = 280
@@ -196,6 +196,23 @@ def publish_post_atomic(
                 confirmation_token_id=consumed.token_id,
             )
 
+            # §28.30 publish category — canonical state-change record.
+            # In the same transaction as the posts UPDATE so it commits
+            # atomically with the publish state.
+            audit_log.log(
+                conn,
+                event_category="publish",
+                event_type="publish_succeeded",
+                target_type="post",
+                target_id=post_id,
+                details={
+                    "method": "manual_clipboard",
+                    "intent_url": intent_url,
+                    "tool_name": tool_name,
+                    "confirmation_token_id": consumed.token_id,
+                },
+            )
+
         return PublishResult(
             success=True,
             post_id=post_id,
@@ -229,6 +246,16 @@ def publish_post_atomic(
                 error_message=f"{type(exc).__name__}: {exc}",
                 confirmation_token_id=None,
             )
+            audit_log.log(
+                conn,
+                event_category="publish",
+                event_type="publish_failed_confirmation",
+                target_type="post",
+                target_id=post_id,
+                success=False,
+                error_message=f"{type(exc).__name__}: {exc}",
+                details={"tool_name": tool_name},
+            )
         return PublishResult(
             success=False,
             post_id=post_id,
@@ -257,6 +284,16 @@ def publish_post_atomic(
                 status="error",
                 error_message=f"DraftTooLongError: {exc}",
                 confirmation_token_id=None,
+            )
+            audit_log.log(
+                conn,
+                event_category="publish",
+                event_type="publish_failed_length_cap",
+                target_type="post",
+                target_id=post_id,
+                success=False,
+                error_message=f"DraftTooLongError: {exc}",
+                details={"tool_name": tool_name},
             )
         return PublishResult(
             success=False,
@@ -295,6 +332,19 @@ def publish_post_atomic(
                 status="error",
                 error_message=f"{type(exc).__name__}: {exc}",
                 confirmation_token_id=consumed.token_id if consumed else None,
+            )
+            audit_log.log(
+                conn,
+                event_category="publish",
+                event_type="publish_failed_runtime",
+                target_type="post",
+                target_id=post_id,
+                success=False,
+                error_message=f"{type(exc).__name__}: {exc}",
+                details={
+                    "tool_name": tool_name,
+                    "confirmation_token_id": consumed.token_id if consumed else None,
+                },
             )
         return PublishResult(
             success=False,

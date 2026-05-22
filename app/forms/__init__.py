@@ -76,7 +76,29 @@ def get_setting(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
 
 
 def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
-    """Upsert a settings row, JSON-encoding ``value``. Used by the Settings page."""
+    """Upsert a settings row, JSON-encoding ``value``. Used by the Settings page.
+
+    Phase 5.11 (§28.30): captures the prior value first, performs the
+    upsert, then appends an ``audit_logs`` ``settings_changed_<key>`` row
+    with the structured ``{setting_key, old_value, new_value}`` diff.
+    The audit row is suppressed when the new value equals the prior
+    value (no-op writes shouldn't pollute the log). The audit append is
+    wrapped in a defensive try/except so a missing ``audit_logs`` table
+    (e.g. a legacy DB created before migration 015) never blocks the
+    underlying settings write.
+    """
+    # Capture the prior value BEFORE the upsert so the diff is honest.
+    prior_row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?", (key,)
+    ).fetchone()
+    if prior_row is None:
+        old_value: Any = None
+    else:
+        try:
+            old_value = json.loads(prior_row[0])
+        except (TypeError, json.JSONDecodeError):
+            old_value = prior_row[0]  # surface the raw text so the diff isn't lost
+
     conn.execute(
         """
         INSERT INTO settings (key, value_json, updated_at)
@@ -87,3 +109,25 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
         """,
         (key, json.dumps(value)),
     )
+
+    # Audit-log the change (§28.30 write-through point). Skipped when
+    # the value didn't actually change.
+    if old_value != value:
+        try:
+            # Local import to avoid an import cycle (app.agent.audit_log
+            # depends on app.db only; this module is imported by many
+            # downstream modules including the agent layer).
+            from app.agent import audit_log as _audit_log
+            _audit_log.log_setting_change(
+                conn, key=key, old_value=old_value, new_value=value
+            )
+        except sqlite3.OperationalError as exc:
+            # Likely "no such table: audit_logs" on a pre-migration-015
+            # DB. The settings write has already succeeded; don't roll
+            # it back over an audit hiccup. Surface a warning so a real
+            # outage isn't silenced.
+            _log.warning(
+                "audit_log append skipped for settings[%r] change: %s. "
+                "Run `uv run python -m scripts.init_db` to apply migration 015.",
+                key, exc,
+            )

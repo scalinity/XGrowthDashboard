@@ -112,3 +112,28 @@ def record_export(
             RuntimeWarning,
             stacklevel=2,
         )
+
+    # §28.30 write-through: every export run also lands one audit_logs
+    # row. The two-table design preserves data_exports as the export-
+    # specific ledger (kind, row_count, opt-in flag) and audit_logs as
+    # the canonical state-change record across all categories. Failure
+    # to audit must NOT undo the export.
+    try:
+        from app.agent import audit_log as _audit_log
+        _audit_log.log(
+            conn,
+            event_category="export",
+            event_type=f"export_{kind}",
+            target_type=table_name or "export",
+            target_id=str(output_path),
+            details={
+                "kind": kind,
+                "table_name": table_name,
+                "output_path": str(output_path),
+                "row_count": row_count,
+                "include_opt_in": include_opt_in,
+                "notes": notes,
+            },
+        )
+    except sqlite3.OperationalError:
+        pass

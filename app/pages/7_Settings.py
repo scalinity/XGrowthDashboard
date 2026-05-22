@@ -1712,3 +1712,86 @@ if _pa_audits:
                 )
                 st.toast("notes saved.")
                 st.rerun()
+
+# ---------------------------------------------------------------------------
+# §14.7 / §28.30 — Audit log viewer (Phase 5.11).
+# ---------------------------------------------------------------------------
+# Read-only window onto every state-changing event in the system. The
+# agent has NO read access to audit_logs; this surface is Daniel's
+# debugging + recovery tool only.
+hairline()
+st.subheader("Audit log")
+st.markdown(
+    "<div class='dim' style='margin-bottom:0.6rem;font-size:0.86rem;'>"
+    "Append-only canonical record of state-changing events "
+    "(settings, exports, publishes, backups, migrations, data writes). "
+    "The agent has no access to this table — Daniel-only.</div>",
+    unsafe_allow_html=True,
+)
+
+from app.agent import audit_log as _audit_log  # noqa: E402
+
+_AUDIT_CAT_OPTIONS: list[str] = ["all"] + sorted(_audit_log.ALLOWED_CATEGORIES)
+if "audit_log_filter_category" not in st.session_state:
+    st.session_state["audit_log_filter_category"] = "all"
+if "audit_log_filter_limit" not in st.session_state:
+    st.session_state["audit_log_filter_limit"] = 50
+
+_audit_filter_cols = st.columns([2, 1, 1])
+with _audit_filter_cols[0]:
+    st.selectbox(
+        "category",
+        options=_AUDIT_CAT_OPTIONS,
+        key="audit_log_filter_category",
+    )
+with _audit_filter_cols[1]:
+    st.number_input(
+        "limit",
+        min_value=10,
+        max_value=500,
+        step=10,
+        key="audit_log_filter_limit",
+    )
+with _audit_filter_cols[2]:
+    st.write("")  # spacer
+    if st.button("refresh", key="audit_log_refresh"):
+        st.rerun()
+
+_audit_category_selected = st.session_state["audit_log_filter_category"]
+_audit_rows = _audit_log.query(
+    conn,
+    category=None if _audit_category_selected == "all" else _audit_category_selected,
+    limit=int(st.session_state["audit_log_filter_limit"]),
+)
+
+st.markdown(
+    f"<div class='kicker'>{len(_audit_rows)} event(s)</div>",
+    unsafe_allow_html=True,
+)
+
+for _arow in _audit_rows:
+    _arow_emoji = "✓" if _arow.success else "✗"
+    _arow_target = (
+        f"{_arow.target_type}#{_arow.target_id}"
+        if _arow.target_type and _arow.target_id
+        else (_arow.target_type or "")
+    )
+    with st.expander(
+        f"{_arow.occurred_at_utc}  ·  [{_arow.event_category}] "
+        f"{_arow.event_type}  ·  {_arow_emoji}  {_arow_target}".strip()
+    ):
+        st.markdown(
+            f"<div class='dim' style='font-size:0.86rem;'>"
+            f"id <span class='numeric'>{_arow.id}</span> · "
+            f"actor <span class='numeric'>{html.escape(_arow.actor)}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if _arow.error_message:
+            st.markdown(
+                f"<div class='dim' style='font-size:0.86rem;color:#d97e7e;'>"
+                f"error: {html.escape(_arow.error_message)}</div>",
+                unsafe_allow_html=True,
+            )
+        if _arow.details:
+            st.json(_arow.details, expanded=False)

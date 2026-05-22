@@ -258,6 +258,27 @@ def backup_database(
         set_setting(conn, "last_backup_at_utc", _now_utc_iso())
         pruned = _prune_old_backups(backups_path, retention, keep=target)
 
+        # §28.30 write-through: every backup run lands one audit row.
+        # Wrapped in try/except so a pre-migration-015 DB doesn't make
+        # the backup itself appear failed.
+        try:
+            from app.agent import audit_log as _audit_log
+            _audit_log.log(
+                conn,
+                event_category="admin",
+                event_type="backup_run",
+                target_type="backup_file",
+                target_id=str(target),
+                details={
+                    "path": str(target),
+                    "size_bytes": target.stat().st_size,
+                    "duration_ms": duration_ms,
+                    "pruned_count": len(pruned),
+                },
+            )
+        except sqlite3.OperationalError:
+            pass
+
         return BackupResult(
             path=target,
             size_bytes=target.stat().st_size,
