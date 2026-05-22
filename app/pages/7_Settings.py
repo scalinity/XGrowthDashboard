@@ -221,17 +221,22 @@ def _format_bytes(n: int) -> str:
     return f"{n / (1024 * 1024):.2f} MB"
 
 
+_SECONDS_PER_MINUTE = 60
+_SECONDS_PER_HOUR = 60 * _SECONDS_PER_MINUTE
+_SECONDS_PER_DAY = 24 * _SECONDS_PER_HOUR
+
+
 def _humanise_age(seconds: float) -> str:
     """Compact `Nh Mm ago` / `Nd ago` caption for the last-backup readout."""
     seconds = max(0, int(seconds))
-    if seconds < 60:
+    if seconds < _SECONDS_PER_MINUTE:
         return f"{seconds}s ago"
-    if seconds < 3600:
-        return f"{seconds // 60}m ago"
-    if seconds < 86400:
-        h, m = divmod(seconds // 60, 60)
+    if seconds < _SECONDS_PER_HOUR:
+        return f"{seconds // _SECONDS_PER_MINUTE}m ago"
+    if seconds < _SECONDS_PER_DAY:
+        h, m = divmod(seconds // _SECONDS_PER_MINUTE, 60)
         return f"{h}h {m}m ago"
-    days = seconds // 86400
+    days = seconds // _SECONDS_PER_DAY
     return f"{days}d ago"
 
 

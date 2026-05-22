@@ -35,6 +35,8 @@ BACKUP_FILENAME_GLOB: str = f"{BACKUP_FILENAME_PREFIX}*{BACKUP_FILENAME_SUFFIX}"
 FILENAME_TIME_RETRY_LIMIT: int = 3
 FILENAME_SUFFIX_RETRY_LIMIT: int = 1_000
 
+SECONDS_PER_DAY: int = 86_400
+
 
 class BackupIntegrityError(RuntimeError):
     """Raised when ``PRAGMA integrity_check`` on a fresh backup is not ``ok``."""
@@ -118,7 +120,7 @@ def _prune_old_backups(
     """
     if retention_days <= 0:
         return []
-    threshold = time.time() - (retention_days * 86400)
+    threshold = time.time() - (retention_days * SECONDS_PER_DAY)
     pruned: list[Path] = []
     for path in sorted(backups_dir.glob(BACKUP_FILENAME_GLOB)):
         if keep is not None and path == keep:
