@@ -449,7 +449,6 @@ def score(
     draft_text: str,
     draft_kind: str,
     pillar: str | None,
-    audience: str | None,  # noqa: ARG001 — reserved for future audience-fit dim
     cta: str | None,
     target_post_text: str | None,
     active_voice_profile: _voice_profile.VoiceProfile | None,
@@ -459,6 +458,13 @@ def score(
     The orchestrator passes the active voice profile (looked up once at
     the start of the save_draft_* call); we never read DB here so the
     scorer stays testable without a fixture.
+
+    Note (P58R-11): a future `audience_fit_score` dimension is on the
+    Phase 5.X roadmap. When it lands, add an `audience` kwarg here AND
+    update the call sites in `_save_draft_post` (standalone — has
+    audience) and `_save_draft_reply` (reply — pass None or compute
+    from the target). Until then, omit the param entirely so neither
+    handler has to choose between asymmetric calls.
     """
     s_clarity = clarity_score(draft_text)
     s_hook = hook_strength_score(draft_text)
