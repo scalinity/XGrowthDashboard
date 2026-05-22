@@ -29,7 +29,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from app.agent import audit, cost, prompt_builder, tools
+from app.agent import audit, cost, prompt_builder, session, tools
+
+# §28.2 rule #12 + #13: every save_draft_* call MUST run through the
+# orchestrator gate (IWH self-score parse + dark-pattern lint preflight)
+# BEFORE the handler is invoked. The model can emit these tool_use blocks
+# at any time; without the gate the entire revision/lint discipline this
+# phase exists to enforce is dead code at runtime.
+SAVE_DRAFT_TOOLS: frozenset[str] = frozenset(
+    {"save_draft_post", "save_draft_reply"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +118,8 @@ def dispatch_tool_call(
     tool_name: str,
     tool_input: dict[str, Any],
     message_id: int,
+    assistant_text: str = "",
+    current_attempt_index: int = 1,
 ) -> dict[str, Any]:
     """Dispatch a tool_use block to its handler and log the call.
 
@@ -117,8 +128,62 @@ def dispatch_tool_call(
     tools are not in AGENT_TOOLS, so a valid model response can never name
     them; the explicit KeyError is defense-in-depth against a corrupt SDK
     payload or a future leak.
+
+    §28.2 rule #12 + #13 enforcement: for tool_name in SAVE_DRAFT_TOOLS,
+    run the orchestrator gate (IWH score parse + dark-pattern lint preflight)
+    against the parent assistant message's text BEFORE calling the handler.
+    Refuse/revise outcomes short-circuit without writing to agent_drafts.
+    The caller (AgentClient.send_message_sync) threads ``assistant_text``
+    and ``current_attempt_index`` here.
     """
     start = datetime.now(timezone.utc)
+
+    if tool_name in SAVE_DRAFT_TOOLS:
+        decision = session.decide_save_or_revise(
+            conn,
+            assistant_text=assistant_text,
+            draft_text=tool_input.get("text", ""),
+            current_attempt_index=current_attempt_index,
+        )
+        if decision.action == "refuse":
+            audit.log_tool_call(
+                conn,
+                message_id=message_id,
+                tool_name=tool_name,
+                arguments=tool_input,
+                status="error",
+                error_message=f"IWH refuse: {decision.rationale}",
+                duration_ms=int(
+                    (datetime.now(timezone.utc) - start).total_seconds() * 1000
+                ),
+                notes="iwh-gate refused",
+            )
+            return {
+                "tool_name": tool_name,
+                "status": "error",
+                "error": f"refused by IWH gate: {decision.rationale}",
+            }
+        if decision.action == "revise":
+            audit.log_tool_call(
+                conn,
+                message_id=message_id,
+                tool_name=tool_name,
+                arguments=tool_input,
+                status="error",
+                error_message=f"IWH revise: {decision.rationale}",
+                duration_ms=int(
+                    (datetime.now(timezone.utc) - start).total_seconds() * 1000
+                ),
+                notes="iwh-gate revise",
+            )
+            return {
+                "tool_name": tool_name,
+                "status": "revise_required",
+                "rationale": decision.rationale,
+                "next_attempt_index": decision.next_attempt_index,
+            }
+        # decision.action == "save" — fall through to handler invocation.
+
     try:
         tool = tools.get_tool(tool_name)
         result = tool.handler(conn, **tool_input)
@@ -254,11 +319,31 @@ class AgentClient:
         # Dispatch each tool_use block locally.
         dispatched: list[dict] = []
         for tc in tool_calls:
+            tc_name = tc.get("name", "")
+            tc_input = tc.get("input", {}) or {}
+            # For save_draft_* tools, look up the conversation's current
+            # IWH attempt count so the orchestrator's refuse-on-N+1 gate
+            # has the right starting index. Counter increments via
+            # _revise_draft (the durable side); this is the read.
+            current_attempt = 1
+            if tc_name in SAVE_DRAFT_TOOLS:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(MAX(iwh_attempt_index), 0) + 1 AS next_idx
+                    FROM agent_drafts
+                    WHERE conversation_id = ? AND status != 'rejected'
+                    """,
+                    (conversation_id,),
+                ).fetchone()
+                if row is not None and row["next_idx"] is not None:
+                    current_attempt = int(row["next_idx"])
             result = dispatch_tool_call(
                 conn,
-                tool_name=tc.get("name", ""),
-                tool_input=tc.get("input", {}) or {},
+                tool_name=tc_name,
+                tool_input=tc_input,
                 message_id=msg_id,
+                assistant_text=assistant_text,
+                current_attempt_index=current_attempt,
             )
             dispatched.append(result)
             # Persist tool_result message so the next turn has it in context.

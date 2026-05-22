@@ -191,6 +191,97 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             saved_draft_id = result["draft_id"]
 
 
+def test_dispatch_tool_call_refuses_save_draft_with_low_iwh(db_conn, monkeypatch):
+    """C5 regression: the IWH+lint gate must run inside dispatch_tool_call
+    before save_draft_* handlers, not only when tests call decide_save_or_
+    revise directly. Before C5, the gate was dead code in production —
+    save_draft_post ran unconditionally on any tool_use the model emitted.
+    """
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    from app.agent.client import dispatch_tool_call
+
+    # Bootstrap a conversation + message to anchor the audit row.
+    conv = db_conn.execute(
+        "INSERT INTO agent_conversations (status) VALUES ('active')"
+    ).lastrowid
+    msg = db_conn.execute(
+        "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'assistant', '')",
+        (conv,),
+    ).lastrowid
+
+    # Assistant text emits a low IWH score (intelligence=1 < minimum=2).
+    assistant_text = (
+        'Here is a draft: "x" '
+        '<iwh_self_score>{"intelligence": 1, "wisdom": 3, "humility": 3}</iwh_self_score>'
+    )
+    result = dispatch_tool_call(
+        db_conn,
+        tool_name="save_draft_post",
+        tool_input={
+            "text": "a generic draft", "pillar": "stir",
+            "audience": "icp", "cta": "ask",
+        },
+        message_id=int(msg),
+        assistant_text=assistant_text,
+        current_attempt_index=1,
+    )
+    # The gate refused the call (action=revise → status=revise_required).
+    assert result["status"] == "revise_required"
+    assert "below minimum" in result["rationale"]
+
+    # Critically: no agent_drafts row was written.
+    drafts = db_conn.execute(
+        "SELECT COUNT(*) AS n FROM agent_drafts WHERE conversation_id = ?",
+        (conv,),
+    ).fetchone()
+    assert drafts["n"] == 0, "save_draft_post must NOT have written a row"
+
+    # And the audit row records the IWH refusal with notes='iwh-gate revise'.
+    audit_row = db_conn.execute(
+        "SELECT status, error_message, notes FROM agent_tool_calls "
+        "WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+        (int(msg),),
+    ).fetchone()
+    assert audit_row["status"] == "error"
+    assert "IWH revise" in audit_row["error_message"]
+
+
+def test_dispatch_tool_call_blocks_engagement_bait_via_lint(db_conn, monkeypatch):
+    """C5 regression: even with a perfect IWH score, the lint pass blocks
+    engagement-bait drafts."""
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    from app.agent.client import dispatch_tool_call
+
+    conv = db_conn.execute(
+        "INSERT INTO agent_conversations (status) VALUES ('active')"
+    ).lastrowid
+    msg = db_conn.execute(
+        "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'assistant', '')",
+        (conv,),
+    ).lastrowid
+
+    assistant_text = (
+        '<iwh_self_score>{"intelligence": 3, "wisdom": 3, "humility": 3}</iwh_self_score>'
+    )
+    result = dispatch_tool_call(
+        db_conn,
+        tool_name="save_draft_post",
+        tool_input={
+            "text": "5 secrets parents don't know — number 3 will surprise you!",
+            "pillar": "stir", "audience": "icp", "cta": "ask",
+        },
+        message_id=int(msg),
+        assistant_text=assistant_text,
+        current_attempt_index=1,
+    )
+    assert result["status"] == "revise_required"
+    assert "dark-pattern" in result["rationale"]
+    drafts = db_conn.execute(
+        "SELECT COUNT(*) AS n FROM agent_drafts"
+    ).fetchone()
+    assert drafts["n"] == 0
+
+
 def test_revised_drafts_are_publishable(db_conn):
     """C2 regression: every revise_draft must mint a posts row so the
     publish modal can find it via `WHERE agent_draft_id = ?`.
