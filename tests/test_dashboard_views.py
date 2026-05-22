@@ -360,6 +360,10 @@ _PAGES = [
     ("11_Brain_Dump.py",            "brain dump"),
     # Phase 5.10 / §14.10 — Coach grounded-advice surface.
     ("12_Coach.py",                 "coach"),
+    # Phase 5.10 / §28.24 — Account Researcher sibling page (sibling to
+    # the Reply Target Queue rather than a st.tabs() inside it; same
+    # sidebar position, simpler routing).
+    ("13_Account_Researcher.py",    "account researcher"),
 ]
 
 
