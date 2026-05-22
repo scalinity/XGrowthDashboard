@@ -42,7 +42,16 @@ Save the file below to:
         <string>cd /Users/danny/Documents/Codez/Apps/XGrowthDashboard &amp;&amp; /Users/danny/.local/bin/uv run python -m scripts.backup_db &gt;&gt; data/backups/backup.log 2&gt;&amp;1</string>
     </array>
 
-    <!-- Daily at 03:00 local time. -->
+    <!--
+      Daily at 03:00 local time.
+
+      Note on omitted keys: launchd treats every absent `StartCalendarInterval`
+      key as a wildcard. Omitting `Day` means *every day of the month*, not
+      "the first" — and likewise for `Month`, `Weekday`. If you set `Day = 1`
+      thinking it means "run every day", you'll get a once-a-month job
+      instead. The four keys below (Hour, Minute, with Day/Month/Weekday
+      implicitly "*") are the right shape for daily-at-03:00.
+    -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
