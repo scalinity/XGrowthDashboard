@@ -741,6 +741,7 @@ def _save_draft_post(
     session_id: str | None = None,
     conversation_id: int | None = None,
     agent_reasoning: str | None = None,
+    confidence_label: str | None = None,
 ) -> dict[str, Any]:
     with transaction(conn):
         draft_cur = conn.execute(
@@ -748,8 +749,9 @@ def _save_draft_post(
             INSERT INTO agent_drafts
                 (session_id, conversation_id, draft_kind, text, pillar,
                  audience, cta, hypothesis_id, agent_reasoning,
-                 voice_self_score, iwh_attempt_index, status)
-            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, 'proposed')
+                 voice_self_score, iwh_attempt_index, status,
+                 confidence_label)
+            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
             """,
             (
                 session_id,
@@ -762,6 +764,7 @@ def _save_draft_post(
                 agent_reasoning,
                 json.dumps(voice_self_score) if voice_self_score else None,
                 int(iwh_attempt_index),
+                confidence_label,
             ),
         )
         draft_id = int(draft_cur.lastrowid)
@@ -857,6 +860,7 @@ def _save_draft_reply(
     session_id: str | None = None,
     conversation_id: int | None = None,
     agent_reasoning: str | None = None,
+    confidence_label: str | None = None,
 ) -> dict[str, Any]:
     with transaction(conn):
         draft_cur = conn.execute(
@@ -864,8 +868,9 @@ def _save_draft_reply(
             INSERT INTO agent_drafts
                 (session_id, conversation_id, draft_kind, text, pillar,
                  target_post_url, target_post_text, agent_reasoning,
-                 voice_self_score, iwh_attempt_index, status)
-            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed')
+                 voice_self_score, iwh_attempt_index, status,
+                 confidence_label)
+            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
             """,
             (
                 session_id,
@@ -877,6 +882,7 @@ def _save_draft_reply(
                 agent_reasoning,
                 json.dumps(voice_self_score) if voice_self_score else None,
                 int(iwh_attempt_index),
+                confidence_label,
             ),
         )
         draft_id = int(draft_cur.lastrowid)

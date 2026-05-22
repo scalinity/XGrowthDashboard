@@ -189,6 +189,13 @@ def dispatch_tool_call(
                 "next_attempt_index": decision.next_attempt_index,
             }
         # decision.action == "save" — fall through to handler invocation.
+        # Phase 5.8 / §28.14 — inject the dominant confidence label so the
+        # save_draft_* handler writes it inside the same transaction as
+        # the agent_drafts INSERT. Avoids the prior post-hoc UPDATE that
+        # left a transient window with NULL confidence_label visible to
+        # readers (Content Performance calibration, export jobs).
+        if decision.confidence_label is not None:
+            tool_input = {**tool_input, "confidence_label": decision.confidence_label}
 
     try:
         tool = tools.get_tool(tool_name)
@@ -376,22 +383,10 @@ class AgentClient:
                 current_attempt_index=current_attempt,
             )
             dispatched.append(result)
-            # Phase 5.8 / §28.14 — if this tool call produced a draft,
-            # propagate the message's dominant confidence label onto
-            # agent_drafts.confidence_label. The label captures whether
-            # the surrounding analytical claims (e.g. "lane X is the
-            # winner") were tagged as fact / inference / speculation.
-            if (
-                tc_name in SAVE_DRAFT_TOOLS
-                and _dominant_conf is not None
-                and isinstance(result.get("result"), dict)
-            ):
-                _draft_id = result["result"].get("draft_id")
-                if _draft_id is not None:
-                    conn.execute(
-                        "UPDATE agent_drafts SET confidence_label = ? WHERE id = ?",
-                        (_dominant_conf, int(_draft_id)),
-                    )
+            # Phase 5.8 / §28.14 — the dominant confidence label is now
+            # injected into the save_draft_* tool_input by dispatch_tool_call
+            # (see P58R-6) so it lands inside the handler's transaction.
+            # No post-hoc UPDATE needed here.
             # Persist tool_result message so the next turn has it in context.
             # Switch on `status` instead of truthy result — a legitimate empty
             # result ({} / []) is falsy and used to fall through to error,
