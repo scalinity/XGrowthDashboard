@@ -161,6 +161,19 @@ class AlignmentCritique:
     tokens_used: int = 0
 
 
+# P59A-S5: memoize the Anthropic client per api_key so repeated
+# "Test against bio" presses don't pile up HTTP clients + connection
+# pools. Keyed on api_key so a key rotation produces a fresh client.
+_CLIENT_CACHE: dict[str, Any] = {}
+
+
+def _get_anthropic_client(api_key: str) -> Any:
+    if api_key not in _CLIENT_CACHE:
+        import anthropic  # local import — keeps the cold path free of the dep
+        _CLIENT_CACHE[api_key] = anthropic.Anthropic(api_key=api_key)
+    return _CLIENT_CACHE[api_key]
+
+
 def _default_alignment_caller(
     system_prompt: str, user_message: str, model: str
 ) -> tuple[str, int, int]:
@@ -169,14 +182,24 @@ def _default_alignment_caller(
         raise NicheAlignmentError(
             "ANTHROPIC_API_KEY is not set. See spec §28.8 for env setup."
         )
-    import anthropic  # local import — keeps the cold path free of the dep
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
+    client = _get_anthropic_client(api_key)
+    # P59A-W4: catch any SDK / httpx exception and re-raise as
+    # NicheAlignmentError so the Settings panel (which only catches
+    # NicheAlignmentError) doesn't dump a full Streamlit traceback —
+    # the traceback would include the request body and leak Daniel's
+    # bio + niche to the UI. Do NOT include str(exc) here in case the
+    # SDK echoes the payload in its repr.
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except Exception as exc:
+        raise NicheAlignmentError(
+            f"alignment call failed: {type(exc).__name__}"
+        ) from exc
     text_parts: list[str] = []
     for block in resp.content:
         if getattr(block, "type", None) == "text":
