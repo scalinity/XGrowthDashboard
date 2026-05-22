@@ -49,14 +49,19 @@ def _get_expiry_hours(conn: sqlite3.Connection) -> int:
 def expire_stale_candidates(conn: sqlite3.Connection) -> list[int]:
     """Transition stale candidates to ``status='expired'``. Returns affected ids."""
     hours = _get_expiry_hours(conn)
-    cutoff_expression = f"datetime('now', '-{int(hours)} hours')"
+    # /review-2 🟡 #5 — datetime() modifier passed as a bind parameter rather
+    # than interpolated into the SQL string. The int() coercion already makes
+    # the f-string path safe, but parameter binding is the project's pattern
+    # elsewhere and surfaces explicit failures (TypeError) if a non-int leaks in.
+    cutoff = f"-{int(hours)} hours"
     # Two-step (SELECT then UPDATE) so the return value is exact.
     stale_rows = conn.execute(
-        f"""
+        """
         SELECT id FROM reply_targets
         WHERE status = 'candidate'
-          AND last_checked_at_utc < {cutoff_expression}
-        """
+          AND last_checked_at_utc < datetime('now', ?)
+        """,
+        (cutoff,),
     ).fetchall()
     stale_ids = [int(r["id"]) for r in stale_rows]
     if not stale_ids:
@@ -85,16 +90,19 @@ def stale_drafted_candidates(
     Each row carries the fields the Queue page needs to render the
     "Did you post this? Record URL or close as skipped" banner.
     """
+    # /review-2 🟡 #5 — bind the datetime modifier instead of f-string interp.
+    cutoff = f"-{int(age_hours)} hours"
     rows = conn.execute(
-        f"""
+        """
         SELECT id, target_post_url, target_author_handle, agent_draft_id,
                discovered_at_utc, last_checked_at_utc
         FROM reply_targets
         WHERE status = 'drafted'
           AND agent_draft_id IS NOT NULL
-          AND last_checked_at_utc < datetime('now', '-{int(age_hours)} hours')
+          AND last_checked_at_utc < datetime('now', ?)
         ORDER BY last_checked_at_utc ASC
-        """
+        """,
+        (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -112,13 +120,15 @@ def vacuum_cleanup_dead_candidates(
     ``posts`` rows via ``posted_reply_post_id``.
     """
     placeholders = ",".join("?" for _ in DEAD_STATUSES)
+    # /review-2 🟡 #5 — datetime modifier as bind parameter.
+    cutoff = f"-{int(age_days)} days"
     cur = conn.execute(
         f"""
         SELECT COUNT(*) AS n FROM reply_targets
         WHERE status IN ({placeholders})
-          AND discovered_at_utc < datetime('now', '-{int(age_days)} days')
+          AND discovered_at_utc < datetime('now', ?)
         """,
-        DEAD_STATUSES,
+        (*DEAD_STATUSES, cutoff),
     )
     n = int(cur.fetchone()["n"] or 0)
     if n == 0:
@@ -128,8 +138,8 @@ def vacuum_cleanup_dead_candidates(
             f"""
             DELETE FROM reply_targets
             WHERE status IN ({placeholders})
-              AND discovered_at_utc < datetime('now', '-{int(age_days)} days')
+              AND discovered_at_utc < datetime('now', ?)
             """,
-            DEAD_STATUSES,
+            (*DEAD_STATUSES, cutoff),
         )
     return n
