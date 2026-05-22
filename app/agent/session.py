@@ -345,13 +345,21 @@ def decide_save_or_revise(
 
     if iwh_failed or lint_failed:
         reasons = []
+        # Three independent gates can each contribute a reason. Independent
+        # `if`s instead of `elif` so an IWH miss AND an untagged-claim
+        # penalty BOTH surface — audit reviewers lost the humility signal
+        # when only the first elif fired.
         if iwh_score is None:
             reasons.append("no <iwh_self_score> tag emitted")
         elif iwh_score.min_score() < minimum:
             reasons.append(
                 f"IWH score below minimum ({iwh_score.to_dict()} vs min={minimum})"
             )
-        elif effective_iwh is not None and effective_iwh.min_score() < minimum:
+        if (
+            untagged > 0
+            and effective_iwh is not None
+            and effective_iwh.min_score() < minimum
+        ):
             reasons.append(
                 f"{untagged} untagged analytical claim(s) dropped humility "
                 f"below minimum"

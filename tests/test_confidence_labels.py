@@ -162,6 +162,35 @@ def test_decision_drops_humility_on_untagged_claims(db_conn: sqlite3.Connection)
     assert "untagged" in decision.rationale.lower()
 
 
+def test_decision_rationale_surfaces_both_iwh_and_untagged_reasons(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P58R-7: when the agent emits IWH < minimum AND has untagged analytical
+    claims, both reasons must appear in the rationale. The prior elif chain
+    swallowed the untagged signal."""
+    # Score 1/1/1 puts the raw IWH below minimum=2 directly. The untagged
+    # claims then drop humility further. Both must surface.
+    msg = _assistant_with_iwh(
+        1,
+        suffix=(
+            "The build lane is the winner. Self lane outperformed last week."
+        ),
+    )
+    decision = session.decide_save_or_revise(
+        db_conn,
+        assistant_text=msg,
+        draft_text=_VALID_DRAFT,
+        current_attempt_index=1,
+    )
+    rationale = decision.rationale.lower()
+    assert "iwh score below minimum" in rationale, (
+        f"raw-IWH reason missing from rationale: {decision.rationale!r}"
+    )
+    assert "untagged" in rationale, (
+        f"untagged-claim reason missing from rationale: {decision.rationale!r}"
+    )
+
+
 def test_decision_carries_dominant_label(db_conn: sqlite3.Connection) -> None:
     msg = _assistant_with_iwh(
         3,
