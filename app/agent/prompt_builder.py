@@ -22,7 +22,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from app.agent import tools, voice
+from app.agent import tools, voice, voice_profile
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 PROMPT_TEMPLATE_PATH: Path = PROJECT_ROOT / "config" / "agent_system_prompt.md"
@@ -31,6 +31,13 @@ SPEC_PATH: Path = PROJECT_ROOT / "spec.md"
 NON_NEGOTIABLE_PLACEHOLDER = "<!-- {{ NON_NEGOTIABLE_RULES_PLACEHOLDER }} -->"
 VOICE_SAMPLES_PLACEHOLDER = "<!-- {{ VOICE_SAMPLES_PLACEHOLDER }} -->"
 TOOL_CATALOG_PLACEHOLDER = "<!-- {{ TOOL_CATALOG_PLACEHOLDER }} -->"
+# Phase 5.8 / §28.12 — generated voice profile splice points.
+VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER = (
+    "<!-- {{ VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER }} -->"
+)
+VOICE_PROFILE_STRUCTURAL_PLACEHOLDER = (
+    "<!-- {{ VOICE_PROFILE_STRUCTURAL_PLACEHOLDER }} -->"
+)
 
 
 def _read_template() -> str:
@@ -136,6 +143,60 @@ _RULES_BEGIN = "<!-- BEGIN spliced rules from spec.md §28.2 -->"
 _RULES_END = "<!-- END spliced rules -->"
 
 
+def render_voice_profile_self_description(
+    profile: voice_profile.VoiceProfile | None,
+) -> str:
+    """Section 1 splice. Empty string when no active profile exists."""
+    if profile is None:
+        return ""
+    desc = profile.self_description()
+    if not desc:
+        return ""
+    return (
+        "Voice self-description (generated from your last "
+        f"{profile.source_post_window_days} days, "
+        f"{profile.source_post_count} posts): "
+        f"{desc}"
+    )
+
+
+def render_voice_profile_structural(
+    profile: voice_profile.VoiceProfile | None,
+) -> str:
+    """Section 5 prefix splice — compact structural read above raw samples.
+
+    Renders cadence + vocabulary_signatures[:5] + stop_phrases[:5]. Empty
+    string when no active profile exists, so the raw voice_samples block
+    stands alone.
+    """
+    if profile is None:
+        return ""
+    cadence = profile.cadence()
+    vocab = profile.vocabulary_signatures()[:5]
+    stops = profile.stop_phrases()[:5]
+    if not cadence and not vocab and not stops:
+        return ""
+    lines: list[str] = ["### Voice profile (generated)"]
+    if cadence:
+        avg_chars = cadence.get("avg_chars")
+        avg_sent = cadence.get("avg_sentences")
+        opl = cadence.get("one_idea_per_line_rate")
+        bits: list[str] = []
+        if avg_chars is not None:
+            bits.append(f"avg_chars={avg_chars}")
+        if avg_sent is not None:
+            bits.append(f"avg_sentences={avg_sent}")
+        if opl is not None:
+            bits.append(f"one_idea_per_line_rate={opl}")
+        if bits:
+            lines.append(f"_Cadence:_ {', '.join(bits)}")
+    if vocab:
+        lines.append("_Vocabulary signatures:_ " + ", ".join(f"`{v}`" for v in vocab))
+    if stops:
+        lines.append("_Stop phrases (avoid):_ " + ", ".join(f"`{s}`" for s in stops))
+    return "\n".join(lines)
+
+
 def build_system_prompt(conn: sqlite3.Connection) -> str:
     """Assemble the runtime system prompt from the template + DB."""
     template = _read_template()
@@ -150,10 +211,55 @@ def build_system_prompt(conn: sqlite3.Connection) -> str:
     voice_block = render_voice_samples_section(samples)
     tool_block = render_tool_catalog()
 
+    active_profile = voice_profile.get_active(conn)
+    profile_self_desc = render_voice_profile_self_description(active_profile)
+    profile_structural = render_voice_profile_structural(active_profile)
+
     out = template.replace(NON_NEGOTIABLE_PLACEHOLDER, rules_block)
     out = out.replace(VOICE_SAMPLES_PLACEHOLDER, voice_block)
     out = out.replace(TOOL_CATALOG_PLACEHOLDER, tool_block)
+    out = out.replace(VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER, profile_self_desc)
+    out = out.replace(VOICE_PROFILE_STRUCTURAL_PLACEHOLDER, profile_structural)
     return out
+
+
+# ---------------------------------------------------------------------------
+# §28.12 drift check — verify voice_profiles table has 0 or 1 active rows,
+# and that build_system_prompt actually replaced both placeholders.
+# Pre-commit / CI calls this. Same pattern as verify_rule_count_matches_spec.
+# ---------------------------------------------------------------------------
+class VoiceProfileInvariantError(RuntimeError):
+    """Raised when voice_profiles violates the at-most-one-active invariant."""
+
+
+def verify_voice_profile_invariants(
+    conn: sqlite3.Connection, prompt_text: str | None = None
+) -> tuple[int, bool]:
+    """Returns (active_row_count, placeholder_replaced_in_prompt).
+
+    Callers assert active_row_count in {0, 1} and (when prompt_text is
+    provided) that no placeholder string survives in the rendered prompt.
+    """
+    active_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM voice_profiles WHERE is_active = 1"
+        ).fetchone()[0]
+    )
+    if active_count not in (0, 1):
+        raise VoiceProfileInvariantError(
+            f"voice_profiles has {active_count} active rows; expected 0 or 1. "
+            "Generation path must atomically deactivate-then-insert."
+        )
+    placeholders_replaced = True
+    if prompt_text is not None:
+        for placeholder in (
+            VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER,
+            VOICE_PROFILE_STRUCTURAL_PLACEHOLDER,
+        ):
+            if placeholder in prompt_text:
+                placeholders_replaced = False
+                break
+    return (active_count, placeholders_replaced)
 
 
 # ---------------------------------------------------------------------------

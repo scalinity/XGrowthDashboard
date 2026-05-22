@@ -29,6 +29,7 @@ import streamlit as st
 from app.agent import cost as _agent_cost
 from app.agent import recovery as _agent_recovery
 from app.agent import voice as _agent_voice
+from app.agent import voice_profile as _voice_profile
 from app.backup import (
     BACKUP_FILENAME_GLOB,
     BackupIntegrityError,
@@ -926,6 +927,116 @@ for r in _voice_rows:
         if st.button("deactivate", key=f"vs_deactivate_{r['id']}"):
             _agent_voice.deactivate_voice_sample(conn, sample_id=int(r["id"]))
             st.rerun()
+
+# ---------------------------------------------------------------------------
+# Voice profile (§28.12) — generated structural read of Daniel's writing,
+# spliced into the system prompt alongside the hand-picked voice samples.
+# ---------------------------------------------------------------------------
+st.markdown("### Voice profile (generated)")
+st.caption(
+    "A small-model synthesis of how you actually write — cadence, hooks, "
+    "vocabulary, stop phrases — built from the last N days of posts. "
+    "Complements voice samples (raw exemplars). Regeneration is manual: "
+    "click when your voice has shifted enough to warrant a refresh "
+    "(§28.12)."
+)
+
+_active_profile = _voice_profile.get_active(conn)
+_default_window = _voice_profile.get_window_days(conn)
+_min_source_posts = _voice_profile.get_min_source_posts(conn)
+
+if _active_profile is None:
+    st.markdown(
+        f"<div class='faint' style='font-size: 0.85rem; color: {PALETTE['bone_dim']}; "
+        f"padding: 0.4rem 0.8rem; border-left: 2px solid {PALETTE['hairline']}; "
+        f"background: {PALETTE['surface']};'>"
+        f"No active voice profile. Generate one from at least "
+        f"{_min_source_posts} posts in your chosen window."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    _generated_at = _active_profile.generated_at_utc
+    _age_days_row = conn.execute(
+        "SELECT CAST(julianday('now') - julianday(?) AS INTEGER)",
+        (_generated_at,),
+    ).fetchone()
+    _age_days = int(_age_days_row[0]) if _age_days_row and _age_days_row[0] is not None else 0
+    st.markdown(
+        f"<div style='border-left: 2px solid {PALETTE['phosphor']}; "
+        f"padding: 0.5rem 0.8rem; margin: 0.3rem 0; background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['bone_faint']}; "
+        f"letter-spacing: 0.06em; text-transform: uppercase;'>"
+        f"PROFILE #{_active_profile.id} · last regenerated {_age_days}d ago · "
+        f"{_active_profile.source_post_count} posts · model={html.escape(_active_profile.model_used)}"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; color: {PALETTE['bone']}; "
+        f"margin-top: 0.4rem;'>"
+        f"{html.escape(_active_profile.self_description())}"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    _cadence = _active_profile.cadence()
+    _vocab = _active_profile.vocabulary_signatures()[:5]
+    _stops = _active_profile.stop_phrases()[:5]
+    if _cadence or _vocab or _stops:
+        with st.expander("structural details", expanded=False):
+            if _cadence:
+                st.markdown(
+                    "<div class='numeric' style='font-size: 0.8rem; color: "
+                    f"{PALETTE['bone_dim']};'>cadence: "
+                    + ", ".join(f"{k}={v}" for k, v in _cadence.items())
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+            if _vocab:
+                st.markdown(
+                    "**Vocabulary signatures:** " + ", ".join(f"`{v}`" for v in _vocab)
+                )
+            if _stops:
+                st.markdown(
+                    "**Stop phrases (avoid):** " + ", ".join(f"`{s}`" for s in _stops)
+                )
+
+with st.form("regenerate_voice_profile", clear_on_submit=False):
+    _window_input = st.number_input(
+        "Source-post window (days)",
+        min_value=7, max_value=365,
+        value=int(_default_window),
+        step=1,
+        help=(
+            "Posts within this many days back feed the synthesis. "
+            "Default lives in `voice_profile_window_days`."
+        ),
+    )
+    _regen_clicked = st.form_submit_button("Regenerate from posts")
+    if _regen_clicked:
+        try:
+            new_profile = _voice_profile.generate(conn, window_days=int(_window_input))
+            st.session_state["voice_profile_regen_result"] = {
+                "status": "success",
+                "profile_id": new_profile.id,
+                "post_count": new_profile.source_post_count,
+            }
+            st.rerun()
+        except _voice_profile.VoiceProfileGenerationError as exc:
+            st.session_state["voice_profile_regen_result"] = {
+                "status": "error",
+                "message": str(exc),
+            }
+            st.rerun()
+
+_result = st.session_state.pop("voice_profile_regen_result", None)
+if _result is not None:
+    if _result["status"] == "success":
+        st.success(
+            f"Profile #{_result['profile_id']} activated · "
+            f"{_result['post_count']} source posts. Prior profile (if any) "
+            f"has been deactivated."
+        )
+    else:
+        st.error(_result["message"])
 
 # Curated agent_target_accounts.
 st.markdown("### Curated reply-target accounts")

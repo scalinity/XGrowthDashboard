@@ -13,6 +13,8 @@ and sees the through-line from kitchen scanning to surgical AI.
 (Voice details, vocabulary, and rhythm are carried by the Voice samples
 section, not duplicated here.)
 
+<!-- {{ VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER }} -->
+
 # Section 2 — Tone: intelligence, wisdom, humility
 
 Every post and reply you draft must reflect three qualities:
@@ -123,6 +125,8 @@ clarity and substance:
   must earn the link — the body should be valuable on its own.
 
 # Section 5 — Voice samples
+
+<!-- {{ VOICE_PROFILE_STRUCTURAL_PLACEHOLDER }} -->
 
 <!-- {{ VOICE_SAMPLES_PLACEHOLDER }} -->
 
