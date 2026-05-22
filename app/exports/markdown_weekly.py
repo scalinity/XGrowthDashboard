@@ -67,9 +67,13 @@ class MarkdownWeeklyExportResult:
     byte_count: int
 
 
-# Strict regex; rejects "2026-W5" and "2026W21" — must be 4-digit year, "-W",
-# zero-padded ISO week. ISO 8601 weeks are 01..53 inclusive.
-_ISO_WEEK_RE: re.Pattern[str] = re.compile(r"^(\d{4})-W(\d{2})$")
+# Strict regex; rejects "2026-W5", "2026W21", "2026-W00", and "2026-W54+".
+# 4-digit year, "-W", zero-padded ISO week in [01, 53]. Range-checking at
+# the regex level (rather than the body of _iso_week_to_dates) keeps the
+# error path uniform: malformed input gets one error message
+# ("Invalid ISO week"), Gregorian-impossible input gets a different one
+# ("does not exist in the Gregorian calendar"). /review-2 W6.
+_ISO_WEEK_RE: re.Pattern[str] = re.compile(r"^(\d{4})-W(0[1-9]|[1-4]\d|5[0-3])$")
 
 
 def _anchor_on_project_root(path: Path) -> Path:
@@ -89,8 +93,6 @@ def _iso_week_to_dates(week_iso: str) -> tuple[date, date]:
             "(e.g. '2026-W21')."
         )
     year, week = int(match.group(1)), int(match.group(2))
-    if not (1 <= week <= 53):
-        raise ValueError(f"ISO week {week!r} out of range (must be 01-53).")
     try:
         monday = date.fromisocalendar(year, week, 1)
         sunday = date.fromisocalendar(year, week, 7)
