@@ -23,6 +23,7 @@ the publish-modal state machine in ``st.session_state['publish_modal']``.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import timezone
 from pathlib import Path
@@ -98,6 +99,20 @@ def _cached_detect_orphans(_db_path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Session-state helpers.
 # ---------------------------------------------------------------------------
+# P58R-27 — strip raw <confidence>...</confidence> tags from rendered
+# chat content. The dominant chip is surfaced separately by
+# claim_confidence_chip() below the draft, so the literal tag text is
+# noise to the human reader.
+_CONFIDENCE_TAG_STRIP_RE = re.compile(
+    r"<confidence>\s*(fact|inference|speculation|mixed)\s*</confidence>",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_confidence_tags(content: str) -> str:
+    return _CONFIDENCE_TAG_STRIP_RE.sub("", content)
+
+
 def _bootstrap_state() -> None:
     st.session_state.setdefault("agent_conversation_id", None)
     st.session_state.setdefault("agent_context_seed", None)
@@ -242,7 +257,7 @@ def _render_history(conn, conversation_id: int) -> None:
             # Skip — surfaced under the preceding assistant turn.
             continue
         with st.chat_message("assistant" if role == "assistant" else "user"):
-            st.markdown(row["content"] or "")
+            st.markdown(_strip_confidence_tags(row["content"] or ""))
             if role == "assistant" and row["tool_calls_json"]:
                 last_assistant_message_id = int(row["id"])
                 tool_calls = json.loads(row["tool_calls_json"])
