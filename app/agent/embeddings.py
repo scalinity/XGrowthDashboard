@@ -1,5 +1,6 @@
 """Embedding provider adapter for the §28.13 repetition guard.
 
+
 **This is an adapter, not a setting.** Switching providers requires:
 
   1. Editing this file (specifically `DEFAULT_PROVIDER`).
@@ -29,6 +30,7 @@ guard) catch and degrade gracefully — the guard returns
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -37,6 +39,8 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
+
+_LOG = logging.getLogger(__name__)
 
 
 class EmbeddingsUnavailable(RuntimeError):
@@ -116,8 +120,11 @@ class VoyageAIAdapter(_ProviderAdapter):
             body_text = ""
             try:
                 body_text = exc.read().decode("utf-8", errors="replace")[:300]
-            except Exception:
-                pass
+            except Exception as read_exc:
+                _LOG.warning(
+                    "Voyage HTTPError body read failed: %s; only status will be available",
+                    read_exc,
+                )
             raise EmbeddingsUnavailable(
                 f"Voyage API HTTP {exc.code}: {exc.reason} · {body_text}"
             ) from exc
