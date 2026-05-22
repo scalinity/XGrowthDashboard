@@ -166,6 +166,7 @@ def test_markdown_weekly_requires_counterfactual(db_conn, tmp_path: Path) -> Non
 
     # Row exists but counterfactual is empty string → raises.
     _insert_weekly_review(db_conn, counterfactual="")
+    db_conn.commit()
     with pytest.raises(CounterfactualMissingError) as exc_info_b:
         export_weekly_report("2026-W21", tmp_path / "b.md", conn=db_conn)
     assert exc_info_b.value.week_start_date == "2026-05-18"
@@ -174,6 +175,7 @@ def test_markdown_weekly_requires_counterfactual(db_conn, tmp_path: Path) -> Non
     db_conn.execute(
         "UPDATE weekly_reviews SET counterfactual_note = '   \n  \t  ' WHERE week_start_date = '2026-05-18'"
     )
+    db_conn.commit()
     with pytest.raises(CounterfactualMissingError):
         export_weekly_report("2026-W21", tmp_path / "c.md", conn=db_conn)
 
@@ -182,6 +184,7 @@ def test_markdown_weekly_requires_counterfactual(db_conn, tmp_path: Path) -> Non
         "UPDATE weekly_reviews SET counterfactual_note = ? WHERE week_start_date = '2026-05-18'",
         ("Growth might have come from cohort drift, not my posts.",),
     )
+    db_conn.commit()
     result = export_weekly_report("2026-W21", tmp_path / "d.md", conn=db_conn)
     assert result.path.exists()
     assert result.path.read_text(encoding="utf-8").strip().startswith("# X Growth Weekly Review")
