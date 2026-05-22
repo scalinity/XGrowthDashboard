@@ -337,3 +337,72 @@ def test_window_accepts_date_objects(db_conn: sqlite3.Connection) -> None:
     assert cells == []
 
 
+# ---------------------------------------------------------------------------
+# P511R-1 regression: space-separated timestamps must bucket + render.
+# ---------------------------------------------------------------------------
+# Production data comes via SQLite's datetime('now') (space separator) and
+# publish.py::_utcnow_iso() (also space). The original calendar split on
+# "T" only, which silently bucketed every shipped post as PM AND set
+# cell.date to the entire string (no T → no split happened) so the page's
+# grid lookup never matched day.isoformat(). Net effect: empty calendar
+# in prod even though tests passed (test fixtures used ISO T format).
+# These regression tests pin the tolerant behavior.
+def test_p511r1_space_separated_timestamp_buckets_correctly(
+    db_conn: sqlite3.Connection,
+) -> None:
+    _insert_post(
+        db_conn,
+        created_date="2026-05-15",
+        published_to_x_at="2026-05-15 09:00:00",  # SQLite format — space, not T
+    )
+    cells = _cal.get_calendar_window(
+        db_conn, start_date="2026-05-15", end_date="2026-05-15"
+    )
+    assert len(cells) == 1
+    # AM cutoff defaults to 12; 09:00 < 12 → AM.
+    assert cells[0].slot == "am"
+    # Date is the YYYY-MM-DD prefix only, NOT the entire string.
+    assert cells[0].date == "2026-05-15"
+
+
+def test_p511r1_space_separated_pm_classification(
+    db_conn: sqlite3.Connection,
+) -> None:
+    _insert_post(
+        db_conn,
+        created_date="2026-05-15",
+        published_to_x_at="2026-05-15 15:30:00",
+    )
+    cells = _cal.get_calendar_window(
+        db_conn, start_date="2026-05-15", end_date="2026-05-15"
+    )
+    assert cells[0].slot == "pm"
+    assert cells[0].date == "2026-05-15"
+
+
+def test_p511r1_mixed_format_timestamps_in_same_query(
+    db_conn: sqlite3.Connection,
+) -> None:
+    # Production has BOTH formats coexisting: posts.published_to_x_at uses
+    # space (publish.py); other DEFAULT datetime('now') columns also use
+    # space; Python-isoformatted timestamps used in tests use T. The
+    # helpers must tolerate both within a single query.
+    _insert_post(
+        db_conn,
+        created_date="2026-05-15",
+        published_to_x_at="2026-05-15 09:00:00",  # space
+    )
+    _insert_post(
+        db_conn,
+        created_date="2026-05-15",
+        published_to_x_at="2026-05-15T15:00:00",  # T
+    )
+    cells = _cal.get_calendar_window(
+        db_conn, start_date="2026-05-15", end_date="2026-05-15"
+    )
+    slots = sorted(c.slot for c in cells)
+    dates = {c.date for c in cells}
+    assert slots == ["am", "pm"]
+    assert dates == {"2026-05-15"}  # never the raw timestamp string
+
+

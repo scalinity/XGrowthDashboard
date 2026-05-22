@@ -68,17 +68,38 @@ def _am_cutoff_hour(conn: sqlite3.Connection) -> int:
 
 
 def _classify_slot(timestamp: str | None, cutoff_hour: int) -> Slot:
-    """Map an ISO-8601 datetime → 'am' / 'pm' per ``cutoff_hour``."""
+    """Map an ISO-8601 datetime → 'am' / 'pm' per ``cutoff_hour``.
+
+    Tolerates BOTH formats the project actually writes:
+    - Python ``datetime.isoformat()`` → ``"2026-05-15T10:30:00"`` (T separator).
+    - SQLite ``datetime('now')`` and ``publish.py::_utcnow_iso()`` →
+      ``"2026-05-15 10:30:00"`` (space separator).
+    Splitting only on "T" silently bucketed every space-separated row as PM
+    (the IndexError fallback) in production — P511R-1.
+    """
     if timestamp is None:
         return "pm"
-    # Tolerant parse — accept "2026-05-15T10:30:00", with or without 'Z'.
+    sep = "T" if "T" in timestamp else " "
     try:
-        # Take just the hour portion.
-        hour_part = timestamp.split("T", 1)[1]
+        hour_part = timestamp.split(sep, 1)[1]
         hour = int(hour_part.split(":", 1)[0])
     except (IndexError, ValueError):
         return "pm"
     return "am" if hour < cutoff_hour else "pm"
+
+
+def _date_only(timestamp: str | None) -> str:
+    """Return the ``YYYY-MM-DD`` prefix of either ISO format.
+
+    P511R-1: the first 10 characters of both ``"2026-05-15T10:30:00"`` and
+    ``"2026-05-15 10:30:00"`` are the date; splitting on "T" left the whole
+    string on space-separated rows, so the cell's ``date`` field never
+    matched ``day.isoformat()`` in the page's grid lookup. Result: silently
+    empty calendar for every shipped post in production.
+    """
+    if not timestamp:
+        return ""
+    return str(timestamp)[:10]
 
 
 def _short(text: str | None, *, n: int = 60) -> str:
@@ -147,7 +168,7 @@ def get_calendar_window(
             CalendarCell(
                 provenance="posted",
                 source_id=int(r["id"]),
-                date=str(r["published_to_x_at"]).split("T", 1)[0],
+                date=_date_only(r["published_to_x_at"]),
                 slot=_classify_slot(r["published_to_x_at"], cutoff),
                 pillar=r["metric_pillar"],
                 content_type=r["content_type"],
@@ -190,7 +211,7 @@ def get_calendar_window(
             CalendarCell(
                 provenance="drafted_for_future",
                 source_id=int(r["id"]),
-                date=str(r["created_in_app_at"]).split("T", 1)[0],
+                date=_date_only(r["created_in_app_at"]),
                 slot=_classify_slot(r["created_in_app_at"], cutoff),
                 pillar=None,
                 content_type=r["content_type"],
@@ -224,7 +245,7 @@ def get_calendar_window(
             CalendarCell(
                 provenance="agent_drafted",
                 source_id=int(r["id"]),
-                date=str(r["created_at"]).split("T", 1)[0],
+                date=_date_only(r["created_at"]),
                 slot=_classify_slot(r["created_at"], cutoff),
                 pillar=r["pillar"],
                 content_type=r["content_type"],
