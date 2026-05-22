@@ -18,6 +18,7 @@ silent prompt drift.
 
 from __future__ import annotations
 
+import functools
 import re
 import sqlite3
 from pathlib import Path
@@ -44,6 +45,14 @@ NICHE_DEFINITION_PLACEHOLDER = "<!-- {{ NICHE_DEFINITION_PLACEHOLDER }} -->"
 PERSONALITY_LORE_PLACEHOLDER = "<!-- {{ PERSONALITY_LORE_PLACEHOLDER }} -->"
 
 
+# P59A-W9: cache the template + spec parse at process scope. Streamlit
+# reruns the entire script on every user interaction; without caching
+# every rerun that crossed build_system_prompt re-read the template,
+# regex-parsed spec.md (~1000 lines, DOTALL), and re-queried 5 tables.
+# Cache invalidation is process restart — exactly what `streamlit run`
+# does on file save. Settings / voice / lore queries stay uncached
+# because their values must be current.
+@functools.lru_cache(maxsize=1)
 def _read_template() -> str:
     return PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
 
@@ -56,6 +65,45 @@ class SpecRuleExtractionError(RuntimeError):
     placeholder string in place of Section 3, and the agent would lose
     the non-negotiable rules silently.
     """
+
+
+@functools.lru_cache(maxsize=4)
+def _extract_rules_from_spec_cached(spec_path_str: str) -> tuple[str, ...]:
+    """Implementation backing extract_rules_from_spec — cached by path.
+
+    P59A-W9: separate cacheable inner function so the public surface
+    can stay typed as `list[str]` while the cache lives on the tuple
+    (lru_cache requires hashable args + return values).
+    """
+    # Inline the original logic; can't recurse via the public wrapper.
+    text = Path(spec_path_str).read_text(encoding="utf-8")
+    section_match = re.search(
+        r"###\s+28\.2\s+Non-negotiable rules.*?\n(.*?)(?:\n###\s|\n##\s|\Z)",
+        text,
+        flags=re.DOTALL,
+    )
+    if not section_match:
+        raise SpecRuleExtractionError(
+            f"Could not locate the §28.2 'Non-negotiable rules' section in "
+            f"{spec_path_str}. Has the spec been renumbered or moved? "
+            f"Update extract_rules_from_spec's regex anchor."
+        )
+    section = section_match.group(1)
+    rule_re = re.compile(
+        r"^(\d+)\.\s+(\*\*.+?)(?=^\d+\.\s+\*\*|\Z)",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    rules: list[str] = []
+    for m in rule_re.finditer(section):
+        num = m.group(1)
+        body = m.group(2).strip()
+        rules.append(f"{num}. {body}")
+    if not rules:
+        raise SpecRuleExtractionError(
+            "Found §28.2 but extracted zero rules. The 'N. **...**' rule "
+            "shape regex no longer matches; check rule_re or spec formatting."
+        )
+    return tuple(rules)
 
 
 def extract_rules_from_spec(spec_path: Path | None = None) -> list[str]:
@@ -71,36 +119,12 @@ def extract_rules_from_spec(spec_path: Path | None = None) -> list[str]:
     the prior silent ``return []`` made drift undetectable because
     ``verify_rule_count_matches_spec`` would report ``(0, 0)`` and
     declare itself matched.
+
+    P59A-W9: results are cached on the string spec path; cache
+    invalidates only on process restart.
     """
-    text = (spec_path or SPEC_PATH).read_text(encoding="utf-8")
-    section_match = re.search(
-        r"###\s+28\.2\s+Non-negotiable rules.*?\n(.*?)(?:\n###\s|\n##\s|\Z)",
-        text,
-        flags=re.DOTALL,
-    )
-    if not section_match:
-        raise SpecRuleExtractionError(
-            f"Could not locate the §28.2 'Non-negotiable rules' section in "
-            f"{spec_path or SPEC_PATH}. Has the spec been renumbered or "
-            f"moved? Update extract_rules_from_spec's regex anchor."
-        )
-    section = section_match.group(1)
-    # Match "1. **...**" through end-of-paragraph (blank line OR next number).
-    rule_re = re.compile(
-        r"^(\d+)\.\s+(\*\*.+?)(?=^\d+\.\s+\*\*|\Z)",
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    rules: list[str] = []
-    for m in rule_re.finditer(section):
-        num = m.group(1)
-        body = m.group(2).strip()
-        rules.append(f"{num}. {body}")
-    if not rules:
-        raise SpecRuleExtractionError(
-            "Found §28.2 but extracted zero rules. The 'N. **...**' rule "
-            "shape regex no longer matches; check rule_re or spec formatting."
-        )
-    return rules
+    path = spec_path or SPEC_PATH
+    return list(_extract_rules_from_spec_cached(str(path)))
 
 
 def render_voice_samples_section(samples: list[voice.VoiceSample]) -> str:
