@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from typing import Callable
 
 import pytest
@@ -277,8 +276,10 @@ def test_save_stamps_prior_audit_as_superseded(
         pinned_post_id=None,
         pinned_post_text="pinned v1",
         snapshot=snap_1,
+        audited_at_utc="2026-05-01T10:00:00",
     )
-    time.sleep(1.05)
+    # P510R-15: explicit timestamps instead of time.sleep(1.05) — keeps
+    # the suite fast and removes wall-clock fragility.
     analysis_2, snap_2 = _pa.audit(
         seeded_posts,
         bio_text="bio v2",
@@ -292,6 +293,7 @@ def test_save_stamps_prior_audit_as_superseded(
         pinned_post_id=None,
         pinned_post_text="pinned v2",
         snapshot=snap_2,
+        audited_at_utc="2026-05-02T10:00:00",
     )
 
     superseded_id = seeded_posts.execute(
@@ -325,7 +327,6 @@ def test_save_self_heals_chain_gap(seeded_posts: sqlite3.Connection) -> None:
     gap_id = seeded_posts.execute(
         "SELECT id FROM profile_audits ORDER BY id DESC LIMIT 1"
     ).fetchone()[0]
-    time.sleep(1.05)
 
     # Normal save — should self-heal by stamping the gap row.
     analysis, snapshot = _pa.audit(
@@ -341,6 +342,7 @@ def test_save_self_heals_chain_gap(seeded_posts: sqlite3.Connection) -> None:
         pinned_post_id=None,
         pinned_post_text="pinned",
         snapshot=snapshot,
+        audited_at_utc="2026-06-01T10:00:00",
     )
 
     healed = seeded_posts.execute(
@@ -357,6 +359,8 @@ def test_save_self_heals_chain_gap(seeded_posts: sqlite3.Connection) -> None:
 
 
 def test_list_audits_newest_first(seeded_posts: sqlite3.Connection) -> None:
+    # P510R-15: explicit timestamps instead of time.sleep loops —
+    # ordering test no longer depends on real wall-clock seconds.
     for i in range(3):
         analysis, snapshot = _pa.audit(
             seeded_posts,
@@ -371,8 +375,8 @@ def test_list_audits_newest_first(seeded_posts: sqlite3.Connection) -> None:
             pinned_post_id=None,
             pinned_post_text=f"pinned {i}",
             snapshot=snapshot,
+            audited_at_utc=f"2026-05-{i + 1:02d}T10:00:00",
         )
-        time.sleep(1.05)
     audits = _pa.list_audits(seeded_posts)
     assert len(audits) >= 3
     # Newest first by audited_at_utc.

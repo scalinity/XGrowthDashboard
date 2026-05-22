@@ -426,6 +426,7 @@ def save(
     target_url: str | None = None,
     target_display_name: str | None = None,
     session_id: str | None = None,
+    created_at_utc: str | None = None,
 ) -> int:
     """Persist an AccountResearchAnalysis to account_research_reports.
 
@@ -434,28 +435,58 @@ def save(
     The unique constraint is (target_handle, created_at_utc), not
     (target_handle), so calling save() twice in the same millisecond
     is the only path to a collision.
+
+    P510R-15: ``created_at_utc`` lets tests drive deterministic
+    timestamps without ``time.sleep`` between writes (datetime('now')
+    is second-resolution; the default branch keeps production behavior
+    unchanged).
     """
-    cur = conn.execute(
-        """
-        INSERT INTO account_research_reports
-          (target_handle, target_url, target_display_name,
-           target_bio_snapshot, target_recent_posts_text,
-           analysis_json, model_used, tokens_used, session_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-        """,
-        (
-            analysis.target_handle,
-            target_url,
-            target_display_name,
-            target_bio_snapshot,
-            target_recent_posts_text,
-            analysis.to_json(),
-            analysis.model_used,
-            int(analysis.tokens_used),
-            session_id,
-        ),
-    )
+    if created_at_utc is not None:
+        cur = conn.execute(
+            """
+            INSERT INTO account_research_reports
+              (target_handle, target_url, target_display_name,
+               target_bio_snapshot, target_recent_posts_text,
+               created_at_utc, analysis_json, model_used, tokens_used,
+               session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                analysis.target_handle,
+                target_url,
+                target_display_name,
+                target_bio_snapshot,
+                target_recent_posts_text,
+                created_at_utc,
+                analysis.to_json(),
+                analysis.model_used,
+                int(analysis.tokens_used),
+                session_id,
+            ),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO account_research_reports
+              (target_handle, target_url, target_display_name,
+               target_bio_snapshot, target_recent_posts_text,
+               analysis_json, model_used, tokens_used, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                analysis.target_handle,
+                target_url,
+                target_display_name,
+                target_bio_snapshot,
+                target_recent_posts_text,
+                analysis.to_json(),
+                analysis.model_used,
+                int(analysis.tokens_used),
+                session_id,
+            ),
+        )
     return int(cur.fetchone()[0])
 
 

@@ -530,6 +530,7 @@ def save(
     pinned_post_id: int | None,
     pinned_post_text: str | None,
     snapshot: dict[str, Any],
+    audited_at_utc: str | None = None,
 ) -> int:
     """Persist a Profile Audit row + stamp the prior latest row as superseded.
 
@@ -543,31 +544,62 @@ def save(
     audit committed but the prior row's back-reference unset — the
     chain would gap and never self-heal.
     """
+    # P510R-15: optional ``audited_at_utc`` lets tests drive
+    # deterministic timestamps without relying on second-resolution
+    # wall-clock ticks (the previous shape required ``time.sleep(1.05)``
+    # between writes to keep audit ordering visible).
     with transaction(conn):
-        cur = conn.execute(
-            """
-            INSERT INTO profile_audits
-              (bio_snapshot, pinned_post_id, pinned_post_text,
-               recent_posts_window_days, recent_post_ids_json,
-               active_voice_profile_id, niche_problem_snapshot,
-               niche_person_snapshot, audit_json, model_used, tokens_used)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-            """,
-            (
-                bio_snapshot,
-                pinned_post_id,
-                pinned_post_text,
-                int(snapshot["recent_posts_window_days"]),
-                json.dumps(snapshot["recent_post_ids"]),
-                snapshot["active_voice_profile_id"],
-                snapshot["niche_problem_snapshot"],
-                snapshot["niche_person_snapshot"],
-                analysis.to_json(),
-                analysis.model_used,
-                int(analysis.tokens_used),
-            ),
-        )
+        if audited_at_utc is not None:
+            cur = conn.execute(
+                """
+                INSERT INTO profile_audits
+                  (audited_at_utc, bio_snapshot, pinned_post_id, pinned_post_text,
+                   recent_posts_window_days, recent_post_ids_json,
+                   active_voice_profile_id, niche_problem_snapshot,
+                   niche_person_snapshot, audit_json, model_used, tokens_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    audited_at_utc,
+                    bio_snapshot,
+                    pinned_post_id,
+                    pinned_post_text,
+                    int(snapshot["recent_posts_window_days"]),
+                    json.dumps(snapshot["recent_post_ids"]),
+                    snapshot["active_voice_profile_id"],
+                    snapshot["niche_problem_snapshot"],
+                    snapshot["niche_person_snapshot"],
+                    analysis.to_json(),
+                    analysis.model_used,
+                    int(analysis.tokens_used),
+                ),
+            )
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO profile_audits
+                  (bio_snapshot, pinned_post_id, pinned_post_text,
+                   recent_posts_window_days, recent_post_ids_json,
+                   active_voice_profile_id, niche_problem_snapshot,
+                   niche_person_snapshot, audit_json, model_used, tokens_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    bio_snapshot,
+                    pinned_post_id,
+                    pinned_post_text,
+                    int(snapshot["recent_posts_window_days"]),
+                    json.dumps(snapshot["recent_post_ids"]),
+                    snapshot["active_voice_profile_id"],
+                    snapshot["niche_problem_snapshot"],
+                    snapshot["niche_person_snapshot"],
+                    analysis.to_json(),
+                    analysis.model_used,
+                    int(analysis.tokens_used),
+                ),
+            )
         new_id = int(cur.fetchone()[0])
 
         # Stamp ALL prior unsuperseded audits with the new row's id.
