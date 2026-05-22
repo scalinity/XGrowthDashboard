@@ -702,6 +702,11 @@ def main(argv: list[str] | None = None) -> int:
     except CounterfactualMissingError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    except SpeculationLabelBlocked as exc:
+        # Same operator UX as CounterfactualMissingError: stderr + exit 2
+        # so the new §28.14 policy gate matches the existing one.
+        print(str(exc), file=sys.stderr)
+        return 2
     except ValueError as exc:
         print(f"Invalid week argument: {exc}", file=sys.stderr)
         return 2
