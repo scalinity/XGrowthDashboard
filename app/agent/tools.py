@@ -26,6 +26,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from app.db import transaction
+
 
 @dataclass(frozen=True)
 class ToolDef:
@@ -386,56 +388,60 @@ def _save_draft_post(
     conversation_id: int | None = None,
     agent_reasoning: str | None = None,
 ) -> dict[str, Any]:
-    draft_cur = conn.execute(
-        """
-        INSERT INTO agent_drafts
-            (session_id, conversation_id, draft_kind, text, pillar,
-             audience, cta, agent_reasoning, voice_self_score,
-             iwh_attempt_index, status)
-        VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, 'proposed')
-        """,
-        (
-            session_id,
-            conversation_id,
-            text,
-            pillar,
-            audience,
-            cta,
-            agent_reasoning,
-            json.dumps(voice_self_score) if voice_self_score else None,
-            int(iwh_attempt_index),
-        ),
-    )
-    draft_id = int(draft_cur.lastrowid)
+    with transaction(conn):
+        draft_cur = conn.execute(
+            """
+            INSERT INTO agent_drafts
+                (session_id, conversation_id, draft_kind, text, pillar,
+                 audience, cta, agent_reasoning, voice_self_score,
+                 iwh_attempt_index, status)
+            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, 'proposed')
+            """,
+            (
+                session_id,
+                conversation_id,
+                text,
+                pillar,
+                audience,
+                cta,
+                agent_reasoning,
+                json.dumps(voice_self_score) if voice_self_score else None,
+                int(iwh_attempt_index),
+            ),
+        )
+        draft_id = int(draft_cur.lastrowid)
 
-    post_cur = conn.execute(
-        """
-        INSERT INTO posts
-            (created_date, text, type, posted_via,
-             manual_confirmation_status, agent_draft_id)
-        VALUES (date('now'), ?, 'standalone', 'agent_assisted', 'draft', ?)
-        """,
-        (text, draft_id),
-    )
-    post_id = int(post_cur.lastrowid)
+        post_cur = conn.execute(
+            """
+            INSERT INTO posts
+                (created_at_utc, created_date, text, type, posted_via,
+                 manual_confirmation_status, agent_draft_id)
+            VALUES (datetime('now'), date('now'), ?, 'standalone',
+                    'agent_assisted', 'draft', ?)
+            """,
+            (text, draft_id),
+        )
+        post_id = int(post_cur.lastrowid)
 
-    conn.execute(
-        "UPDATE agent_drafts SET final_post_id = ? WHERE id = ?",
-        (post_id, draft_id),
-    )
+        conn.execute(
+            "UPDATE agent_drafts SET final_post_id = ? WHERE id = ?",
+            (post_id, draft_id),
+        )
 
-    # Phase 1 post_classifications schema does not yet carry hypothesis on
-    # post creation; the existing classify-untagged flow handles that.
-    # We DO write the bare classification row so the post is not in the
-    # "needs classification" queue.
-    conn.execute(
-        """
-        INSERT INTO post_classifications
-            (post_id, pillar, audience, cta, hypothesis)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (post_id, pillar, audience, cta, hypothesis),
-    )
+        # W12 lands the UNIQUE(post_id) index that lets a future change
+        # switch this to INSERT ON CONFLICT. Until then we just INSERT —
+        # since this whole block is inside `transaction(conn)`, a retry
+        # would be caught by the transaction failure path, not produce a
+        # duplicate. Duplicates can only arise across SEPARATE successful
+        # save_draft_post calls for the same post (which W12 prevents).
+        conn.execute(
+            """
+            INSERT INTO post_classifications
+                (post_id, pillar, audience, cta, hypothesis)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (post_id, pillar, audience, cta, hypothesis),
+        )
 
     return {
         "draft_id": draft_id,
@@ -462,43 +468,45 @@ def _save_draft_reply(
     conversation_id: int | None = None,
     agent_reasoning: str | None = None,
 ) -> dict[str, Any]:
-    draft_cur = conn.execute(
-        """
-        INSERT INTO agent_drafts
-            (session_id, conversation_id, draft_kind, text, pillar,
-             target_post_url, target_post_text, agent_reasoning,
-             voice_self_score, iwh_attempt_index, status)
-        VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed')
-        """,
-        (
-            session_id,
-            conversation_id,
-            text,
-            pillar,
-            target_post_url,
-            target_post_text,
-            agent_reasoning,
-            json.dumps(voice_self_score) if voice_self_score else None,
-            int(iwh_attempt_index),
-        ),
-    )
-    draft_id = int(draft_cur.lastrowid)
+    with transaction(conn):
+        draft_cur = conn.execute(
+            """
+            INSERT INTO agent_drafts
+                (session_id, conversation_id, draft_kind, text, pillar,
+                 target_post_url, target_post_text, agent_reasoning,
+                 voice_self_score, iwh_attempt_index, status)
+            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed')
+            """,
+            (
+                session_id,
+                conversation_id,
+                text,
+                pillar,
+                target_post_url,
+                target_post_text,
+                agent_reasoning,
+                json.dumps(voice_self_score) if voice_self_score else None,
+                int(iwh_attempt_index),
+            ),
+        )
+        draft_id = int(draft_cur.lastrowid)
 
-    post_cur = conn.execute(
-        """
-        INSERT INTO posts
-            (created_date, text, type, posted_via,
-             manual_confirmation_status, agent_draft_id)
-        VALUES (date('now'), ?, 'reply', 'agent_assisted', 'draft', ?)
-        """,
-        (text, draft_id),
-    )
-    post_id = int(post_cur.lastrowid)
+        post_cur = conn.execute(
+            """
+            INSERT INTO posts
+                (created_at_utc, created_date, text, type, posted_via,
+                 manual_confirmation_status, agent_draft_id)
+            VALUES (datetime('now'), date('now'), ?, 'reply',
+                    'agent_assisted', 'draft', ?)
+            """,
+            (text, draft_id),
+        )
+        post_id = int(post_cur.lastrowid)
 
-    conn.execute(
-        "UPDATE agent_drafts SET final_post_id = ? WHERE id = ?",
-        (post_id, draft_id),
-    )
+        conn.execute(
+            "UPDATE agent_drafts SET final_post_id = ? WHERE id = ?",
+            (post_id, draft_id),
+        )
 
     return {
         "draft_id": draft_id,
@@ -537,36 +545,37 @@ def _revise_draft(
         return {"error": f"draft {draft_post_id} not found"}
 
     new_index = int(src["iwh_attempt_index"]) + 1
-    rev_cur = conn.execute(
-        """
-        INSERT INTO agent_drafts
-            (session_id, conversation_id, draft_kind, text, pillar,
-             audience, cta, target_post_url, target_post_text,
-             voice_self_score, iwh_attempt_index, status,
-             revision_of, user_feedback)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
-        """,
-        (
-            src["session_id"],
-            src["conversation_id"],
-            src["draft_kind"],
-            new_text,
-            src["pillar"],
-            src["audience"],
-            src["cta"],
-            src["target_post_url"],
-            src["target_post_text"],
-            json.dumps(voice_self_score) if voice_self_score else None,
-            new_index,
-            int(src["id"]),
-            feedback,
-        ),
-    )
-    new_id = int(rev_cur.lastrowid)
-    conn.execute(
-        "UPDATE agent_drafts SET status = 'superseded' WHERE id = ?",
-        (int(src["id"]),),
-    )
+    with transaction(conn):
+        rev_cur = conn.execute(
+            """
+            INSERT INTO agent_drafts
+                (session_id, conversation_id, draft_kind, text, pillar,
+                 audience, cta, target_post_url, target_post_text,
+                 voice_self_score, iwh_attempt_index, status,
+                 revision_of, user_feedback)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+            """,
+            (
+                src["session_id"],
+                src["conversation_id"],
+                src["draft_kind"],
+                new_text,
+                src["pillar"],
+                src["audience"],
+                src["cta"],
+                src["target_post_url"],
+                src["target_post_text"],
+                json.dumps(voice_self_score) if voice_self_score else None,
+                new_index,
+                int(src["id"]),
+                feedback,
+            ),
+        )
+        new_id = int(rev_cur.lastrowid)
+        conn.execute(
+            "UPDATE agent_drafts SET status = 'superseded' WHERE id = ?",
+            (int(src["id"]),),
+        )
     return {
         "new_draft_id": new_id,
         "iwh_attempt_index": new_index,

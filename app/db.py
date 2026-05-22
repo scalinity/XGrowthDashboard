@@ -16,8 +16,9 @@ compatibility with later phases; Phase 1 itself does not exercise it.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH: Path = PROJECT_ROOT / "data" / "dashboard.db"
@@ -77,6 +78,36 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.create_aggregate("percentile", 2, _PercentileAggregate)
     return conn
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Atomic transaction context manager — BEGIN IMMEDIATE / COMMIT / ROLLBACK.
+
+    The project's ``connect()`` opens connections with ``isolation_level=None``
+    (autocommit mode), so every individual statement commits on its own. Any
+    multi-statement write that must be atomic (publish flow per §28.10, the
+    save_draft_post / save_draft_reply / revise_draft chain on the agent
+    side, any future schema-touching helper) MUST wrap its statements in
+    ``with transaction(conn): ...``.
+
+    On exception, the context manager issues ``ROLLBACK`` and re-raises so
+    the caller can compose its own recovery (e.g. validation-failure path
+    in publish.py opens a second, narrower transaction for the audit row
+    + attempt-counter bump).
+
+    ``BEGIN IMMEDIATE`` acquires the SQLite write lock at transaction start
+    rather than at the first write, which matches the semantics callers
+    expect — concurrent readers won't see partial state through the WAL.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def _ensure_schema_migrations_table(conn: sqlite3.Connection) -> None:
