@@ -29,9 +29,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
+from app.agent import audit_log as _audit_log
 from app.agent import calendar as _calendar
 from app.agent import campaigns as _campaigns
 from app.components.theme import apply_theme, hairline, kicker
+from app.db import transaction
 from app.forms import get_setting
 from app.pages import open_connection
 
@@ -127,19 +129,40 @@ def _schedule_slot_cb() -> None:
             # Ad-hoc path: insert a posts row with draft confirmation
             # status and created_in_app_at = noon-of-day so the AM/PM
             # bucketing reads as PM by default (Daniel can edit later).
-            conn.execute(
-                """
-                INSERT INTO posts
-                  (created_date, text, type, posted_via,
-                   manual_confirmation_status, created_in_app_at)
-                VALUES (?, ?, 'standalone', 'manual', 'draft', ?)
-                """,
-                (
-                    planned_date.isoformat(),
-                    text,
-                    f"{planned_date.isoformat()}T12:00:00",
-                ),
-            )
+            #
+            # P511R-3: §28.30 contract requires every state-changing
+            # path to write through audit_logs. The campaign-scoped
+            # branch above goes via _campaigns.add_item which audit-
+            # logs internally; this ad-hoc branch was bypassing the
+            # audit floor. INSERT + audit are now wrapped in a single
+            # transaction so they commit atomically.
+            with transaction(conn):
+                cur = conn.execute(
+                    """
+                    INSERT INTO posts
+                      (created_date, text, type, posted_via,
+                       manual_confirmation_status, created_in_app_at)
+                    VALUES (?, ?, 'standalone', 'manual', 'draft', ?)
+                    RETURNING id
+                    """,
+                    (
+                        planned_date.isoformat(),
+                        text,
+                        f"{planned_date.isoformat()}T12:00:00",
+                    ),
+                )
+                new_post_id = int(cur.fetchone()[0])
+                _audit_log.log(
+                    conn,
+                    event_category="data",
+                    event_type="post_drafted_via_calendar_slot",
+                    target_type="post",
+                    target_id=new_post_id,
+                    details={
+                        "planned_date": planned_date.isoformat(),
+                        "via": "calendar_ad_hoc",
+                    },
+                )
     if "schedule_slot_text" in st.session_state:
         st.session_state["schedule_slot_text"] = ""
     st.toast("slot scheduled.")
