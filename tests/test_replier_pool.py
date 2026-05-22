@@ -6,7 +6,7 @@ Covers:
      blank-line-separated multi-line excerpts.
   2. thread_context_fit_score — 0..3 ladder from niche_person overlap.
   3. score_replier — composite recommended_action via the §29.3
-     resolver; rationale_components populated.
+     resolver.
   4. score_replier_pool — refuses when niche is undefined; happy path
      lands rows with source='replier_under_thread'; idempotent on
      (thread_url, handle) — re-pasting refreshes scores in place.
@@ -92,7 +92,7 @@ def test_fit_handles_empty_inputs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# score_replier — composite + rationale_components.
+# score_replier — composite recommended_action via the §29.3 resolver.
 # ---------------------------------------------------------------------------
 def test_score_replier_with_strong_fit_recommends_reply_now() -> None:
     excerpt = replier_pool.ReplierExcerpt(
@@ -107,7 +107,7 @@ def test_score_replier_with_strong_fit_recommends_reply_now() -> None:
     assert cand.reply_opportunity_score == 3
     # All four MVP dims >= 2 → reply_now per §29.3.
     assert cand.recommended_action_label == "reply_now"
-    assert "thread_context_fit" in cand.rationale_components
+    assert "thread_context_fit" in cand.score_rationale
 
 
 def test_score_replier_with_zero_fit_skips() -> None:

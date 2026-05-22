@@ -24,7 +24,7 @@ import hashlib
 import logging
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from app.db import transaction
 from app.agent import niche as _niche
@@ -217,7 +217,6 @@ class ReplyTargetCandidate:
     thread_context_fit_score: int
     recommended_action_label: str
     score_rationale: str
-    rationale_components: dict[str, str] = field(default_factory=dict)
 
 
 def _candidate_relevance(thread_fit: int) -> int:
@@ -266,31 +265,16 @@ def score_replier(
     recommended_action_label is the §29.3 resolver output (the same
     ladder the rest of §29 uses).
     """
+    # P59A-S11: rationale_components was a per-candidate dict that was
+    # built but never persisted (no reply_targets column for it). The
+    # composite score_rationale string is what actually lands in the
+    # DB and surfaces in the UI; the dict was dead weight.
     thread_fit = thread_context_fit_score(excerpt.text, niche_person)
     rel = _candidate_relevance(thread_fit)
     eng = _default_engagement_surface()
     sat = _default_saturation()
     opp = _default_reply_opportunity(thread_fit)
     label = resolve_recommended_action(rel, eng, sat, opp)
-    components = {
-        "relevance": (
-            f"derived from thread-context fit ({thread_fit}/3)"
-        ),
-        "engagement_surface": (
-            "estimated mid-tier (2/3) — paste flow lacks author metrics; "
-            "V1.1+ programmatic scan replaces this"
-        ),
-        "saturation": (
-            "estimated mid-tier (2/3) — paste flow lacks thread reply_count"
-        ),
-        "reply_opportunity": (
-            f"derived from thread-context fit ({thread_fit}/3)"
-        ),
-        "thread_context_fit": (
-            "non-stopword token overlap between excerpt and "
-            f"niche_person='{niche_person}'"
-        ),
-    }
     return ReplyTargetCandidate(
         handle=excerpt.handle,
         excerpt=excerpt.text,
@@ -306,7 +290,6 @@ def score_replier(
             "Engagement / saturation are placeholder estimates per "
             "§28.20 V1.1+ deferral."
         ),
-        rationale_components=components,
     )
 
 
