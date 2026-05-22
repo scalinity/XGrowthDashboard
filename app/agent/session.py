@@ -36,9 +36,12 @@ DEFAULT_IWH_SELF_SCORE_MINIMUM: int = 2
 DEFAULT_IWH_MAX_REVISION_ATTEMPTS: int = 3
 
 # Phase 5.8 / §28.14 — confidence label parsing.
+# P58R-19 — bake the four labels into the regex so the parser fails
+# closed at the regex layer; the post-allowlist check in
+# extract_confidence_labels remains as defense-in-depth.
 CONFIDENCE_LABELS: tuple[str, ...] = ("fact", "inference", "speculation", "mixed")
 _CONFIDENCE_TAG_RE = re.compile(
-    r"<confidence>\s*([a-z_]+)\s*</confidence>",
+    r"<confidence>\s*(fact|inference|speculation|mixed)\s*</confidence>",
     flags=re.IGNORECASE,
 )
 # Tie-breaking when multiple labels appear in the same message: least
