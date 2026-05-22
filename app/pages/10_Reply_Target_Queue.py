@@ -436,6 +436,16 @@ for row in rows:
                     placeholder="https://x.com/{your_handle}/status/{id}",
                     key=f"rtq_mp_url_{rt_id}",
                 )
+                # /review-2 🔴 #1 — without this field the INSERT below was
+                # writing the *target* post's text into posts.text, masquerading
+                # the original author's words as Daniel's reply. The reply
+                # text is now a required input.
+                reply_text = st.text_area(
+                    "your reply text (as posted)",
+                    placeholder="paste the reply you actually posted",
+                    key=f"rtq_mp_text_{rt_id}",
+                    height=120,
+                )
                 mp_intent_default = list(REPLY_INTENT_ENUM).index(row["reply_intent"]) \
                     if row["reply_intent"] in REPLY_INTENT_ENUM else 0
                 mp_intent = st.selectbox(
@@ -449,13 +459,20 @@ for row in rows:
                 cancel = col_y.form_submit_button("Cancel")
                 if confirm:
                     posted_url_clean = (posted_url or "").strip()
+                    reply_text_clean = (reply_text or "").strip()
                     if not posted_url_clean:
                         st.error("Posted URL is required.")
+                    elif not reply_text_clean:
+                        st.error(
+                            "Reply text is required — paste the reply you posted "
+                            "on X. Without it, downstream views would read the "
+                            "target's words as yours."
+                        )
                     else:
                         # §29.11 — atomic three-write transaction:
-                        #   1. INSERT posts row
+                        #   1. INSERT posts row (with Daniel's REPLY text — not the target)
                         #   2. UPDATE reply_targets.status='posted' + posted_reply_post_id
-                        #   3. (the post row is the one carrying in_reply_to_reply_target_id)
+                        #   3. (the post row carries in_reply_to_reply_target_id)
                         try:
                             with transaction(conn):
                                 x_id = _parse_x_post_id(posted_url_clean)
@@ -471,7 +488,7 @@ for row in rows:
                                          'manual', 'needs_metrics', ?, ?, ?, ?)
                                     """,
                                     (
-                                        row["target_text"] or "(reply text not captured)",
+                                        reply_text_clean,
                                         x_id,
                                         posted_url_clean,
                                         rt_id,
