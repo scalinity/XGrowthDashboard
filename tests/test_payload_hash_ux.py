@@ -9,10 +9,41 @@ must fail the six-check validation chain.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
 from app.agent import confirmation
+
+
+# ---------------------------------------------------------------------------
+# _parse_db_timestamp — P58R-5: support every form that has ever landed in
+# the column (space-separator legacy, T-separator, Z suffix, ±HH:MM offset).
+# ---------------------------------------------------------------------------
+def test_parse_db_timestamp_space_separator() -> None:
+    parsed = confirmation._parse_db_timestamp("2026-05-22 14:00:00")
+    assert parsed == datetime(2026, 5, 22, 14, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_db_timestamp_t_separator() -> None:
+    parsed = confirmation._parse_db_timestamp("2026-05-22T14:00:00")
+    assert parsed == datetime(2026, 5, 22, 14, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_db_timestamp_z_suffix() -> None:
+    parsed = confirmation._parse_db_timestamp("2026-05-22T14:00:00Z")
+    assert parsed == datetime(2026, 5, 22, 14, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_db_timestamp_offset_normalizes_to_utc() -> None:
+    # 14:00 in +05:00 → 09:00 UTC.
+    parsed = confirmation._parse_db_timestamp("2026-05-22T14:00:00+05:00")
+    assert parsed == datetime(2026, 5, 22, 9, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_db_timestamp_with_fractional_seconds() -> None:
+    parsed = confirmation._parse_db_timestamp("2026-05-22 14:00:00.123456")
+    assert parsed.year == 2026 and parsed.tzinfo == timezone.utc
 
 
 def _setup_draft_post(conn: sqlite3.Connection, text: str = "Draft v1") -> int:

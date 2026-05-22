@@ -89,24 +89,35 @@ def hash_draft_text(text: str) -> str:
 
 
 def _parse_db_timestamp(s: str) -> datetime:
-    """Tolerate either ``YYYY-MM-DD HH:MM:SS`` or ISO-8601 with ``T`` separator.
+    """Tolerate every form that has ever landed in this column.
 
     SQLite's ``datetime('now')`` writes the space-separator form, and
     ``mint_confirmation_token`` matches it with strftime. But a debug
     shell, migration replay, or future operator using
-    ``datetime.now(...).isoformat()`` would emit the ``T`` form and
-    crash the prior strict ``strptime`` with ``ValueError`` — escaping
-    the typed-exception catch in ``publish_post_atomic`` and leaving
-    the token consumption in an indeterminate state. Defensive parser
-    normalizes the separator and strips fractional seconds before the
-    strict parse.
+    ``datetime.now(...).isoformat()`` may emit the ``T`` form, a
+    trailing ``Z``, or an explicit ``+HH:MM`` offset. The prior strict
+    parser dropped only ``T``/fractional and crashed with
+    ``ValueError`` on the rest — that escapes the typed-exception
+    catch in ``publish_post_atomic`` and leaves the token consumption
+    in an indeterminate state.
+
+    Strategy: try ``datetime.fromisoformat`` first (Python 3.11+ handles
+    ``T``, ``Z``, and ``±HH:MM``), then fall back to the strict
+    ``strptime`` form for legacy rows. Both paths normalize to UTC
+    before returning.
     """
-    normalized = s.replace("T", " ")
-    if "." in normalized:
-        normalized = normalized.split(".", 1)[0]
-    return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc,
-    )
+    try:
+        parsed = datetime.fromisoformat(s)
+    except ValueError:
+        normalized = s.replace("T", " ")
+        if "." in normalized:
+            normalized = normalized.split(".", 1)[0]
+        return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc,
+        )
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
