@@ -57,3 +57,19 @@ Six additive features that give the Growth Agent two new identity anchors and th
 ### One-time setup
 
 Open **Settings → Growth Agent → Niche definition** and fill in both fields — the agent is in "low-power mode" (drafting refused) until both are saved. Optionally seed a few rows in the **Personality lore** panel and adjust thresholds in `settings` if the defaults don't fit.
+
+## Strategic Analysis Pack (Phase 5.10)
+
+Four CreatorOS-derived workflows ported into XGrowth's discipline (`spec.md` §28.22–§28.25). Each closes a workflow gap that previously sent Daniel out to another tool. Brings the total MVP view count from 9 to 11.
+
+- **Brain Dump (§14.9 + §28.22)** — *capture-first* surface, distinct from §14.8 Agent Chat. Daniel pastes raw thinking; the agent processes it into clarifying questions + ≤5 structured candidate drafts. `raw_text` is **immutable after insert** — refinement creates a new dump, never edits an old one. Promotion to `agent_drafts` is an explicit per-candidate click that runs the full Phase 5.8 pipeline downstream (IWH preflight, dark-pattern lint, content-type validation, pre-publish scorer, repetition guard). Lives at `app/pages/11_Brain_Dump.py`.
+- **Coach (§14.10 + §28.23)** — second conversational surface with **citation-allowlist discipline**. Every analytical claim must be grounded in a real DB row via inline `〔record_type id_or_filter〕` citations; invalid citations are stripped with a strip-count surfaced under the message. When `coach_refuse_without_evidence = true` (default), uncited analytical messages are replaced with a canonical refusal — *cite or refuse, no speculation as advice*. The Coach is advice-only: its tool registry excludes every write tool, enforced by a boot-time invariant in `app/main.py`. Lives at `app/pages/12_Coach.py`.
+- **Account Researcher (§28.24)** — strategic analysis of a target X account: posting patterns, positioning, reply-strategy entry points, niche alignment (0-3 overlap score). Manual-paste workflow for MVP (V1.1+ adds X API auto-pull). Schema permits multiple reports per handle as a point-in-time snapshot; consecutive reports for the same handle render as a side-by-side compare-to-previous diff. Bidirectional link to `reply_targets` via "Generate reply target from this research." Lives at `app/pages/13_Account_Researcher.py`.
+- **Profile Audit (§28.25)** — periodic comprehensive review of bio + pinned post + recent posts + active voice profile + niche definition, read as a *unified surface*. Returns a load-bearing `top_three_actions` field — the audit is only useful if it produces concrete next steps. Append-only history; cadence reminder banner at 90 days; **never auto-runs**. Panel lives in **Settings → Growth Agent → Profile audit**.
+
+### One-time setup (Phase 5.10 extras)
+
+The four workflows ship enabled out of the box. Two settings worth knowing:
+
+- `coach_refuse_without_evidence` (default `true`) controls the Coach refusal gate. Toggle from the Coach view header or **Settings → Growth Agent → Profile audit**.
+- `profile_audit_cadence_reminder_days` (default `90`) sets when the Settings panel's yellow "fresh audit" reminder fires. Audits never auto-run regardless.

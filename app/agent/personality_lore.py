@@ -361,14 +361,18 @@ def render_splice_block(active_lore: list[LoreRow]) -> str:
         "content_type = personality):**",
     ]
     for row in active_lore:
-        suffix = _last_invoked_suffix(row.last_invoked_at_utc)
+        suffix = last_invoked_suffix(row.last_invoked_at_utc)
         lines.append(
             f"- {row.theme}: {row.description}{suffix}"
         )
     return "\n".join(lines)
 
 
-def _last_invoked_suffix(last_iso: str | None) -> str:
+# P59A-S14: promoted from `_last_invoked_suffix` to `last_invoked_suffix`
+# so the Settings panel can share the same "(last invoked N days ago)"
+# rendering used in the prompt splice. Private name kept as an alias
+# for backward compat with any external import.
+def last_invoked_suffix(last_iso: str | None) -> str:
     if not last_iso:
         return " (not yet invoked)"
     try:

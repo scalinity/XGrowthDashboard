@@ -1227,11 +1227,14 @@ for _r in _lore_rows:
     _over_relied = _personality_lore.is_over_relied_on(
         _r, overuse_threshold=_lore_overuse
     )
+    # P59A-S14: use the shared last_invoked_suffix helper so the
+    # Settings panel matches the prompt-splice presentation
+    # ("last invoked N days ago" instead of a raw ISO string).
+    _last = _personality_lore.last_invoked_suffix(_r.last_invoked_at_utc)
     _meta = (
         f"#{_r.id} · priority {_r.priority} · "
         f"{'active' if _r.is_active else 'inactive'} · "
-        f"invoked {_r.invocation_count}× · "
-        f"last={html.escape(_r.last_invoked_at_utc or '—')}"
+        f"invoked {_r.invocation_count}×{html.escape(_last)}"
     )
     st.markdown(
         f"<div style='border-left: 2px solid {_border}; "
