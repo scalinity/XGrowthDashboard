@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -210,20 +211,20 @@ def _default_alignment_caller(
 
 
 def _strip_code_fence(text: str) -> str:
-    """Tolerate Haiku occasionally wrapping JSON in ```json … ``` fences."""
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        nl = stripped.find("\n")
-        if nl != -1:
-            stripped = stripped[nl + 1:]
-        else:
-            stripped = stripped.lstrip("`")
-            if stripped.lower().startswith("json"):
-                stripped = stripped[4:]
-            stripped = stripped.lstrip()
-        if stripped.rstrip().endswith("```"):
-            stripped = stripped.rstrip()[:-3]
-    return stripped.strip()
+    """Tolerate Haiku occasionally wrapping JSON in ```json … ``` fences.
+
+    P59A-W5+S7: single-regex form matching ``lint.py:_HAIKU_LINT_PROMPT``
+    parser. Removes the prior multi-step lstrip/rstrip/slice chain whose
+    single-line ```json{...}``` edge case was brittle (could lop the
+    leading `{`). The regex matches optional leading ```[json] and
+    optional trailing ``` in one pass.
+    """
+    return re.sub(
+        r"^```(?:json)?\s*|\s*```$",
+        "",
+        text.strip(),
+        flags=re.DOTALL,
+    ).strip()
 
 
 def _read_alignment_prompt() -> str:
