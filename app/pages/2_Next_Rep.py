@@ -19,7 +19,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
-from app.components.badges.confidence_label import ui_label_for_db_label
 from app.components.badges.sample_size import sample_size_badge
 from app.components.theme import PALETTE, apply_theme, callout, hairline, kicker
 from app.pages import open_connection

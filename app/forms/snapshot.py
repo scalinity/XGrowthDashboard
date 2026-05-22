@@ -25,7 +25,7 @@ from typing import Any
 
 import streamlit as st
 
-from app.forms import FormError, get_setting, now_utc_iso, today_iso
+from app.forms import FormError, get_setting, now_utc_iso
 
 
 def _validate(payload: dict[str, Any]) -> dict[str, str]:

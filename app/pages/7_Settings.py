@@ -26,7 +26,7 @@ import streamlit as st
 
 from app.components.theme import PALETTE, apply_theme, hairline, kicker
 from app.db import DEFAULT_DB_PATH
-from app.forms import get_setting, set_setting
+from app.forms import set_setting
 from app.pages import open_connection
 
 # ---------------------------------------------------------------------------

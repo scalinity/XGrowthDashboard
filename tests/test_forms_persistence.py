@@ -103,7 +103,7 @@ def test_add_post_id_raises_when_x_post_id_duplicate(
     import pytest
     from app.forms import FormError
 
-    pid1 = _seed_post(db_conn, text="first", x_post_id="555")
+    _ = _seed_post(db_conn, text="first", x_post_id="555")  # occupies the x_post_id slot
     pid2 = submit_post(
         db_conn,
         {

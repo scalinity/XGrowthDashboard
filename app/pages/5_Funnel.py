@@ -164,8 +164,8 @@ hairline()
 # What we know / What we don't.
 st.markdown("## What we know · what we don't")
 st.markdown(
-    f"<p class='faint'>The §13 hard rules made visible. Hover any row in "
-    f"the funnel above to see the source of that stage's number.</p>",
+    "<p class='faint'>The §13 hard rules made visible. Hover any row in "
+    "the funnel above to see the source of that stage's number.</p>",
     unsafe_allow_html=True,
 )
 st.markdown(

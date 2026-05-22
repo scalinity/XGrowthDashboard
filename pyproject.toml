@@ -27,6 +27,14 @@ package = false
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint.per-file-ignores]
+# Streamlit pages bootstrap sys.path before they can import app.*, so the
+# E402 (module-level imports must be at top) check has to be relaxed for
+# these files. The shim is documented in app/main.py and each page header.
+"app/main.py" = ["E402"]
+"app/pages/*.py" = ["E402"]
+"tests/*.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

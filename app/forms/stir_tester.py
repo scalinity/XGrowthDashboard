@@ -17,7 +17,7 @@ from typing import Any
 
 import streamlit as st
 
-from app.forms import FormError, today_iso
+from app.forms import FormError
 
 STATUS_VALUES: tuple[str, ...] = (
     "lead", "downloaded", "activated", "cook_mode_used", "churned", "unknown",
