@@ -94,6 +94,42 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         True,
         "Weekly review requires counterfactual_note before save (§14.6)",
     ),
+    # Phase 5.5 Growth Agent (§28).
+    (
+        "agent_default_model",
+        "claude-opus-4-7",
+        "Default Anthropic model for the Growth Agent (§28.4)",
+    ),
+    (
+        "agent_monthly_cost_cap_usd",
+        25.0,
+        "Monthly USD cap for agent calls (§28.6); raise here when needed",
+    ),
+    (
+        "agent_voice_sample_count",
+        5,
+        "Top N active voice_samples spliced into system prompt (§28.5)",
+    ),
+    (
+        "iwh_self_score_minimum",
+        2,
+        "Minimum per-axis IWH score required to ship a draft (§28.2 rule #13)",
+    ),
+    (
+        "iwh_max_revision_attempts",
+        3,
+        "Refuse save on attempt N+1 (§28.2 rule #13)",
+    ),
+    (
+        "agent_dark_pattern_lint_enabled",
+        True,
+        "Run app/agent/lint.py preflight before save_draft_* (§28.2 rule #12)",
+    ),
+    (
+        "x_posting_confirmation_token_ttl_seconds",
+        60,
+        "TTL for single-use publish_confirmation_tokens (§28.10)",
+    ),
 ]
 
 

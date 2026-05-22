@@ -288,3 +288,16 @@ st.markdown(
     "with the right tab pre-flagged.</p>",
     unsafe_allow_html=True,
 )
+
+# Agent integration (§14.1 + §28.7). Sets a context seed and jumps to chat.
+hairline()
+st.markdown("### Ask the agent")
+ag_a, ag_b = st.columns(2)
+if ag_a.button("draft today's post →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "today_draft"
+    st.switch_page("pages/9_Agent_Chat.py")
+if ag_b.button("start reply session →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "today_reply_session"
+    st.switch_page("pages/9_Agent_Chat.py")

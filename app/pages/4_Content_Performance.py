@@ -239,3 +239,16 @@ st.markdown(
     </table>""",
     unsafe_allow_html=True,
 )
+
+# Agent integration (§14.4 + §28.7).
+hairline()
+st.markdown("### Ask the agent")
+ag_a, ag_b = st.columns(2)
+if ag_a.button("why is this lane underperforming? →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "content_perf_lane_analysis"
+    st.switch_page("pages/9_Agent_Chat.py")
+if ag_b.button("extract lesson from a post →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "content_perf_extract_lesson"
+    st.switch_page("pages/9_Agent_Chat.py")

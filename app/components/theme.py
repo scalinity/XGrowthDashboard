@@ -312,6 +312,172 @@ def numeric(text: str) -> str:
     return f"<span class='numeric'>{text}</span>"
 
 
+def tool_call_block(
+    tool_name: str,
+    *,
+    summary: str,
+    body_md: str | None = None,
+    status: str = "success",
+    expanded: bool = False,
+) -> None:
+    """Console-log row for a single agent tool call.
+
+    The Phase 5.5 chat view renders one of these per tool invocation. The
+    collapsed form is one line: `[query_dashboard_state] · slice=today · 6
+    rows`. Expanded form shows ``body_md`` (typically a fenced JSON code
+    block of the args + result).
+
+    ``status='error'`` shifts the left-keyline to the directional amber so
+    failed calls are visible without scanning.
+    """
+    accent = (
+        PALETTE["confidence_directional_bg"]
+        if status == "error"
+        else PALETTE["phosphor"]
+    )
+    label_color = (
+        PALETTE["confidence_directional_bg"]
+        if status == "error"
+        else PALETTE["phosphor"]
+    )
+    header_html = (
+        f"<span style='font-family: JetBrains Mono, monospace; "
+        f"font-size: 0.78rem; letter-spacing: 0.06em; "
+        f"text-transform: uppercase; color: {label_color};'>"
+        f"[{tool_name}]</span> "
+        f"<span class='dim' style='font-size: 0.85rem;'>· {summary}</span>"
+    )
+    with st.expander(label="", expanded=expanded):
+        st.markdown(
+            f"<div style='border-left: 2px solid {accent}; padding: 0.15rem 0.7rem; "
+            f"margin: 0 0 0.4rem -0.1rem;'>{header_html}</div>",
+            unsafe_allow_html=True,
+        )
+        if body_md:
+            st.markdown(body_md)
+
+
+def iwh_meter(intelligence: int, wisdom: int, humility: int) -> None:
+    """Three discrete segments colored by IWH self-score (0..3 each).
+
+    Rendered VU-meter-flavored but with stepped segments, not an analog
+    needle — matches the rest of the dashboard's "show steps, not slopes"
+    discipline (same reason the confidence labels are 4 discrete bands).
+    """
+    step_colors = [
+        PALETTE["bone_faint"],
+        PALETTE["bone_dim"],
+        PALETTE["phosphor_dim"],
+        PALETTE["phosphor"],
+    ]
+
+    def _segment(label: str, value: int) -> str:
+        color = step_colors[max(0, min(3, value))]
+        return (
+            f"<div style='display: inline-block; width: 28%; padding: 0.3rem 0; "
+            f"text-align: center; background: {PALETTE['surface']}; "
+            f"border-top: 2px solid {color}; margin-right: 1.5%;'>"
+            f"<div style='font-family: JetBrains Mono, monospace; font-size: 0.7rem; "
+            f"letter-spacing: 0.08em; color: {PALETTE['bone_faint']};'>{label}</div>"
+            f"<div class='numeric' style='font-size: 1.1rem; color: {color};'>"
+            f"{value}</div></div>"
+        )
+
+    st.markdown(
+        f"<div style='margin: 0.3rem 0 0.6rem 0;'>"
+        f"{_segment('I', intelligence)}"
+        f"{_segment('W', wisdom)}"
+        f"{_segment('H', humility)}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def cost_meter(mtd_usd: float, cap_usd: float) -> None:
+    """Horizontal cost strip — phosphor → amber at 80% → exceeded at 100%."""
+    pct = (mtd_usd / cap_usd) if cap_usd > 0 else 0.0
+    pct_clamped = min(1.0, max(0.0, pct))
+    if pct >= 1.0:
+        fill_color = PALETTE["confidence_directional_bg"]
+        text_color = PALETTE["confidence_directional_bg"]
+        suffix = " — CAP REACHED"
+    elif pct >= 0.80:
+        fill_color = PALETTE["confidence_directional_bg"]
+        text_color = PALETTE["bone"]
+        suffix = ""
+    else:
+        fill_color = PALETTE["phosphor_dim"]
+        text_color = PALETTE["bone"]
+        suffix = ""
+
+    bar_html = (
+        f"<div style='background: {PALETTE['surface']}; border: 1px solid {PALETTE['hairline']}; "
+        f"height: 0.55rem; border-radius: 1px; margin: 0.2rem 0 0.35rem 0;'>"
+        f"<div style='background: {fill_color}; width: {pct_clamped * 100:.1f}%; "
+        f"height: 100%;'></div></div>"
+    )
+    label_html = (
+        f"<div class='numeric' style='font-family: JetBrains Mono, monospace; "
+        f"font-size: 0.85rem; color: {text_color};'>"
+        f"${mtd_usd:0.2f} / ${cap_usd:0.2f}"
+        f"  <span class='faint' style='font-size: 0.75rem;'>"
+        f"({pct * 100:0.0f}%){suffix}</span></div>"
+    )
+    st.markdown(bar_html + label_html, unsafe_allow_html=True)
+
+
+def token_ttl_countdown(seconds_remaining: int) -> None:
+    """Large MM:SS readout — the single animated element in the whole app.
+
+    Caller is responsible for the ~1Hz rerun. The countdown is purely a
+    formatter — no internal timer. Color: phosphor while >10s, amber 5-10s,
+    bone_faint when ≤5s.
+    """
+    s = max(0, int(seconds_remaining))
+    if s > 10:
+        color = PALETTE["phosphor"]
+    elif s > 5:
+        color = PALETTE["confidence_directional_bg"]
+    else:
+        color = PALETTE["bone_faint"]
+    mm, ss = divmod(s, 60)
+    st.markdown(
+        f"<div class='kicker'>TOKEN EXPIRES IN</div>"
+        f"<div class='numeric' style='font-family: JetBrains Mono, monospace; "
+        f"font-size: 2.6rem; letter-spacing: -0.02em; color: {color}; "
+        f"line-height: 1;'>"
+        f"{mm:02d}:{ss:02d}</div>"
+        f"<div class='faint' style='font-size: 0.75rem; margin-top: 0.4rem;'>"
+        f"Tokens are single-use, sha256-hashed server-side. Expiry voids the click.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def console_log_row(
+    *,
+    timestamp: str,
+    kind: str,
+    title: str,
+    active: bool = False,
+) -> None:
+    """Compact one-line row used by the Agent Chat sessions sidebar."""
+    border_color = PALETTE["phosphor"] if active else PALETTE["hairline"]
+    title_color = PALETTE["bone"] if active else PALETTE["bone_dim"]
+    st.markdown(
+        f"<div style='border-left: 2px solid {border_color}; padding: 0.2rem 0.6rem; "
+        f"margin: 0.15rem 0;'>"
+        f"<span class='numeric' style='font-size: 0.75rem; color: {PALETTE['bone_faint']};'>"
+        f"{timestamp}</span> "
+        f"<span style='font-family: JetBrains Mono, monospace; font-size: 0.7rem; "
+        f"letter-spacing: 0.08em; text-transform: uppercase; color: {PALETTE['phosphor']};'>"
+        f"· {kind}</span>"
+        f"<div style='font-size: 0.85rem; color: {title_color}; "
+        f"overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'>{title}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def readout_card(
     label: str,
     value: str,

@@ -223,12 +223,46 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Account leads — secondary list. Falls back to "no curated accounts yet"
-# until the Phase 5.5 `agent_target_accounts` table lands.
-if not _agent_target_accounts_available(conn):
-    st.markdown(
-        "<p class='faint' style='margin-top:0.8rem;'>"
-        "<strong>Account leads:</strong> no curated accounts yet — "
-        "<code>agent_target_accounts</code> lands in Phase 5.5.</p>",
-        unsafe_allow_html=True,
-    )
+# Account leads — Phase 5.5 surfaces curated accounts from agent_target_accounts.
+if _agent_target_accounts_available(conn):
+    _lead_rows = conn.execute(
+        """
+        SELECT x_handle, display_name, lane, priority, notes
+        FROM agent_target_accounts
+        WHERE is_active = 1
+        ORDER BY priority ASC, last_engaged_at ASC NULLS FIRST
+        LIMIT 8
+        """
+    ).fetchall()
+    if _lead_rows:
+        st.markdown("### Account leads")
+        for _r in _lead_rows:
+            st.markdown(
+                f"<div style='border-left: 2px solid {PALETTE['phosphor']}; "
+                f"padding: 0.3rem 0.7rem; margin: 0.2rem 0; background: {PALETTE['surface']};'>"
+                f"<span class='numeric' style='color: {PALETTE['bone']};'>@{_r['x_handle']}</span> "
+                f"<span class='faint' style='font-size: 0.78rem;'>"
+                f"· {_r['lane'] or '—'} · priority {_r['priority']}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(
+            "<p class='faint' style='margin-top:0.8rem;'>"
+            "<strong>Account leads:</strong> no curated accounts yet — "
+            "add some in Settings → Growth Agent.</p>",
+            unsafe_allow_html=True,
+        )
+
+# Agent integration (§14.2 + §28.7).
+hairline()
+st.markdown("### Ask the agent")
+ag_a, ag_b = st.columns(2)
+if ag_a.button("draft for this lane →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "next_rep_lane_gap"
+    st.switch_page("pages/9_Agent_Chat.py")
+if ag_b.button("score reply candidates →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "next_rep_score_reply_candidates"
+    st.switch_page("pages/9_Agent_Chat.py")

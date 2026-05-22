@@ -811,3 +811,241 @@ for col, category in zip([ladders_left, ladders_right], ["distribution", "valida
                 f"</span>",
                 unsafe_allow_html=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# Growth Agent panel — §28.6 cost + §28.2 IWH policy + voice/target accounts.
+# ---------------------------------------------------------------------------
+from app.agent import cost as _agent_cost  # noqa: E402
+from app.agent import recovery as _agent_recovery  # noqa: E402
+from app.agent import voice as _agent_voice  # noqa: E402
+from app.components.theme import cost_meter as _cost_meter  # noqa: E402
+
+hairline()
+kicker("growth-agent · §28")
+st.markdown("## Growth Agent")
+st.caption(
+    "Phase 5.5 panel. Cost ceiling (§28.6), IWH revision policy "
+    "(§28.2 rule #13), voice samples (§28.5), and curated reply-target "
+    "accounts (§28.4 #8). Anthropic API key is read from `.env` and is "
+    "never editable from this page."
+)
+
+# Cost meter at the top of the agent panel.
+st.markdown("### Cost")
+_mtd = _agent_cost.month_to_date_spend_usd(conn)
+_cap = _agent_cost.get_monthly_ceiling_usd(conn)
+readout_card(
+    label="MONTH-TO-DATE SPEND",
+    value=f"${_mtd:0.2f}",
+    caption=f"cap ${_cap:0.2f} · {(_mtd / _cap * 100 if _cap > 0 else 0):0.0f}% used",
+)
+_cost_meter(_mtd, _cap)
+
+for key, editable, helptext in [
+    ("agent_default_model", True, "Default Anthropic model (§28.4)."),
+    ("agent_monthly_cost_cap_usd", True, "Monthly USD cap (§28.6). Raise carefully."),
+]:
+    _render_setting(conn, key, editable, helptext)
+
+# IWH policy.
+st.markdown("### IWH revision policy")
+for key, editable, helptext in [
+    ("iwh_self_score_minimum", True, "Minimum per-axis score required (§28.2 rule #13)."),
+    ("iwh_max_revision_attempts", True, "Refuse save on attempt N+1 (§28.2 rule #13)."),
+    ("agent_dark_pattern_lint_enabled", True, "Run app/agent/lint.py preflight (§28.2 rule #12)."),
+    ("agent_voice_sample_count", True, "Top-N voice samples spliced into prompt (§28.5)."),
+]:
+    _render_setting(conn, key, editable, helptext)
+
+# Voice samples CRUD.
+st.markdown("### Voice samples")
+st.caption(
+    "Top-N active samples (by priority) are injected into Section 5 of "
+    "the system prompt at each conversation start (§28.5). Without "
+    "samples the agent runs on the base prompt only — Daniel should "
+    "seed at least 3-5 strong examples before first use."
+)
+
+_voice_rows = conn.execute(
+    """
+    SELECT id, text, context_note, pillar, priority, is_active, last_used_at_utc
+    FROM voice_samples
+    ORDER BY is_active DESC, priority ASC, id DESC
+    """
+).fetchall()
+st.markdown(
+    f"<div class='numeric' style='color:{PALETTE['bone_dim']}; font-size:0.85rem;'>"
+    f"{sum(1 for r in _voice_rows if r['is_active'])} active · "
+    f"{len(_voice_rows)} total"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+with st.expander("+ add voice sample", expanded=False):
+    with st.form("add_voice_sample", clear_on_submit=True):
+        _vs_text = st.text_area("text", height=120, max_chars=600)
+        _vs_pillar = st.selectbox("pillar", options=["stir", "build", "self", None])
+        _vs_context = st.text_input("context note (optional)")
+        _vs_priority = st.number_input("priority (lower = earlier in prompt)", value=5, step=1)
+        if st.form_submit_button("add"):
+            if _vs_text.strip():
+                _agent_voice.add_voice_sample(
+                    conn,
+                    text=_vs_text.strip(),
+                    pillar=_vs_pillar,
+                    context_note=_vs_context or None,
+                    priority=int(_vs_priority),
+                )
+                st.toast("voice sample added.")
+                st.rerun()
+
+for r in _voice_rows:
+    border_color = PALETTE["phosphor"] if r["is_active"] else PALETTE["hairline"]
+    st.markdown(
+        f"<div style='border-left: 2px solid {border_color}; padding: 0.4rem 0.8rem; "
+        f"margin: 0.4rem 0; background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['bone_faint']};'>"
+        f"#{r['id']} · priority {r['priority']} · pillar={r['pillar'] or '—'} · "
+        f"{'active' if r['is_active'] else 'inactive'}"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; color: {PALETTE['bone']}; "
+        f"margin-top: 0.3rem;'>"
+        f"{html.escape(r['text'])}"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if r["is_active"]:
+        if st.button("deactivate", key=f"vs_deactivate_{r['id']}"):
+            _agent_voice.deactivate_voice_sample(conn, sample_id=int(r["id"]))
+            st.rerun()
+
+# Curated agent_target_accounts.
+st.markdown("### Curated reply-target accounts")
+st.caption(
+    "Accounts the agent draws from when find_reply_targets is invoked "
+    "(§28.4 #8). Phase 5.6's reply-target queue will reference these "
+    "rows for the relevance prior (§29.2)."
+)
+
+_target_rows = conn.execute(
+    """
+    SELECT id, x_handle, display_name, notes, lane, priority,
+           last_engaged_at, is_active
+    FROM agent_target_accounts
+    ORDER BY is_active DESC, priority ASC, id DESC
+    """
+).fetchall()
+
+with st.expander("+ add curated account", expanded=False):
+    with st.form("add_target_account", clear_on_submit=True):
+        _ta_handle = st.text_input("x handle (without @)")
+        _ta_name = st.text_input("display name (optional)")
+        _ta_notes = st.text_input("notes")
+        _ta_lane = st.text_input("lane (e.g. build_icp, stir_icp)")
+        _ta_priority = st.number_input("priority (lower = higher)", value=5, step=1)
+        if st.form_submit_button("add"):
+            if _ta_handle.strip():
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO agent_target_accounts
+                            (x_handle, display_name, notes, lane, priority, is_active)
+                        VALUES (?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            _ta_handle.strip().lstrip("@"),
+                            _ta_name or None,
+                            _ta_notes or None,
+                            _ta_lane or None,
+                            int(_ta_priority),
+                        ),
+                    )
+                    st.toast("target account added.")
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error(f"@{_ta_handle.strip().lstrip('@')} is already in the list.")
+
+if not _target_rows:
+    st.markdown(
+        f"<div class='faint' style='font-size: 0.85rem; color: {PALETTE['bone_dim']};'>"
+        f"No curated accounts yet. find_reply_targets will return empty until "
+        f"at least one is added."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+for r in _target_rows:
+    border_color = PALETTE["phosphor"] if r["is_active"] else PALETTE["hairline"]
+    st.markdown(
+        f"<div style='border-left: 2px solid {border_color}; padding: 0.4rem 0.8rem; "
+        f"margin: 0.3rem 0; background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.85rem; color: {PALETTE['bone']};'>"
+        f"@{html.escape(r['x_handle'])}"
+        f"<span class='faint' style='margin-left: 0.6rem; font-size: 0.75rem;'>"
+        f"priority {r['priority']} · lane={r['lane'] or '—'}</span>"
+        f"</div>"
+        f"<div style='font-size: 0.85rem; color: {PALETTE['bone_dim']}; margin-top: 0.2rem;'>"
+        f"{html.escape(r['notes'] or '')}"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+# Orphan recovery.
+st.markdown("### Orphan-post recovery")
+st.caption(
+    "Posts where the publish flow began but never completed (§28.10 "
+    "step 8). MVP reconciliation is manual: paste the live X URL to "
+    "mark as posted, or mark as failed to flag the row for re-draft."
+)
+_orphans = _agent_recovery.detect_orphans(conn)
+if not _orphans:
+    st.markdown(
+        f"<div class='faint' style='font-size: 0.85rem; color: {PALETTE['bone_dim']};'>"
+        f"No orphans. The publish flow has settled cleanly."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+for orphan in _orphans:
+    with st.expander(
+        f"orphan post #{orphan.post_id} · attempts {orphan.publish_attempt_count}"
+    ):
+        st.markdown(
+            f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; "
+            f"color: {PALETTE['bone']};'>"
+            f"{html.escape(orphan.text)}"
+            f"</div>"
+            f"<div class='faint' style='font-size: 0.75rem;'>"
+            f"intent staged at {orphan.published_to_x_at} · "
+            f"method={orphan.publish_method}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        _live_url = st.text_input(
+            "live X URL (if posted)", key=f"orphan_url_{orphan.post_id}"
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("mark posted", key=f"orphan_posted_{orphan.post_id}"):
+                if _live_url.strip():
+                    _xid = _live_url.rstrip("/").rsplit("/", 1)[-1]
+                    _agent_recovery.mark_orphan_posted(
+                        conn,
+                        post_id=orphan.post_id,
+                        x_post_id=_xid,
+                        x_post_url=_live_url.strip(),
+                    )
+                    st.toast("orphan reconciled.")
+                    st.rerun()
+                else:
+                    st.error("paste the live X URL first.")
+        with col_b:
+            if st.button("mark failed", key=f"orphan_failed_{orphan.post_id}"):
+                _agent_recovery.mark_orphan_failed(
+                    conn,
+                    post_id=orphan.post_id,
+                    reason="manually flagged in Settings",
+                )
+                st.toast("orphan flagged as failed.")
+                st.rerun()

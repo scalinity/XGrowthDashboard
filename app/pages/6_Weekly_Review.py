@@ -266,3 +266,20 @@ else:
                     "<p class='faint'>No counterfactual recorded — this review predates the §14.6 enforcement.</p>",
                     unsafe_allow_html=True,
                 )
+
+# Agent integration (§14.6 + §28.7).
+hairline()
+st.markdown("### Ask the agent")
+ag_a, ag_b, ag_c = st.columns(3)
+if ag_a.button("draft counterfactual →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "weekly_review_counterfactual"
+    st.switch_page("pages/9_Agent_Chat.py")
+if ag_b.button("draft interpretation →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "weekly_review_interpretation"
+    st.switch_page("pages/9_Agent_Chat.py")
+if ag_c.button("suggest next experiment →", width="stretch"):
+    st.session_state.agent_conversation_id = None
+    st.session_state.agent_context_seed = "weekly_review_next_experiment"
+    st.switch_page("pages/9_Agent_Chat.py")
