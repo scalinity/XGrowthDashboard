@@ -212,6 +212,18 @@ def backup_database(
         backups_path = backups_path.resolve()
         backups_path.mkdir(parents=True, exist_ok=True)
 
+        # §29.11 daily VACUUM cleanup — delete dead reply_targets rows older
+        # than 90 days BEFORE VACUUM INTO snapshots the file so the resulting
+        # backup is already compacted. Failure here must not abort the backup;
+        # the deletion is idempotent and will run again tomorrow. Wrapped in
+        # try/except for the case where the table doesn't exist yet (a
+        # restored backup from before Phase 5.6).
+        try:
+            from app.jobs.reply_target_maintenance import vacuum_cleanup_dead_candidates
+            vacuum_cleanup_dead_candidates(conn)
+        except sqlite3.OperationalError:
+            pass
+
         # Shrink the WAL before snapshotting so the resulting backup
         # carries no historical replay frames and the source -wal file
         # itself is truncated. Failure here is benign — VACUUM INTO is
