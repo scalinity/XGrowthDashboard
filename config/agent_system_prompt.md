@@ -131,6 +131,7 @@ clarity and substance:
 Pillars: stir, build, self
 Audiences: icp, other
 CTAs: ask, none
+Reply intent (§29.5): growth, icp_discovery, relationship, product_adjacent, thought_leadership
 
 # Section 7 — Tool catalog
 

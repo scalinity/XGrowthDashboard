@@ -156,6 +156,64 @@ def build_system_prompt(conn: sqlite3.Connection) -> str:
     return out
 
 
+# ---------------------------------------------------------------------------
+# §29.8 drift check — reply_intent enum stays in sync across:
+#   1. spec.md §29.5 (table row "Reply intent | ... | v1 values")
+#   2. app/agent/reply_targets.REPLY_INTENT_ENUM (single source of truth in code)
+#   3. config/agent_system_prompt.md Section 6 ("Reply intent (§29.5): ...")
+#
+# Pre-commit / CI calls verify_reply_intent_enum_matches; any divergence is
+# a hard fail. Same pattern as verify_rule_count_matches_spec.
+# ---------------------------------------------------------------------------
+def extract_reply_intent_enum_from_spec(spec_path: Path | None = None) -> list[str]:
+    """Pull the v1 reply_intent values from spec §29.5.
+
+    Anchored on the line ``| **Reply intent** | ... | growth / icp_discovery
+    / relationship / product_adjacent / thought_leadership | ...``. The
+    enum values are slash-separated in that table cell.
+    """
+    text = (spec_path or SPEC_PATH).read_text(encoding="utf-8")
+    # Table columns: | **Reply intent** | <Lives on> | <v1 values> | <Describes> |
+    # Capture the 3rd column ("v1 values"); 2nd column has a `+` literal so a
+    # plain `[^|]*` is sufficient — we don't need to be cleverer.
+    m = re.search(
+        r"\|\s*\*\*Reply intent\*\*\s*\|[^|]*\|\s*([^|]+?)\s*\|",
+        text,
+    )
+    if not m:
+        raise SpecRuleExtractionError(
+            "Could not locate the §29.5 reply_intent enum row in spec.md. "
+            "Has the table format changed? Update the regex anchor."
+        )
+    raw = m.group(1)
+    return [v.strip().strip("`") for v in raw.split("/") if v.strip()]
+
+
+def extract_reply_intent_enum_from_prompt(prompt_text: str | None = None) -> list[str]:
+    """Pull the reply_intent values from Section 6 of the template."""
+    text = prompt_text if prompt_text is not None else _read_template()
+    m = re.search(r"Reply intent[^\n]*:\s*([^\n]+)", text)
+    if not m:
+        return []
+    raw = m.group(1)
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
+
+def verify_reply_intent_enum_matches() -> tuple[list[str], list[str], list[str]]:
+    """Drift check — returns the enum from spec, code, and prompt.
+
+    Callers (pre-commit / CI) assert all three lists are equal *as sets*.
+    Order in the spec table and in the code tuple is canonical; the prompt
+    template uses the same order but the check compares as sets to be
+    robust to formatting changes.
+    """
+    from app.agent.reply_targets import REPLY_INTENT_ENUM
+    spec_values = extract_reply_intent_enum_from_spec()
+    code_values = list(REPLY_INTENT_ENUM)
+    prompt_values = extract_reply_intent_enum_from_prompt()
+    return spec_values, code_values, prompt_values
+
+
 def verify_rule_count_matches_spec(prompt_text: str) -> tuple[int, int]:
     """Drift check — count of rules in spec vs count spliced into the prompt.
 
