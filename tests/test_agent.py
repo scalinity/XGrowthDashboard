@@ -132,6 +132,65 @@ def test_iwh_counter_increments_via_revise_draft_not_agent_output(db_conn):
     assert row["status"] == "proposed"
 
 
+def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
+    """C3 regression: every AGENT_TOOL handler must execute against a
+    fresh-migration DB without crashing.
+
+    Before C3, `_get_open_hypotheses` SELECTed columns that didn't exist
+    on the `experiments` table — it crashed sqlite3 the first time the
+    model invoked it. No test covered this. The fix: run each handler
+    with a representative minimal kwargs set; assert no exception and a
+    dict result.
+    """
+    # Minimal kwargs sets that satisfy each tool's required schema.
+    sample_kwargs = {
+        "query_dashboard_state": {"slice": "all"},
+        "get_recent_posts": {"days_back": 7, "limit": 5},
+        "get_lane_performance": {},
+        "get_open_hypotheses": {},
+        "get_lane_gaps": {"week_offset": 0},
+        "analyze_post": {"post_id": 1},  # may return error dict; that's fine
+        "summarize_winners": {"window_days": 30},
+        "find_reply_targets": {"count": 3, "recency_hours": 48},
+        "score_reply_candidates": {"candidates": []},
+        "extract_lesson": {"post_id": 1},
+        "draft_weekly_review_section": {
+            "section_name": "interpretation", "week_id": 1
+        },
+        "save_draft_post": {
+            "text": "test draft", "pillar": "stir",
+            "audience": "icp", "cta": "ask",
+        },
+        "save_draft_reply": {
+            "text": "test reply",
+            "target_post_url": "https://x.com/foo/status/123",
+        },
+        "revise_draft": {
+            # draft_post_id filled in below after save_draft_post runs.
+            "feedback": "tighter", "new_text": "test draft v2",
+        },
+        "record_reply_target": {
+            "target_post_url": "https://x.com/foo/status/123"
+        },
+    }
+
+    from app.agent.tools import AGENT_TOOLS
+    saved_draft_id: int | None = None
+    for tool in AGENT_TOOLS:
+        kwargs = dict(sample_kwargs[tool.name])
+        if tool.name == "revise_draft":
+            assert saved_draft_id is not None, (
+                "save_draft_post must run before revise_draft in test order"
+            )
+            kwargs["draft_post_id"] = saved_draft_id
+        result = tool.handler(db_conn, **kwargs)
+        assert isinstance(result, dict), (
+            f"{tool.name} must return a dict; got {type(result).__name__}"
+        )
+        if tool.name == "save_draft_post":
+            saved_draft_id = result["draft_id"]
+
+
 def test_revised_drafts_are_publishable(db_conn):
     """C2 regression: every revise_draft must mint a posts row so the
     publish modal can find it via `WHERE agent_draft_id = ?`.

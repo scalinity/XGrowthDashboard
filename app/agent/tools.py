@@ -68,7 +68,7 @@ def _query_dashboard_state(conn: sqlite3.Connection, *, slice: str = "all") -> d
         out["today"] = [dict(r) for r in rows]
     if slice in ("validation_status", "all"):
         rows = conn.execute(
-            "SELECT * FROM v_funnel_daily ORDER BY funnel_date DESC LIMIT 7"
+            "SELECT * FROM v_funnel_daily ORDER BY event_date DESC LIMIT 7"
         ).fetchall()
         out["funnel_last_7"] = [dict(r) for r in rows]
     if slice in ("next_rep", "all"):
@@ -97,10 +97,14 @@ def _get_recent_posts(
     limit: int = 20,
 ) -> dict[str, Any]:
     """Recent posts with metrics + classifications (§28.4 #2)."""
+    # v_post_latest_metrics exposes likes / reply_count-ish columns under
+    # the names `likes`, `replies`, `reposts` (002_views.sql) — previous
+    # code referenced `like_count` / `reply_count` / `repost_count` which
+    # don't exist on the view.
     sql = """
         SELECT p.id, p.x_post_id, p.created_date, p.text, p.type,
                pc.pillar, pc.audience, pc.cta,
-               m.like_count, m.reply_count, m.repost_count
+               m.likes, m.replies, m.reposts, m.impressions
         FROM posts p
         LEFT JOIN post_classifications pc ON pc.post_id = p.id
         LEFT JOIN v_post_latest_metrics m ON m.post_id = p.id
@@ -153,13 +157,23 @@ def _get_lane_performance(
 # 4. get_open_hypotheses (§25)
 # ---------------------------------------------------------------------------
 def _get_open_hypotheses(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Active or planned experiments from `experiments` (§28.4 #4).
+
+    Schema reality check (`migrations/001_initial.sql:382-395`): the
+    columns are `hypothesis`, `content_lane`, `target_audience`,
+    `success_metric`, `start_date` — NOT `hypothesis_text` / `lane` /
+    `expected_signal` / `started_at_utc`. CHECK accepts
+    'planned' | 'running' | 'completed' | 'abandoned' — NOT 'proposed'.
+    The original handler crashed sqlite3 the first time the model
+    invoked it.
+    """
     rows = conn.execute(
         """
-        SELECT id, hypothesis_text, lane, status, expected_signal,
-               started_at_utc
+        SELECT id, name, hypothesis, content_lane, target_audience,
+               success_metric, status, start_date
         FROM experiments
-        WHERE status IN ('proposed', 'running')
-        ORDER BY started_at_utc DESC NULLS LAST
+        WHERE status IN ('planned', 'running')
+        ORDER BY start_date DESC, id DESC
         """
     ).fetchall()
     return {"experiments": [dict(r) for r in rows]}
@@ -212,7 +226,7 @@ def _analyze_post(conn: sqlite3.Connection, *, post_id: int) -> dict[str, Any]:
         """
         SELECT p.id, p.x_post_id, p.text, p.type, p.created_date,
                pc.pillar, pc.audience, pc.cta, pc.hypothesis, pc.lesson,
-               m.like_count, m.reply_count, m.repost_count, m.impression_count
+               m.likes, m.replies, m.reposts, m.impressions
         FROM posts p
         LEFT JOIN post_classifications pc ON pc.post_id = p.id
         LEFT JOIN v_post_latest_metrics m ON m.post_id = p.id
@@ -252,8 +266,14 @@ def _summarize_winners(
             r for r in lanes
             if ranking.get((r.get("confidence_label") or "none").lower(), 0) >= floor
         ]
-    # Top-3 by median engagement when available.
-    lanes.sort(key=lambda r: (r.get("median_engagement") or 0.0), reverse=True)
+    # Top-3 by median engagement rate when available. The view column is
+    # `median_engagement_rate` (002_views.sql); a previous typo here used
+    # the non-existent `median_engagement` and silently returned the
+    # unsorted prefix.
+    lanes.sort(
+        key=lambda r: (r.get("median_engagement_rate") or 0.0),
+        reverse=True,
+    )
     return {"window_days": int(window_days), "top_lanes": lanes[:3]}
 
 
@@ -310,7 +330,7 @@ def _extract_lesson(conn: sqlite3.Connection, *, post_id: int) -> dict[str, Any]
     row = conn.execute(
         """
         SELECT p.text, pc.hypothesis, pc.expected_signal, pc.actual_signal,
-               m.like_count, m.reply_count, m.repost_count
+               m.likes, m.replies, m.reposts
         FROM posts p
         LEFT JOIN post_classifications pc ON pc.post_id = p.id
         LEFT JOIN v_post_latest_metrics m ON m.post_id = p.id
