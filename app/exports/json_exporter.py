@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.exports._sql import quote_identifier
 
 JSON_SCHEMA_VERSION: int = 1
 
@@ -261,12 +262,15 @@ def _list_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
     """Return the ordered list of columns for an existing table.
 
     Uses ``PRAGMA table_info`` so the schema discovery survives any future
-    column reordering. Quoting via ``?`` parameter isn't supported for
-    PRAGMA — pass the table name as a literal but only after confirming via
-    sqlite_master that it's a known table.
+    column reordering. PRAGMA does not accept bound parameters, so the
+    table name is inlined as a quoted identifier via
+    :func:`app.exports._sql.quote_identifier`. Callers (currently only
+    :func:`export_database_to_json`) are responsible for confirming the
+    table exists in ``sqlite_master`` first via :func:`_table_exists`;
+    this function does NOT re-check.
     """
     rows = conn.execute(
-        f"PRAGMA table_info({json.dumps(table_name)})"
+        f"PRAGMA table_info({quote_identifier(table_name)})"
     ).fetchall()
     return [r["name"] for r in rows]
 
@@ -338,8 +342,8 @@ def export_database_to_json(
             if not _table_exists(active, table_name):
                 continue
             columns = _list_columns(active, table_name)
-            select_cols = ", ".join(json.dumps(c) for c in columns)
-            rows = active.execute(f"SELECT {select_cols} FROM {json.dumps(table_name)}").fetchall()
+            select_cols = ", ".join(quote_identifier(c) for c in columns)
+            rows = active.execute(f"SELECT {select_cols} FROM {quote_identifier(table_name)}").fetchall()
             pii_cols = _PII_GATED_COLUMNS.get(table_name, frozenset())
             normalised = [
                 _normalise_row(

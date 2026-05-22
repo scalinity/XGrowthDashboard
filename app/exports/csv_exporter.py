@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.exports._sql import quote_identifier
 from app.exports.allowlists import (
     ALLOWLISTS,
     UnknownTableError,
@@ -93,14 +94,15 @@ def _record_export(
 
 
 def _quote_identifier(name: str) -> str:
-    """Quote a SQLite identifier for inclusion in a SELECT.
+    """Backward-compatible alias for :func:`app.exports._sql.quote_identifier`.
 
-    Allowlist column names come from this repo's own source, but quoting
-    them defensively keeps the SELECT statement robust if a future table
-    gains a column whose name collides with a SQLite keyword. The same
-    technique used in app/backup.py for the VACUUM INTO literal.
+    The exporter originally defined this helper inline; /review-2
+    promoted it to a shared module so the JSON exporter could reuse it.
+    Kept as a thin alias so any in-repo grep for ``_quote_identifier``
+    still resolves and so existing imports inside this file (the SELECT
+    builder) continue to work without ceremony.
     """
-    return '"' + name.replace('"', '""') + '"'
+    return quote_identifier(name)
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
