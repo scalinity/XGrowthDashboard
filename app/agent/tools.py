@@ -968,7 +968,8 @@ def _revise_draft(
         """
         SELECT id, session_id, conversation_id, draft_kind, pillar,
                audience, cta, target_post_url, target_post_text,
-               iwh_attempt_index
+               iwh_attempt_index, content_type, confidence_label,
+               reply_quality_lint_passed
         FROM agent_drafts WHERE id = ?
         """,
         (int(draft_post_id),),
@@ -978,6 +979,12 @@ def _revise_draft(
 
     new_index = int(src["iwh_attempt_index"]) + 1
     post_type = "reply" if src["draft_kind"] == "reply" else "standalone"
+    # P59A-C1: propagate the Phase 5.8 / 5.9 per-draft annotations from
+    # the source. Without this, every IWH revision lands NULL content_type
+    # and silently drops out of v_content_type_performance. The original
+    # _revise_draft predates the Phase 5.9 columns; the orchestrator's
+    # "refuse unspecified" promise was bypassed via this path.
+    src_content_type = src["content_type"]
     with transaction(conn):
         rev_cur = conn.execute(
             """
@@ -985,8 +992,9 @@ def _revise_draft(
                 (session_id, conversation_id, draft_kind, text, pillar,
                  audience, cta, target_post_url, target_post_text,
                  voice_self_score, iwh_attempt_index, status,
-                 revision_of, user_feedback)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+                 revision_of, user_feedback,
+                 content_type, confidence_label, reply_quality_lint_passed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)
             """,
             (
                 src["session_id"],
@@ -1002,6 +1010,9 @@ def _revise_draft(
                 new_index,
                 int(src["id"]),
                 feedback,
+                src_content_type,
+                src["confidence_label"],
+                src["reply_quality_lint_passed"],
             ),
         )
         new_id = int(rev_cur.lastrowid)
@@ -1016,11 +1027,11 @@ def _revise_draft(
             """
             INSERT INTO posts
                 (created_at_utc, created_date, text, type, posted_via,
-                 manual_confirmation_status, agent_draft_id)
+                 manual_confirmation_status, agent_draft_id, content_type)
             VALUES (datetime('now'), date('now'), ?, ?, 'agent_assisted',
-                    'draft', ?)
+                    'draft', ?, ?)
             """,
-            (new_text, post_type, new_id),
+            (new_text, post_type, new_id, src_content_type or "unspecified"),
         )
         post_id = int(post_cur.lastrowid)
 
