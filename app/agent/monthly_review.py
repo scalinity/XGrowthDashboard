@@ -341,7 +341,7 @@ def upsert_monthly_review(
                 values,
             )
             row_id = int(cur.fetchone()[0])
-            event = "monthly_review_created"
+            event: str | None = "monthly_review_created"
         else:
             row_id = int(existing["id"])
             if payload:
@@ -350,15 +350,21 @@ def upsert_monthly_review(
                     f"UPDATE monthly_reviews SET {set_clause} WHERE id = ?",
                     [*payload.values(), row_id],
                 )
-            event = "monthly_review_updated"
-        _audit_log.log(
-            conn,
-            event_category="data",
-            event_type=event,
-            target_type="monthly_review",
-            target_id=row_id,
-            details={"iso_month": iso_month, "field_count": len(payload)},
-        )
+                event = "monthly_review_updated"
+            else:
+                # P511R-15: empty-payload update on an existing row is
+                # a no-op — neither the UPDATE nor the audit row should
+                # land. Mirrors the no-op suppression in set_setting.
+                event = None
+        if event is not None:
+            _audit_log.log(
+                conn,
+                event_category="data",
+                event_type=event,
+                target_type="monthly_review",
+                target_id=row_id,
+                details={"iso_month": iso_month, "field_count": len(payload)},
+            )
     return row_id
 
 

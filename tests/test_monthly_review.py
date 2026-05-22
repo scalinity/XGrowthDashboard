@@ -221,6 +221,31 @@ def test_upsert_monthly_review_audit_logged(
     assert "monthly_review_created" in events
 
 
+def test_p511r15_upsert_empty_payload_on_existing_row_is_noop(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Empty payload on an existing row should write nothing — no UPDATE,
+    no audit row. Previously the audit row landed with field_count=0
+    even though the DB state didn't change."""
+    row_id = _mr.upsert_monthly_review(
+        db_conn,
+        iso_month="2026-05",
+        fields={"summary": "first"},
+    )
+    # Re-upsert with empty payload.
+    same_id = _mr.upsert_monthly_review(
+        db_conn, iso_month="2026-05", fields={}
+    )
+    assert same_id == row_id
+    rows = _audit_log.query(
+        db_conn, target_type="monthly_review", target_id=row_id
+    )
+    events = [r.event_type for r in rows]
+    # Exactly one event — the original creation. No spurious
+    # monthly_review_updated row from the empty-payload re-upsert.
+    assert events == ["monthly_review_created"]
+
+
 def test_upsert_monthly_review_rejects_bad_iso_month(
     db_conn: sqlite3.Connection,
 ) -> None:
