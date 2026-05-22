@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.db import DEFAULT_DB_PATH, apply_migrations, connect
 from app.exports._audit import EXPORT_KIND_JSON, record_export
 from app.exports._sql import quote_identifier
 

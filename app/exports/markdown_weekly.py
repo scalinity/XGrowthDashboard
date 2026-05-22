@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.db import DEFAULT_DB_PATH, apply_migrations, connect
 from app.exports._audit import EXPORT_KIND_MARKDOWN_WEEKLY, record_export
 
 
