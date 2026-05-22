@@ -179,6 +179,13 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         "get_content_type_gaps": {"window_days": 7},
         # Phase 5.9 / §28.19 — velocity projection read.
         "get_velocity_projection": {},
+        # Phase 5.9 / §28.20 — replier-pool discovery. Niche unset on a
+        # fresh DB → handler returns the documented error dict (still a
+        # valid dict, satisfies the smoke test contract).
+        "score_replier_pool": {
+            "thread_url": "https://x.com/foo/status/1",
+            "replier_handles_or_excerpts_json": "@bar: aligned text\n@baz",
+        },
     }
 
     from app.agent.tools import AGENT_TOOLS

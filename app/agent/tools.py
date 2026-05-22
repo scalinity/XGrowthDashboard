@@ -32,6 +32,7 @@ from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
 from app.agent import prepublish_scorer as _prepublish_scorer
 from app.agent import repetition_guard as _repetition_guard
+from app.agent import replier_pool as _replier_pool
 from app.agent import velocity as _velocity
 from app.agent import voice_profile as _voice_profile
 from app.agent.reply_targets import (
@@ -1518,6 +1519,44 @@ AGENT_TOOLS: list[ToolDef] = [
         },
         handler=lambda conn, window_days=7: _content_types.get_content_type_gaps(
             conn, window_days=int(window_days)
+        ),
+    ),
+    ToolDef(
+        name="score_replier_pool",
+        description=(
+            "Replier-under-thread discovery path (§28.20, MVP paste flow). "
+            "Daniel pastes a thread URL plus a list of replier handles or "
+            "text excerpts (one per line, '@handle: excerpt' or plain "
+            "handles). Each replier is scored deterministically on the "
+            "§29.3 4-dim model PLUS thread_context_fit_score (0-3, "
+            "measures niche_person overlap with the replier's text). "
+            "Rows land in reply_targets with source='replier_under_thread'. "
+            "V1.1+ adds a programmatic top-N reply scan via X API — same "
+            "tool signature, optional auto_scan flag."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "thread_url": {"type": "string"},
+                "replier_handles_or_excerpts_json": {
+                    "type": "string",
+                    "description": (
+                        "Newline-separated replier handles or "
+                        "'@handle: excerpt' lines. Multi-line excerpts "
+                        "are blank-line-separated."
+                    ),
+                },
+                "lookback_minutes": {"type": "integer", "default": 60},
+            },
+            "required": ["thread_url", "replier_handles_or_excerpts_json"],
+        },
+        handler=lambda conn, *, thread_url, replier_handles_or_excerpts_json, lookback_minutes=60: (
+            _replier_pool.score_replier_pool(
+                conn,
+                thread_url=thread_url,
+                replier_handles_or_excerpts=replier_handles_or_excerpts_json,
+                lookback_minutes=int(lookback_minutes),
+            )
         ),
     ),
     ToolDef(

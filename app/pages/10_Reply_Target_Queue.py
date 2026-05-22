@@ -325,6 +325,68 @@ with st.expander("＋  add candidate (paste URL)", expanded=False):
                         st.error(f"Could not record: {rec.get('error', 'unknown')}")
 
 # ---------------------------------------------------------------------------
+# Phase 5.9 / §28.20 — Add replier pool (paste flow).
+# ---------------------------------------------------------------------------
+from app.agent import replier_pool as _replier_pool  # noqa: E402 — page-local
+
+with st.expander(
+    "＋  add replier pool (paste big-account thread + reply excerpts)",
+    expanded=False,
+):
+    st.caption(
+        "The third discovery path (§28.20): niche-relevant audiences "
+        "cluster in the reply sections of big accounts. Paste the "
+        "thread URL plus replier handles or '@handle: excerpt' lines "
+        "(one per line; blank-line-separated for multi-line excerpts). "
+        "Each replier is scored deterministically against your niche "
+        "definition; candidates land with source='replier_under_thread'."
+    )
+    with st.form("rtq_replier_pool", clear_on_submit=True):
+        rp_thread_url = st.text_input(
+            "thread URL (the big-account post you're mining)",
+            placeholder="https://x.com/{handle}/status/{id}",
+        )
+        rp_payload = st.text_area(
+            "replier handles / excerpts",
+            height=180,
+            placeholder=(
+                "@firstreplier\n"
+                "@secondreplier: A short excerpt of what they said.\n"
+                "\n"
+                "@thirdreplier:\n"
+                "Multi-line excerpt — pasted from the thread.\n"
+                "Second line of the same excerpt."
+            ),
+        )
+        rp_lookback = st.number_input(
+            "lookback minutes (V1.1+ uses this; MVP records for calibration)",
+            min_value=1, max_value=60 * 24, value=60, step=15,
+        )
+        if st.form_submit_button("Score replier pool", width="stretch"):
+            url_clean = (rp_thread_url or "").strip()
+            payload_clean = (rp_payload or "").strip()
+            if not url_clean:
+                st.error("Thread URL is required.")
+            elif not payload_clean:
+                st.error("Replier handles / excerpts payload is required.")
+            else:
+                result = _replier_pool.score_replier_pool(
+                    conn,
+                    thread_url=url_clean,
+                    replier_handles_or_excerpts=payload_clean,
+                    lookback_minutes=int(rp_lookback),
+                )
+                if "error" in result:
+                    st.error(result["error"])
+                else:
+                    st.success(
+                        f"Scored {len(result['candidates'])} replier(s) — "
+                        f"{result['created_count']} new, "
+                        f"{result['updated_count']} updated."
+                    )
+                    st.rerun()
+
+# ---------------------------------------------------------------------------
 # Candidate rows
 # ---------------------------------------------------------------------------
 hairline()
