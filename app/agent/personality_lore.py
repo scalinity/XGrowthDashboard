@@ -93,12 +93,19 @@ def _row_to_lore(row: sqlite3.Row) -> LoreRow:
     )
 
 
+# P59A-S12: single source of truth for the SELECT projection; both
+# list helpers and any future read query reference it.
+_LORE_COLUMNS = (
+    "id, theme, description, example_posts_json, invocation_count, "
+    "last_invoked_at_utc, is_active, priority, added_at_utc"
+)
+
+
 def list_all(conn: sqlite3.Connection) -> list[LoreRow]:
     """All lore rows ordered by (is_active DESC, priority ASC, id ASC)."""
     rows = conn.execute(
-        """
-        SELECT id, theme, description, example_posts_json, invocation_count,
-               last_invoked_at_utc, is_active, priority, added_at_utc
+        f"""
+        SELECT {_LORE_COLUMNS}
         FROM personality_lore
         ORDER BY is_active DESC, priority ASC, id ASC
         """
@@ -111,10 +118,8 @@ def list_active(
 ) -> list[LoreRow]:
     """Active rows ordered by priority ASC, id ASC."""
     sql = (
-        "SELECT id, theme, description, example_posts_json, invocation_count, "
-        "       last_invoked_at_utc, is_active, priority, added_at_utc "
-        "FROM personality_lore WHERE is_active = 1 "
-        "ORDER BY priority ASC, id ASC"
+        f"SELECT {_LORE_COLUMNS} FROM personality_lore "
+        "WHERE is_active = 1 ORDER BY priority ASC, id ASC"
     )
     params: tuple = ()
     if limit is not None:
