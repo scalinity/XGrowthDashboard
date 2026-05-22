@@ -153,6 +153,44 @@ def test_restore_dry_run_does_not_touch_target(
 # 5. Confirmed restore moves the previous target to a timestamped sidecar.
 # ---------------------------------------------------------------------------
 
+def test_restore_moves_wal_and_shm_siblings_to_sidecar(
+    db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
+) -> None:
+    """W1 regression — restore must move -wal/-shm next to the sidecar, not
+    leave them at the original target path where the restored backup would
+    inherit them and trigger spurious WAL recovery on next open.
+    """
+    db_conn.close()
+    backup = backup_database(
+        source_path=db_path,
+        backups_dir=tmp_path / "backups",
+        retention_days=30,
+    )
+
+    # Fake leftover WAL/SHM next to the live DB. (The real Streamlit session
+    # would have its own pair; we synthesize them deterministically.)
+    wal = db_path.with_name(db_path.name + "-wal")
+    shm = db_path.with_name(db_path.name + "-shm")
+    wal.write_bytes(b"\x00" * 32)
+    shm.write_bytes(b"\x00" * 32)
+
+    result = restore_database(
+        backup_path=backup.path,
+        target_path=db_path,
+        dry_run=False,
+    )
+
+    assert result.sidecar_path is not None
+    assert not wal.exists(), "WAL must not remain at the live-DB path"
+    assert not shm.exists(), "SHM must not remain at the live-DB path"
+    assert result.sidecar_path.with_name(result.sidecar_path.name + "-wal").exists(), (
+        "WAL should have been renamed alongside the sidecar"
+    )
+    assert result.sidecar_path.with_name(result.sidecar_path.name + "-shm").exists(), (
+        "SHM should have been renamed alongside the sidecar"
+    )
+
+
 def test_restore_with_confirm_moves_old_to_sidecar(
     db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
 ) -> None:

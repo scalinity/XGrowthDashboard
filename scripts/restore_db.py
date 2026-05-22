@@ -70,6 +70,58 @@ def _sidecar_for(target: Path) -> Path:
     return target.with_name(f"{target.name}.pre-restore.{ts}")
 
 
+def _wal_sibling(path: Path) -> Path:
+    """Return ``<path>-wal`` (e.g. ``dashboard.db`` → ``dashboard.db-wal``)."""
+    return path.with_name(path.name + "-wal")
+
+
+def _shm_sibling(path: Path) -> Path:
+    """Return ``<path>-shm`` (e.g. ``dashboard.db`` → ``dashboard.db-shm``)."""
+    return path.with_name(path.name + "-shm")
+
+
+def _move_wal_siblings(target: Path, sidecar: Path) -> None:
+    """Move any ``-wal`` / ``-shm`` siblings of ``target`` next to ``sidecar``.
+
+    SQLite associates WAL/SHM files with a DB by filesystem path, not by
+    inode. If we rename ``target`` → ``sidecar`` but leave its ``-wal`` and
+    ``-shm`` siblings sitting at the original location, the freshly-copied
+    backup that lands at ``target`` inherits those orphan sidecars. On the
+    next open SQLite finds the ``-wal`` adjacent to the restored DB and
+    enters WAL recovery; frame checksums usually protect us, but the SQLite
+    Backup API docs explicitly call out removing or invalidating
+    destination ``-wal``/``-shm`` precisely because mismatched-but-plausible
+    WAL frames can replay.
+
+    We move them next to the sidecar so manual rollback still has the
+    matched triplet available.
+    """
+    for old, new in (
+        (_wal_sibling(target), _wal_sibling(sidecar)),
+        (_shm_sibling(target), _shm_sibling(sidecar)),
+    ):
+        if old.exists():
+            old.rename(new)
+
+
+def _wal_checkpoint_truncate(path: Path) -> None:
+    """Open ``path`` and run ``PRAGMA wal_checkpoint(TRUNCATE)``.
+
+    Defensive belt-and-braces after the restore copy: if any stale
+    ``-wal``/``-shm`` was left behind by something other than the rename
+    above, the checkpoint materialises a clean state. Failure is silent —
+    a fresh backup file will checkpoint to a no-op.
+    """
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        pass
+
+
 def restore_database(
     backup_path: Path | str,
     target_path: Path | str | None = None,
@@ -116,9 +168,18 @@ def restore_database(
     if target.exists():
         sidecar = _sidecar_for(target)
         target.rename(sidecar)
+        # SQLite binds WAL/SHM to a DB by filesystem path. Move them with
+        # the renamed DB so the freshly-copied backup doesn't inherit
+        # orphan sidecars that could replay during WAL recovery on the
+        # next open.
+        _move_wal_siblings(target, sidecar)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, target)
+    # Defensive: force a clean checkpoint of the restored file so any
+    # stray ``-wal`` left behind by something other than the rename above
+    # is materialised into the main file and the WAL is truncated.
+    _wal_checkpoint_truncate(target)
 
     # Verify the restored file is still readable. If this fails we leave the
     # sidecar in place so a human can revert by renaming it back.
