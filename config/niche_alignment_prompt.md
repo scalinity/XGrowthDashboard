@@ -18,12 +18,8 @@ Hard constraints:
 
 Return ONLY a JSON object in exactly this shape — no prose wrapper, no code fence:
 
-```
-{
-  "aligned": true | false,
-  "gaps": ["...", "..."],
-  "suggestions": ["...", "..."]
-}
-```
+  - `aligned` (boolean) — true if the bio reflects the niche tightly enough, false otherwise.
+  - `gaps` (array of strings) — what's missing or misaligned. May be empty.
+  - `suggestions` (array of strings) — concrete edits Daniel could make. May be empty.
 
-Both lists may be empty. `gaps` describes what's missing or misaligned; `suggestions` describes concrete edits Daniel could make. Aim for 0-4 items per list — be selective, not exhaustive.
+Aim for 0-4 items per list — be selective, not exhaustive.
