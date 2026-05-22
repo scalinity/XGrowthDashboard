@@ -49,6 +49,14 @@ from app.pages import open_connection
 DEFAULT_MODEL: str = "claude-opus-4-7"
 COACH_CONTEXT_SEED: str = "coach"  # marks the conversation as Coach-mode
 
+# Allowlist for confidence_label values written to agent_messages — must
+# stay in lockstep with the CHECK constraint in migration 011 (§28.14).
+# Adding a label here without the migration would corrupt the conversation;
+# adding to the migration without here would silently strip a valid label.
+_ALLOWED_CONFIDENCE_LABELS: frozenset[str] = frozenset(
+    {"fact", "inference", "speculation", "mixed"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Session-state bootstrap.
@@ -256,9 +264,12 @@ def _call_anthropic(
         + int(getattr(resp.usage, "output_tokens", 0) or 0)
     )
     # Confidence-label extraction: take the dominant <confidence> tag
-    # in the response, if any. The orchestrator's §28.14 enforcement
-    # also tracks untagged claims — that's covered for Coach turns by
-    # the refuse-without-evidence gate further down.
+    # in the response, if any. agent_messages.confidence_label has a
+    # CHECK constraint (migration 011) restricting to the four allowed
+    # values — anything off the list trips IntegrityError and (under
+    # autocommit) leaves an orphan user-message row behind. Allowlist
+    # before persistence so label drift (HIGH, certain, Inference, etc.)
+    # silently degrades to NULL instead of crashing the turn.
     import re
 
     confs = re.findall(r"<confidence>([^<]+)</confidence>", text)
@@ -266,7 +277,12 @@ def _call_anthropic(
     if confs:
         from collections import Counter
 
-        confidence_label = Counter(c.strip() for c in confs).most_common(1)[0][0]
+        normalized = [
+            c.strip().lower() for c in confs
+            if c.strip().lower() in _ALLOWED_CONFIDENCE_LABELS
+        ]
+        if normalized:
+            confidence_label = Counter(normalized).most_common(1)[0][0]
     return text, confidence_label, tokens_used
 
 
