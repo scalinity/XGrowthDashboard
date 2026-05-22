@@ -158,6 +158,12 @@ def test_restore_dry_run_does_not_touch_target(
     # No sidecar should have been created during dry-run.
     sidecars = list(db_path.parent.glob(f"{db_path.name}.pre-restore.*"))
     assert sidecars == [], f"Dry-run must not create sidecars; found {sidecars}"
+    # W6 regression — dry-run must NOT advertise a sidecar path; the real
+    # --confirm run picks a fresh timestamp, so any predicted path would
+    # mismatch and break the printed rollback instruction.
+    assert result.sidecar_path is None, (
+        f"Dry-run must not predict a sidecar path; got {result.sidecar_path}"
+    )
 
 
 # ---------------------------------------------------------------------------

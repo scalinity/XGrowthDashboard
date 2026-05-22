@@ -156,10 +156,15 @@ def restore_database(
         )
 
     if dry_run:
+        # Don't synthesise a sidecar_path for the dry-run result. The
+        # actual `--confirm` run picks its sidecar at the moment of
+        # rename (fresh datetime.now()), so any path we returned here
+        # would not match the one created later — and a user following
+        # `mv <displayed-sidecar> <target>` would hit "no such file".
         return RestoreResult(
             backup_path=backup,
             target_path=target,
-            sidecar_path=_sidecar_for(target) if target.exists() else None,
+            sidecar_path=None,
             dry_run=True,
             integrity_check_passed=True,
         )
@@ -206,7 +211,21 @@ def _print_plan(result: RestoreResult) -> None:
         print("Restore complete.")
     print(f"  backup:      {result.backup_path}")
     print(f"  target:      {result.target_path}")
-    print(f"  sidecar:     {result.sidecar_path if result.sidecar_path else '(target did not exist; no sidecar created)'}")
+    if result.dry_run:
+        # Don't print a predicted sidecar path — the real --confirm run
+        # generates a fresh timestamp at rename time, so any path printed
+        # here would not match the one actually created. Describe the
+        # naming pattern instead.
+        if result.target_path.exists():
+            print(
+                "  sidecar:     <target>.pre-restore.<timestamp>  (created on --confirm)"
+            )
+        else:
+            print("  sidecar:     (target does not exist; no sidecar will be created)")
+    else:
+        print(
+            f"  sidecar:     {result.sidecar_path if result.sidecar_path else '(target did not exist; no sidecar created)'}"
+        )
     print(f"  integrity:   {'ok' if result.integrity_check_passed else 'FAILED'}")
     if result.dry_run:
         print()
