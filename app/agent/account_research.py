@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import niche as _niche
+from app.db import transaction
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 ACCOUNT_RESEARCH_PROMPT_PATH: Path = (
@@ -530,25 +531,31 @@ def generate_reply_target(
     # synthetic fragment so each promoted target is unique per report.
     # X ignores the fragment, so click-through still lands on the
     # profile.
+    # P510R-3: the INSERT into reply_targets + the UPDATE that stamps
+    # account_research_reports.linked_reply_target_id are an atomic
+    # promise per §28.24's bidirectional-link contract. Wrap in
+    # transaction() so a failure between the two doesn't leave a
+    # reply_targets row orphaned with no back-link.
     synthetic_url = f"https://x.com/{handle}#account-research-{report_id}"
-    cur = conn.execute(
-        """
-        INSERT INTO reply_targets
-          (discovered_via, source, target_post_url, target_author_handle,
-           score_rationale, status)
-        VALUES ('agent_score', 'agent_curated_account', ?, ?, ?, 'candidate')
-        RETURNING id
-        """,
-        (
-            synthetic_url,
-            handle,
-            json.dumps(reply_strategy),
-        ),
-    )
-    reply_target_id = int(cur.fetchone()[0])
-    link_to_reply_target(
-        conn, report_id=report_id, reply_target_id=reply_target_id
-    )
+    with transaction(conn):
+        cur = conn.execute(
+            """
+            INSERT INTO reply_targets
+              (discovered_via, source, target_post_url, target_author_handle,
+               score_rationale, status)
+            VALUES ('agent_score', 'agent_curated_account', ?, ?, ?, 'candidate')
+            RETURNING id
+            """,
+            (
+                synthetic_url,
+                handle,
+                json.dumps(reply_strategy),
+            ),
+        )
+        reply_target_id = int(cur.fetchone()[0])
+        link_to_reply_target(
+            conn, report_id=report_id, reply_target_id=reply_target_id
+        )
     return reply_target_id
 
 

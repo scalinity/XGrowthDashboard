@@ -35,6 +35,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import streamlit as st
 
 from app.agent import coach as _coach
+from app.db import transaction as _coach_transaction
 from app.components.theme import (
     PALETTE,
     apply_theme,
@@ -290,46 +291,64 @@ def _call_anthropic(
 # Explicit on-submit handler.
 # ---------------------------------------------------------------------------
 def _handle_user_turn(user_text: str) -> None:
-    """One round-trip: insert user msg → call API → enforce() → persist."""
+    """One round-trip: call API → enforce() → persist user + assistant atomically.
+
+    P510R-3: do NOT insert the user message before the API call. Under
+    autocommit, an API failure (routine 429/5xx/timeout) would leave
+    an orphan user turn with no assistant reply, and the next rerun
+    would replay the orphan back to the model. We assemble the API
+    request from prior history + the in-hand user_text, call Anthropic,
+    run enforce(), and only then persist BOTH messages inside one
+    transaction() — atomic round-trip or atomic no-op.
+    """
     if not user_text.strip():
         return
     st.session_state["coach_last_error"] = None
     with open_connection() as conn:
         conv_id = _ensure_conversation(conn)
-        _insert_message(conn, conv_id, "user", user_text)
         history = _load_messages(conn, conv_id)
         refuse_flag = _get_bool_setting(
             conn, "coach_refuse_without_evidence", default=True
         )
-        try:
-            system_prompt = _build_system_prompt()
-            api_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in history
-                if m["role"] in ("user", "assistant")
-            ]
-            response_text, confidence_label, _tokens = _call_anthropic(
-                system_prompt=system_prompt, messages=api_messages
-            )
-        except Exception as exc:  # noqa: BLE001
-            st.session_state["coach_last_error"] = (
-                f"{type(exc).__name__}: {exc}"
-            )
-            return
 
+    # API call OUTSIDE the connection scope: holding a SQLite writer
+    # lock across a multi-second model round-trip blocks other pages
+    # (P510R-6 motivation). The historical state we need for the
+    # request is already in `history`.
+    api_messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in history
+        if m["role"] in ("user", "assistant")
+    ]
+    api_messages.append({"role": "user", "content": user_text})
+    try:
+        system_prompt = _build_system_prompt()
+        response_text, confidence_label, _tokens = _call_anthropic(
+            system_prompt=system_prompt, messages=api_messages
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["coach_last_error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    # Fresh connection for the atomic two-row write.
+    with open_connection() as conn:
         result = _coach.enforce(
             response_text,
             conn,
             refuse_without_evidence=refuse_flag,
         )
-        _insert_message(
-            conn,
-            conv_id,
-            "assistant",
-            result.clean_text,
-            evidence_citations=[c.to_dict() for c in result.surviving],
-            confidence_label=confidence_label,
-        )
+        with _coach_transaction(conn):
+            _insert_message(conn, conv_id, "user", user_text)
+            _insert_message(
+                conn,
+                conv_id,
+                "assistant",
+                result.clean_text,
+                evidence_citations=[c.to_dict() for c in result.surviving],
+                confidence_label=confidence_label,
+            )
 
 
 def _handle_new_conversation() -> None:

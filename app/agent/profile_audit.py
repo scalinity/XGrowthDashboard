@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from app.agent import niche as _niche
 from app.agent import voice_profile as _voice_profile
+from app.db import transaction
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 PROFILE_AUDIT_PROMPT_PATH: Path = (
@@ -509,48 +510,56 @@ def save(
     Append-only history per §28.25: we never UPDATE prior audits, only
     set their ``superseded_by_audit_id`` back-reference. The "current"
     audit is implicitly the most recent row by ``audited_at_utc``.
-    """
-    cur = conn.execute(
-        """
-        INSERT INTO profile_audits
-          (bio_snapshot, pinned_post_id, pinned_post_text,
-           recent_posts_window_days, recent_post_ids_json,
-           active_voice_profile_id, niche_problem_snapshot,
-           niche_person_snapshot, audit_json, model_used, tokens_used)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-        """,
-        (
-            bio_snapshot,
-            pinned_post_id,
-            pinned_post_text,
-            int(snapshot["recent_posts_window_days"]),
-            json.dumps(snapshot["recent_post_ids"]),
-            snapshot["active_voice_profile_id"],
-            snapshot["niche_problem_snapshot"],
-            snapshot["niche_person_snapshot"],
-            analysis.to_json(),
-            analysis.model_used,
-            int(analysis.tokens_used),
-        ),
-    )
-    new_id = int(cur.fetchone()[0])
 
-    # Stamp the prior latest audit (if any) as superseded by the new row.
-    conn.execute(
-        """
-        UPDATE profile_audits
-        SET superseded_by_audit_id = ?
-        WHERE id = (
-            SELECT id FROM profile_audits
-            WHERE id != ?
-            ORDER BY audited_at_utc DESC, id DESC
-            LIMIT 1
+    P510R-3: the INSERT + UPDATE pair runs inside ``transaction()`` so
+    a mid-sequence failure (DB lock, process kill between statements)
+    rolls back both. Under autocommit, the previous shape left a new
+    audit committed but the prior row's back-reference unset — the
+    chain would gap and never self-heal.
+    """
+    with transaction(conn):
+        cur = conn.execute(
+            """
+            INSERT INTO profile_audits
+              (bio_snapshot, pinned_post_id, pinned_post_text,
+               recent_posts_window_days, recent_post_ids_json,
+               active_voice_profile_id, niche_problem_snapshot,
+               niche_person_snapshot, audit_json, model_used, tokens_used)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                bio_snapshot,
+                pinned_post_id,
+                pinned_post_text,
+                int(snapshot["recent_posts_window_days"]),
+                json.dumps(snapshot["recent_post_ids"]),
+                snapshot["active_voice_profile_id"],
+                snapshot["niche_problem_snapshot"],
+                snapshot["niche_person_snapshot"],
+                analysis.to_json(),
+                analysis.model_used,
+                int(analysis.tokens_used),
+            ),
         )
-          AND superseded_by_audit_id IS NULL
-        """,
-        (new_id, new_id),
-    )
+        new_id = int(cur.fetchone()[0])
+
+        # Stamp the prior latest audit (if any) as superseded by the
+        # new row.
+        conn.execute(
+            """
+            UPDATE profile_audits
+            SET superseded_by_audit_id = ?
+            WHERE id = (
+                SELECT id FROM profile_audits
+                WHERE id != ?
+                ORDER BY audited_at_utc DESC, id DESC
+                LIMIT 1
+            )
+              AND superseded_by_audit_id IS NULL
+            """,
+            (new_id, new_id),
+        )
     return new_id
 
 
