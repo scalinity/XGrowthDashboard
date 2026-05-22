@@ -45,8 +45,16 @@ class NicheDefinition:
     problem: str
     person: str
 
+    def __post_init__(self) -> None:
+        # P59A-S10: canonicalize at construction so every consumer sees
+        # stripped values and is_defined() becomes a trivial truthiness
+        # check. object.__setattr__ is required because the dataclass is
+        # frozen — this is the documented frozen-dataclass workaround.
+        object.__setattr__(self, "problem", self.problem.strip())
+        object.__setattr__(self, "person", self.person.strip())
+
     def is_defined(self) -> bool:
-        return bool(self.problem.strip()) and bool(self.person.strip())
+        return bool(self.problem) and bool(self.person)
 
 
 CANONICAL_REFUSAL: str = (
