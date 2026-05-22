@@ -180,12 +180,23 @@ def load_recent_post_ids(
 def load_recent_post_texts(
     conn: sqlite3.Connection, *, post_ids: list[int]
 ) -> list[str]:
-    # P510R-8: posts.text is NOT NULL in migration 001, so the NULL
-    # case shouldn't reach via normal flow. But belt-and-suspenders:
-    # if a future migration loosens the constraint, or someone hand-
-    # edits the DB, this guard prevents downstream
-    # "\n\n---\n\n".join(...) from raising TypeError on a NULL row.
-    # Empty string keeps the boundary separator intact in that case.
+    """Return post text bodies for ``post_ids``, RECENCY-ORDERED.
+
+    P510R-19: the parameter name suggests the caller controls order,
+    but the SQL ORDER BY ``created_date DESC, id DESC`` re-sorts the
+    results regardless of the input order. Callers who need
+    chronological output should just rely on this function's contract
+    — the test ``test_load_recent_post_texts_orders_newest_first``
+    pins the recency-ordering behavior. Treat the input list as a
+    SET of ids to fetch, not an ordering hint.
+
+    P510R-8: posts.text is NOT NULL in migration 001, so the NULL
+    case shouldn't reach via normal flow. But belt-and-suspenders:
+    if a future migration loosens the constraint, or someone hand-
+    edits the DB, this guard prevents downstream
+    "\\n\\n---\\n\\n".join(...) from raising TypeError on a NULL row.
+    Empty string keeps the boundary separator intact in that case.
+    """
     if not post_ids:
         return []
     placeholders = ",".join("?" * len(post_ids))
