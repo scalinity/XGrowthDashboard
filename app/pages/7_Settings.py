@@ -229,6 +229,8 @@ _SECONDS_PER_DAY = 24 * _SECONDS_PER_HOUR
 def _humanise_age(seconds: float) -> str:
     """Compact `Nh Mm ago` / `Nd ago` caption for the last-backup readout."""
     seconds = max(0, int(seconds))
+    if seconds < 2:
+        return "just now"
     if seconds < _SECONDS_PER_MINUTE:
         return f"{seconds}s ago"
     if seconds < _SECONDS_PER_HOUR:
