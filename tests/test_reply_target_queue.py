@@ -150,6 +150,77 @@ def test_score_without_judgments_leaves_action_null(db_conn: sqlite3.Connection)
     assert s["saturation_score"] is not None
 
 
+def test_score_rejects_mixed_mode_with_both_candidates_and_reply_target_id(db_conn: sqlite3.Connection):
+    """/review-2 🟡 #4 — both inputs is an ambiguous call; reject loudly."""
+    out = _score_reply_candidates(
+        db_conn,
+        candidates=[{"url": "https://x.com/x/status/1"}],
+        reply_target_id=1,
+    )
+    assert out["scored"] == []
+    assert any("either candidates or reply_target_id" in e for e in out["errors"])
+
+
+def test_score_rolls_back_partial_row_on_inner_check_failure(
+    db_conn: sqlite3.Connection, monkeypatch
+):
+    """/review-2 🔴 #2 — a CHECK violation on the score UPDATE must roll
+    back the just-INSERTed reply_targets row instead of orphaning it.
+    """
+    # Force the inner UPDATE to fail by patching the resolver to return
+    # an out-of-range action_score that violates the CHECK on
+    # recommended_action_score (BETWEEN 0 AND 3).
+    import app.agent.tools as tools_mod
+
+    original = tools_mod._compute_and_persist_scores_locked
+
+    def _broken_compute(*args, **kwargs):
+        # Mimic the contract but raise to simulate a downstream failure.
+        raise sqlite3.IntegrityError("simulated CHECK violation on score")
+
+    monkeypatch.setattr(tools_mod, "_compute_and_persist_scores_locked", _broken_compute)
+
+    out = _score_reply_candidates(
+        db_conn,
+        candidates=[{
+            "url": "https://x.com/x/status/999",
+            "author_handle": "x",
+            "like_count": 30,
+            "reply_count": 5,
+            "relevance_score": 3,
+            "reply_opportunity_score": 3,
+        }],
+    )
+    # Result: per-candidate error, no scored entries.
+    assert out["scored"] == []
+    assert any("simulated CHECK violation" in e for e in out["errors"])
+    # Critical assertion: NO orphaned row in reply_targets.
+    row = db_conn.execute(
+        "SELECT id FROM reply_targets WHERE target_post_url = ?",
+        ("https://x.com/x/status/999",),
+    ).fetchone()
+    assert row is None, (
+        "🔴 #2 regression — partial reply_targets row survived an inner-tx "
+        "failure; the outer transaction should have rolled it back."
+    )
+
+    # Restore the real function and re-run; the row should land cleanly.
+    monkeypatch.setattr(tools_mod, "_compute_and_persist_scores_locked", original)
+    out2 = _score_reply_candidates(
+        db_conn,
+        candidates=[{
+            "url": "https://x.com/x/status/999",
+            "author_handle": "x",
+            "like_count": 30,
+            "reply_count": 5,
+            "relevance_score": 3,
+            "reply_opportunity_score": 3,
+        }],
+    )
+    assert len(out2["scored"]) == 1
+    assert out2["errors"] == []
+
+
 def test_score_re_scores_existing_row_by_id(db_conn: sqlite3.Connection):
     rec = _record_reply_target(
         db_conn,

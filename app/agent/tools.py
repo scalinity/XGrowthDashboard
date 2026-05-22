@@ -401,7 +401,7 @@ def _load_engagement_surface_settings(conn: sqlite3.Connection) -> dict[str, Any
     return settings
 
 
-def _compute_and_persist_scores(
+def _compute_and_persist_scores_locked(
     conn: sqlite3.Connection,
     *,
     reply_target_id: int,
@@ -412,9 +412,15 @@ def _compute_and_persist_scores(
     pillar: str | None = None,
     audience: str | None = None,
 ) -> dict[str, Any]:
-    """Re-score an existing reply_targets row in place and return the result.
+    """Re-score an existing reply_targets row IN A CALLER-OWNED TRANSACTION.
 
-    Shared by both input shapes of score_reply_candidates.
+    /review-2 🔴 #2 — this function MUST be called inside an outer
+    ``with transaction(conn):`` block. The caller owns the transaction
+    boundary so the INSERT-into-reply_targets, the metric-refresh UPDATE,
+    and the score UPDATE all commit atomically. If the resolver or the
+    UPDATE raises (e.g. CHECK constraint violation on an out-of-range
+    relevance_score the agent emitted), the entire unit-of-work rolls
+    back, preventing orphaned partial rows.
     """
     row = conn.execute(
         "SELECT * FROM reply_targets WHERE id = ?", (int(reply_target_id),)
@@ -439,30 +445,29 @@ def _compute_and_persist_scores(
         label = None
         action_score = None
 
-    with transaction(conn):
-        conn.execute(
-            """
-            UPDATE reply_targets
-            SET relevance_score          = COALESCE(?, relevance_score),
-                engagement_surface_score = ?,
-                saturation_score         = ?,
-                reply_opportunity_score  = COALESCE(?, reply_opportunity_score),
-                recommended_action_label = ?,
-                recommended_action_score = ?,
-                score_rationale          = COALESCE(?, score_rationale),
-                reply_intent             = COALESCE(?, reply_intent),
-                pillar                   = COALESCE(?, pillar),
-                audience                 = COALESCE(?, audience),
-                last_checked_at_utc      = datetime('now')
-            WHERE id = ?
-            """,
-            (
-                relevance, eng, sat, reply_opportunity,
-                label, action_score, rationale,
-                reply_intent, pillar, audience,
-                int(reply_target_id),
-            ),
-        )
+    conn.execute(
+        """
+        UPDATE reply_targets
+        SET relevance_score          = COALESCE(?, relevance_score),
+            engagement_surface_score = ?,
+            saturation_score         = ?,
+            reply_opportunity_score  = COALESCE(?, reply_opportunity_score),
+            recommended_action_label = ?,
+            recommended_action_score = ?,
+            score_rationale          = COALESCE(?, score_rationale),
+            reply_intent             = COALESCE(?, reply_intent),
+            pillar                   = COALESCE(?, pillar),
+            audience                 = COALESCE(?, audience),
+            last_checked_at_utc      = datetime('now')
+        WHERE id = ?
+        """,
+        (
+            relevance, eng, sat, reply_opportunity,
+            label, action_score, rationale,
+            reply_intent, pillar, audience,
+            int(reply_target_id),
+        ),
+    )
 
     return {
         "reply_target_id": int(reply_target_id),
@@ -482,15 +487,29 @@ def _score_reply_candidates(
     candidates: list[dict[str, Any]] | None = None,
     reply_target_id: int | None = None,
 ) -> dict[str, Any]:
-    if reply_target_id is not None and not candidates:
-        result = _compute_and_persist_scores(
-            conn,
-            reply_target_id=int(reply_target_id),
-            relevance=None,
-            reply_opportunity=None,
-            rationale=None,
-        )
-        return {"scored": [result] if "error" not in result else [], "errors": [result["error"]] if "error" in result else []}
+    # /review-2 🟡 #4 — reject the mixed-mode call shape loudly instead of
+    # silently dropping reply_target_id when candidates are also passed.
+    if reply_target_id is not None and candidates:
+        return {
+            "scored": [],
+            "errors": [
+                "pass either candidates or reply_target_id, not both"
+            ],
+        }
+
+    if reply_target_id is not None:
+        # /review-2 🔴 #2 — caller owns the transaction.
+        with transaction(conn):
+            result = _compute_and_persist_scores_locked(
+                conn,
+                reply_target_id=int(reply_target_id),
+                relevance=None,
+                reply_opportunity=None,
+                rationale=None,
+            )
+        if "error" in result:
+            return {"scored": [], "errors": [result["error"]]}
+        return {"scored": [result], "errors": []}
 
     if not candidates:
         return {"scored": [], "errors": ["no candidates and no reply_target_id provided"]}
@@ -502,71 +521,87 @@ def _score_reply_candidates(
         if not url:
             errors.append("candidate missing url")
             continue
-        # Upsert by target_post_url — duplicate URL is a re-score, not a new row.
-        existing = conn.execute(
-            "SELECT id FROM reply_targets WHERE target_post_url = ?", (url,)
-        ).fetchone()
-        if existing is None:
-            new_cur = conn.execute(
-                """
-                INSERT INTO reply_targets
-                    (discovered_via, target_post_url, target_x_post_id,
-                     target_author_handle, target_author_display_name,
-                     target_author_follower_count, target_text, post_age_minutes,
-                     like_count, reply_count, repost_count, quote_count,
-                     pillar, audience, reply_intent)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    c.get("discovered_via", "agent_score"),
-                    url,
-                    c.get("target_x_post_id") or _parse_x_post_id(url),
-                    c.get("author_handle") or c.get("target_author_handle") or "unknown",
-                    c.get("target_author_display_name"),
-                    c.get("target_author_follower_count"),
-                    c.get("text") or c.get("target_text"),
-                    c.get("post_age_minutes"),
-                    c.get("like_count"),
-                    c.get("reply_count"),
-                    c.get("repost_count"),
-                    c.get("quote_count"),
-                    c.get("pillar"),
-                    c.get("audience"),
-                    c.get("reply_intent"),
-                ),
-            )
-            rt_id = int(new_cur.lastrowid)
-        else:
-            rt_id = int(existing["id"])
-            # Refresh metrics if the agent provided fresh ones.
-            updates: list[tuple[str, Any]] = []
-            for k_in, k_db in (
-                ("like_count", "like_count"),
-                ("reply_count", "reply_count"),
-                ("repost_count", "repost_count"),
-                ("quote_count", "quote_count"),
-                ("target_author_follower_count", "target_author_follower_count"),
-                ("post_age_minutes", "post_age_minutes"),
-            ):
-                if c.get(k_in) is not None:
-                    updates.append((k_db, c[k_in]))
-            if updates:
-                set_clause = ", ".join(f"{col} = ?" for col, _ in updates)
-                conn.execute(
-                    f"UPDATE reply_targets SET {set_clause} WHERE id = ?",
-                    [v for _, v in updates] + [rt_id],
-                )
+        # /review-2 🔴 #2 — INSERT + metric-refresh + score UPDATE all run
+        # inside one transaction so a CHECK failure on the inner UPDATE
+        # rolls back the just-minted row instead of orphaning it.
+        # /review-2 🟡 #2 — error dicts go to `errors`, not `scored`,
+        # so callers reading scored[i]["recommended_action_label"] don't
+        # KeyError.
+        try:
+            with transaction(conn):
+                existing = conn.execute(
+                    "SELECT id FROM reply_targets WHERE target_post_url = ?",
+                    (url,),
+                ).fetchone()
+                if existing is None:
+                    new_cur = conn.execute(
+                        """
+                        INSERT INTO reply_targets
+                            (discovered_via, target_post_url, target_x_post_id,
+                             target_author_handle, target_author_display_name,
+                             target_author_follower_count, target_text,
+                             post_age_minutes, like_count, reply_count,
+                             repost_count, quote_count, pillar, audience,
+                             reply_intent)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            c.get("discovered_via", "agent_score"),
+                            url,
+                            c.get("target_x_post_id") or _parse_x_post_id(url),
+                            c.get("author_handle") or c.get("target_author_handle") or "unknown",
+                            c.get("target_author_display_name"),
+                            c.get("target_author_follower_count"),
+                            c.get("text") or c.get("target_text"),
+                            c.get("post_age_minutes"),
+                            c.get("like_count"),
+                            c.get("reply_count"),
+                            c.get("repost_count"),
+                            c.get("quote_count"),
+                            c.get("pillar"),
+                            c.get("audience"),
+                            c.get("reply_intent"),
+                        ),
+                    )
+                    rt_id = int(new_cur.lastrowid)
+                else:
+                    rt_id = int(existing["id"])
+                    # Refresh metrics inside the same transaction so the
+                    # downstream score UPDATE sees the refreshed values.
+                    updates: list[tuple[str, Any]] = []
+                    for k_in, k_db in (
+                        ("like_count", "like_count"),
+                        ("reply_count", "reply_count"),
+                        ("repost_count", "repost_count"),
+                        ("quote_count", "quote_count"),
+                        ("target_author_follower_count", "target_author_follower_count"),
+                        ("post_age_minutes", "post_age_minutes"),
+                    ):
+                        if c.get(k_in) is not None:
+                            updates.append((k_db, c[k_in]))
+                    if updates:
+                        set_clause = ", ".join(f"{col} = ?" for col, _ in updates)
+                        conn.execute(
+                            f"UPDATE reply_targets SET {set_clause} WHERE id = ?",
+                            [v for _, v in updates] + [rt_id],
+                        )
 
-        result = _compute_and_persist_scores(
-            conn,
-            reply_target_id=rt_id,
-            relevance=c.get("relevance_score"),
-            reply_opportunity=c.get("reply_opportunity_score"),
-            rationale=c.get("score_rationale"),
-            reply_intent=c.get("reply_intent"),
-            pillar=c.get("pillar"),
-            audience=c.get("audience"),
-        )
+                result = _compute_and_persist_scores_locked(
+                    conn,
+                    reply_target_id=rt_id,
+                    relevance=c.get("relevance_score"),
+                    reply_opportunity=c.get("reply_opportunity_score"),
+                    rationale=c.get("score_rationale"),
+                    reply_intent=c.get("reply_intent"),
+                    pillar=c.get("pillar"),
+                    audience=c.get("audience"),
+                )
+        except Exception as exc:  # noqa: BLE001 — wrap any DB error per candidate
+            errors.append(f"candidate {url!r}: {exc}")
+            continue
+        if "error" in result:
+            errors.append(result["error"])
+            continue
         scored.append(result)
 
     return {"scored": scored, "errors": errors}
