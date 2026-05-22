@@ -526,12 +526,19 @@ def enforce(
     surviving, stripped = validate_against_allowlist(conn, citations)
     clean_text = _strip_citation_tokens(text, stripped)
 
+    # P510R-17: evaluate analytical-claim presence on the ORIGINAL
+    # text, not the post-strip cleaned text. The §28.23 contract is
+    # "uncited analytical claims → refusal" — if stripping took both
+    # an analytical phrase and its adjacent citation, the cleaned
+    # text could look innocuous and let the refusal gate silently
+    # not fire even though the agent's original utterance was the
+    # very thing the gate is meant to catch.
     refused = False
     refusal_reason: str | None = None
     if (
         refuse_without_evidence
         and not surviving
-        and _patterns.has_analytical_claim(clean_text)
+        and _patterns.has_analytical_claim(text)
     ):
         gap = _generate_gap_description(stripped, text)
         clean_text = _format_refusal(gap)
