@@ -29,6 +29,31 @@ Write-through points are enumerated in §28.30 of ``spec.md``:
 The agent does NOT have a tool that touches ``audit_logs``. The startup
 assertion in ``tools.py`` would fail if anyone added one — see
 ``test_audit_log_no_agent_tool_exposes_audit_logs``.
+
+Transactional discipline (P511R-13):
+
+Two distinct write-through patterns coexist intentionally:
+
+1. **Transactional wrap** — ``set_setting`` (``app/forms/__init__.py``) +
+   the §28.26 campaigns module + §28.27 monthly_review module + §28.29
+   inspiration module all wrap the primary write AND the audit_log
+   append in a single ``with transaction(conn): ...`` block. Used
+   when the audit row is the SAME event as the primary write (the
+   diff record IS the provenance of the change). Atomicity matters.
+
+2. **Best-effort append** — ``app/backup.py::backup_database`` and
+   ``app/exports/_audit.py::record_export`` write the audit row as a
+   SEPARATE autocommit insert after the primary write. Used when the
+   primary write is itself just a downstream record of an event that
+   already happened (the VACUUM INTO file is on disk; the export file
+   is on disk). The two writes are independent ledgers — losing one
+   doesn't corrupt the other. Each catches ``sqlite3.OperationalError``
+   locally and warns. The current behavior tolerates a missed audit
+   row in exchange for never rolling back a file-on-disk record.
+
+If a future write-through point sits in between (the "diff record IS
+the change" + "file already on disk" axes both apply), prefer the
+transactional wrap and document the trade-off inline.
 """
 
 from __future__ import annotations

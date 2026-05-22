@@ -75,6 +75,21 @@ def get_setting(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
         return default
 
 
+def _audit_logs_table_exists(conn: sqlite3.Connection) -> bool:
+    """P511R-13: cheap pre-check used to decide whether the audit-floor
+    write path can run transactionally with the primary write.
+
+    Returns ``True`` when migration 015 has applied (audit_logs table
+    exists). Cheap enough to call per write (sqlite_master lookup is
+    O(1) in practice); single-user app so no caching needed.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'audit_logs' LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
 def set_setting(
     conn: sqlite3.Connection,
     key: str,
@@ -112,16 +127,50 @@ def set_setting(
         except (TypeError, json.JSONDecodeError):
             old_value = prior_row[0]  # surface the raw text so the diff isn't lost
 
-    conn.execute(
-        """
+    settings_sql = """
         INSERT INTO settings (key, value_json, updated_at)
         VALUES (?, ?, datetime('now'))
         ON CONFLICT(key) DO UPDATE SET
             value_json = excluded.value_json,
             updated_at = excluded.updated_at
-        """,
-        (key, json.dumps(value)),
+    """
+    settings_params = (key, json.dumps(value))
+
+    # P511R-13: when the audit floor is reachable AND the audit row will
+    # actually land, wrap the settings INSERT + audit append in a single
+    # transaction so they commit atomically. Previously they were two
+    # autocommit writes — a transient audit-write failure left the
+    # settings change persisted with no audit trace, silently degrading
+    # the §28.30 invariant.
+    will_audit = (
+        not suppress_audit
+        and old_value != value
+        and _audit_logs_table_exists(conn)
     )
+    if will_audit:
+        from app.agent import audit_log as _audit_log
+        from app.db import transaction
+        try:
+            with transaction(conn):
+                conn.execute(settings_sql, settings_params)
+                _audit_log.log_setting_change(
+                    conn, key=key, old_value=old_value, new_value=value
+                )
+            return
+        except sqlite3.OperationalError as exc:
+            # If something transient (lock, IO) kills the transaction,
+            # both writes roll back. Fall through to the non-
+            # transactional settings-only path so the user's settings
+            # change isn't lost over an audit hiccup. The retry path
+            # keeps the §28.30 spirit (settings change is recorded)
+            # while accepting that the audit row didn't land this time.
+            _log.warning(
+                "settings[%r] transactional write failed (%s); retrying "
+                "without audit-log atomicity.",
+                key, exc,
+            )
+
+    conn.execute(settings_sql, settings_params)
 
     # Audit-log the change (§28.30 write-through point). Skipped when
     # the value didn't actually change OR when the caller flagged the
