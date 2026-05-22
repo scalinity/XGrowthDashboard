@@ -988,7 +988,9 @@ else:
                 st.markdown(
                     "<div class='numeric' style='font-size: 0.8rem; color: "
                     f"{PALETTE['bone_dim']};'>cadence: "
-                    + ", ".join(f"{k}={v}" for k, v in _cadence.items())
+                    + ", ".join(
+                        html.escape(f"{k}={v}") for k, v in _cadence.items()
+                    )
                     + "</div>",
                     unsafe_allow_html=True,
                 )
