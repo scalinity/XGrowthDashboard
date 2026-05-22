@@ -190,10 +190,14 @@ def test_restore_moves_wal_and_shm_siblings_to_sidecar(
     wal.write_bytes(b"\x00" * 32)
     shm.write_bytes(b"\x00" * 32)
 
+    # `allow_open_db=True` because the new S1 guard would otherwise refuse
+    # the restore when -wal/-shm exist. This test specifically wants to
+    # exercise the WAL-move path, not the guard — bypass it explicitly.
     result = restore_database(
         backup_path=backup.path,
         target_path=db_path,
         dry_run=False,
+        allow_open_db=True,
     )
 
     assert result.sidecar_path is not None
@@ -313,6 +317,48 @@ def test_pick_target_path_falls_back_to_monotonic_suffix(
         f"Expected suffix fallback to -3; got {target.name}"
     )
     assert not target.exists(), "Picker must return a not-yet-existing path."
+
+
+def test_restore_blocked_when_target_wal_exists(
+    db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
+) -> None:
+    """S1 regression — restore must refuse to run when <target>-wal exists
+    (proof a live process holds the DB open), unless the caller explicitly
+    opts in via allow_open_db=True.
+    """
+    from scripts.restore_db import RestoreBlockedByOpenDB
+
+    db_conn.close()
+    backup = backup_database(
+        source_path=db_path,
+        backups_dir=tmp_path / "backups",
+        retention_days=30,
+    )
+
+    # Plant a synthetic -wal next to the live DB — the cheap heuristic
+    # SQLite itself uses for "this DB has an active writer".
+    wal = db_path.with_name(db_path.name + "-wal")
+    wal.write_bytes(b"\x00" * 32)
+
+    raised = False
+    try:
+        restore_database(
+            backup_path=backup.path,
+            target_path=db_path,
+            dry_run=False,
+        )
+    except RestoreBlockedByOpenDB:
+        raised = True
+
+    assert raised, "Restore must refuse when -wal exists at target path"
+    # And the override must work:
+    result = restore_database(
+        backup_path=backup.path,
+        target_path=db_path,
+        dry_run=False,
+        allow_open_db=True,
+    )
+    assert result.integrity_check_passed is True
 
 
 def test_restore_main_translates_oserror_to_structured_failure(

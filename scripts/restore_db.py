@@ -56,6 +56,12 @@ class RestoreResult:
     integrity_check_passed: bool
 
 
+class RestoreBlockedByOpenDB(RuntimeError):
+    """Raised when ``target-wal``/``-shm`` files exist at restore time —
+    strong evidence Streamlit (or another process) has the DB open and the
+    restore would silently lose writes to a renamed-out inode."""
+
+
 def _integrity_check(path: Path) -> str:
     conn = sqlite3.connect(str(path))
     try:
@@ -127,6 +133,7 @@ def restore_database(
     target_path: Path | str | None = None,
     *,
     dry_run: bool = True,
+    allow_open_db: bool = False,
 ) -> RestoreResult:
     """Restore ``target_path`` from ``backup_path``.
 
@@ -147,6 +154,24 @@ def restore_database(
         raise FileNotFoundError(f"Backup not found: {backup}")
     if not backup.is_file():
         raise ValueError(f"Backup path is not a regular file: {backup}")
+
+    # Refuse to restore over a DB that's currently open in another process.
+    # WAL/SHM existence is the cheap heuristic SQLite itself uses: their
+    # presence proves a recent (or live) writer. Restoring under those
+    # conditions would rename the live inode to a sidecar while the open
+    # connection still writes to it — those writes are silently lost when
+    # the user later "rolls back" by mv'ing the sidecar back.
+    if not dry_run and not allow_open_db:
+        wal = _wal_sibling(target)
+        shm = _shm_sibling(target)
+        if wal.exists() or shm.exists():
+            raise RestoreBlockedByOpenDB(
+                f"Refusing to restore: {wal.name} or {shm.name} exists, "
+                "which suggests the dashboard (or another process) has the DB "
+                "open. Stop the Streamlit app and any other DB clients, then "
+                "re-run. To override this guard (advanced — you understand "
+                "the risk), pass allow_open_db=True from the Python API."
+            )
 
     check_result = _integrity_check(backup)
     if check_result != "ok":
@@ -261,6 +286,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Perform the restore. Without this flag the command is a dry-run.",
     )
+    parser.add_argument(
+        "--allow-open-db",
+        action="store_true",
+        help=(
+            "Skip the live-DB guard. By default, --confirm refuses to "
+            "restore when <target>-wal/<target>-shm exist (strong evidence "
+            "Streamlit or another process has the DB open). Pass this to "
+            "override — you must be sure no process is writing."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -268,11 +303,13 @@ def main(argv: list[str] | None = None) -> int:
             backup_path=args.backup,
             target_path=args.target,
             dry_run=not args.confirm,
+            allow_open_db=args.allow_open_db,
         )
     except (
         FileNotFoundError,
         ValueError,
         RestoreIntegrityError,
+        RestoreBlockedByOpenDB,
         OSError,
         shutil.Error,
     ) as exc:

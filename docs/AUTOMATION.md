@@ -144,6 +144,15 @@ the paths that were removed.
 
 ## Restoring from a backup
 
+> **Prerequisite — stop Streamlit first.** Restore renames the live
+> `data/dashboard.db` to a sidecar inode while the Streamlit session may
+> still hold an open connection to it. POSIX lets the rename succeed and
+> subsequent writes go into the sidecar; those writes are silently lost
+> if you later "roll back" by renaming the sidecar back. The restore
+> command checks for `data/dashboard.db-wal`/`-shm` and refuses to run
+> when either exists. To override the guard (advanced — you understand
+> the risk), pass `--allow-open-db`.
+
 The companion command is `scripts/restore_db.py`. Always start with a
 dry-run:
 
