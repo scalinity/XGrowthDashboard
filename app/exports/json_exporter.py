@@ -262,7 +262,6 @@ def _list_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
 def export_database_to_json(
     output_path: str | Path,
     *,
-    redact_secrets: bool = True,
     include_stir_pii: bool = False,
     db_path: str | Path | None = None,
     conn: sqlite3.Connection | None = None,
@@ -275,10 +274,6 @@ def export_database_to_json(
     output_path
         Destination file. Parent directory created on demand. Relative paths
         anchor on ``PROJECT_ROOT``.
-    redact_secrets
-        Master switch for redaction. Default True. Setting False is *only*
-        appropriate for tests that need to verify the unredacted shape;
-        the CLI does not surface a flag to disable redaction.
     include_stir_pii
         When True, includes ``stir_testers`` and the PII-gated columns of
         ``stir_conversion_events``. Default False per §18.
@@ -290,6 +285,15 @@ def export_database_to_json(
         2-space indent when True; compact when False. The Phase 5 prompt
         suggests minified output as a future option if size exceeds 100MB;
         for MVP-scale data, pretty makes manual inspection easier.
+
+    Notes
+    -----
+    There is intentionally no ``redact_secrets`` opt-out. Previous revisions
+    exposed one, but the failure mode was silent (a caller passing
+    ``redact_secrets=False`` would dump PII + Authorization-bearing
+    ``raw_api_responses`` blobs verbatim). Redaction is now always-on; tests
+    that need to verify the raw row shape call :func:`_normalise_row` directly
+    rather than going through this public entry point.
     """
     target = _anchor_on_project_root(Path(output_path))
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -325,20 +329,17 @@ def export_database_to_json(
             select_cols = ", ".join(json.dumps(c) for c in columns)
             rows = active.execute(f"SELECT {select_cols} FROM {json.dumps(table_name)}").fetchall()
             pii_cols = _PII_GATED_COLUMNS.get(table_name, frozenset())
-            if redact_secrets:
-                normalised = [
-                    _normalise_row(
-                        r,
-                        table_name=table_name,
-                        columns=columns,
-                        pii_columns=pii_cols,
-                        include_pii=include_stir_pii,
-                        redactions=redactions,
-                    )
-                    for r in rows
-                ]
-            else:
-                normalised = [{c: r[c] for c in columns} for r in rows]
+            normalised = [
+                _normalise_row(
+                    r,
+                    table_name=table_name,
+                    columns=columns,
+                    pii_columns=pii_cols,
+                    include_pii=include_stir_pii,
+                    redactions=redactions,
+                )
+                for r in rows
+            ]
             tables_payload[table_name] = normalised
             row_counts[table_name] = len(rows)
 
