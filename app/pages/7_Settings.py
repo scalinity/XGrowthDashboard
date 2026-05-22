@@ -290,7 +290,16 @@ if _last_backup:
             (datetime.now(timezone.utc) - _parsed).total_seconds()
         )
     except ValueError:
-        _age_caption = ""
+        # Surface a corrupted setting rather than hiding behind a blank
+        # caption. The raw value still renders below; the caption tells
+        # the user the timestamp didn't parse so they know to inspect
+        # settings.value_json.
+        _age_caption = "(unparseable timestamp)"
+        st.warning(
+            f"`last_backup_at_utc` value `{_last_backup!r}` could not be "
+            f"parsed as ISO-8601 UTC. Either re-run a backup or edit the "
+            f"row directly."
+        )
 
 if _last_backup:
     st.markdown(
