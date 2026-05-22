@@ -198,6 +198,51 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         90,
         "After this many days since last audit, §14.7 field 12 surfaces a yellow reminder banner. Audits NEVER auto-run (§28.25).",
     ),
+    # Phase 5.11 — Growth Layer + Quality-of-Life Pack (§28.26-§28.30).
+    # Mirrors migration 015_growth_layer_qol.sql so a fresh DB
+    # initialized via init_db agrees with one initialized via raw
+    # migrations only. The plagiarism thresholds are starting points;
+    # tune in Settings, never patch the constants in inspiration.py.
+    (
+        "inspiration_plagiarism_jaccard_high_threshold",
+        0.65,
+        "Jaccard token similarity >= this → deterministic plagiarism risk = high (§28.29).",
+    ),
+    (
+        "inspiration_plagiarism_jaccard_medium_threshold",
+        0.35,
+        "Jaccard token similarity >= this (and < high) → deterministic plagiarism risk = medium (§28.29).",
+    ),
+    (
+        "inspiration_plagiarism_ngram_high_threshold",
+        8,
+        "Longest shared n-gram (in words) >= this → deterministic plagiarism risk = high (§28.29).",
+    ),
+    (
+        "inspiration_plagiarism_ngram_medium_threshold",
+        5,
+        "Longest shared n-gram (in words) >= this (and < high) → deterministic plagiarism risk = medium (§28.29).",
+    ),
+    (
+        "monthly_review_auto_draft_enabled",
+        False,
+        "When true, surfaces an auto-draft banner at month start. Default OFF — anti-anxiety stance (§28.27).",
+    ),
+    (
+        "audit_log_retention_days",
+        365,
+        "audit_logs rows older than this are pruned daily; the prune self-audits. 0 disables pruning (§28.30).",
+    ),
+    (
+        "calendar_default_view",
+        "week",
+        "Default §14.11 Content Calendar window: week | two_weeks | month (§28.28).",
+    ),
+    (
+        "calendar_am_cutoff_hour",
+        12,
+        "Hour-of-day local time below which a slot is AM; at-or-above is PM (§28.28).",
+    ),
 ]
 
 

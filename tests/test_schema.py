@@ -76,6 +76,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "012_niche_content_type.sql",
     "013_strategic_analysis.sql",
     "014_velocity_view_expose_noise_floor.sql",
+    "015_growth_layer_qol.sql",
 )
 
 
@@ -678,3 +679,277 @@ def test_phase510_settings_rows_present(db_conn: sqlite3.Connection) -> None:
     keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
     missing = set(PHASE_510_SETTINGS) - keys
     assert not missing, f"missing Phase 5.10 settings rows: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.11 — Growth Layer + Quality-of-Life Pack (migration 015).
+# ---------------------------------------------------------------------------
+PHASE_511_TABLES: tuple[str, ...] = (
+    "campaigns",
+    "campaign_items",
+    "monthly_reviews",
+    "saved_inspiration_posts",
+    "inspiration_transforms",
+    "audit_logs",
+)
+
+PHASE_511_VIEWS: tuple[str, ...] = ("v_campaign_progress",)
+
+PHASE_511_SETTINGS: tuple[str, ...] = (
+    "inspiration_plagiarism_jaccard_high_threshold",
+    "inspiration_plagiarism_jaccard_medium_threshold",
+    "inspiration_plagiarism_ngram_high_threshold",
+    "inspiration_plagiarism_ngram_medium_threshold",
+    "monthly_review_auto_draft_enabled",
+    "audit_log_retention_days",
+    "calendar_default_view",
+    "calendar_am_cutoff_hour",
+)
+
+
+def test_phase511_tables_exist(db_conn: sqlite3.Connection) -> None:
+    rows = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    names = {row["name"] for row in rows}
+    missing = set(PHASE_511_TABLES) - names
+    assert not missing, f"Phase 5.11 tables missing: {missing}"
+
+
+def test_phase511_v_campaign_progress_compiles(db_conn: sqlite3.Connection) -> None:
+    for view in PHASE_511_VIEWS:
+        db_conn.execute(f"SELECT * FROM {view} LIMIT 0")
+
+
+def test_phase511_campaigns_status_check(db_conn: sqlite3.Connection) -> None:
+    db_conn.execute(
+        """
+        INSERT INTO campaigns (name, start_date, end_date)
+        VALUES ('p1', '2026-05-01', '2026-05-28')
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO campaigns (name, status, start_date, end_date)
+            VALUES ('bad', 'paused', '2026-05-01', '2026-05-28')
+            """
+        )
+
+
+def test_phase511_campaigns_date_check(db_conn: sqlite3.Connection) -> None:
+    # CHECK (start_date <= end_date) rejects inverted ranges.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO campaigns (name, start_date, end_date)
+            VALUES ('inverted', '2026-06-01', '2026-05-01')
+            """
+        )
+
+
+def test_phase511_campaign_items_cascades_on_campaign_delete(
+    db_conn: sqlite3.Connection,
+) -> None:
+    camp_id = db_conn.execute(
+        """
+        INSERT INTO campaigns (name, start_date, end_date)
+        VALUES ('p', '2026-05-01', '2026-05-28')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO campaign_items (campaign_id, item_type)
+        VALUES (?, 'post')
+        """,
+        (camp_id,),
+    )
+    db_conn.execute("DELETE FROM campaigns WHERE id = ?", (camp_id,))
+    remaining = db_conn.execute(
+        "SELECT COUNT(*) FROM campaign_items WHERE campaign_id = ?", (camp_id,)
+    ).fetchone()[0]
+    assert remaining == 0
+
+
+def test_phase511_campaign_items_status_check(db_conn: sqlite3.Connection) -> None:
+    camp_id = db_conn.execute(
+        """
+        INSERT INTO campaigns (name, start_date, end_date)
+        VALUES ('p', '2026-05-01', '2026-05-28')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO campaign_items (campaign_id, item_type, status)
+            VALUES (?, 'post', 'archived')
+            """,
+            (camp_id,),
+        )
+
+
+def test_phase511_monthly_reviews_unique_iso_month(db_conn: sqlite3.Connection) -> None:
+    db_conn.execute("INSERT INTO monthly_reviews (iso_month) VALUES ('2026-05')")
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute("INSERT INTO monthly_reviews (iso_month) VALUES ('2026-05')")
+
+
+def test_phase511_monthly_reviews_confidence_label_check(
+    db_conn: sqlite3.Connection,
+) -> None:
+    db_conn.execute(
+        "INSERT INTO monthly_reviews (iso_month, confidence_label) VALUES ('2026-06', 'fact')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO monthly_reviews (iso_month, confidence_label)
+            VALUES ('2026-07', 'maybe')
+            """
+        )
+
+
+def test_phase511_saved_inspiration_hash_unique(db_conn: sqlite3.Connection) -> None:
+    db_conn.execute(
+        """
+        INSERT INTO saved_inspiration_posts (source_post_text, source_text_hash)
+        VALUES ('hello', 'abc123')
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO saved_inspiration_posts (source_post_text, source_text_hash)
+            VALUES ('different text but same hash', 'abc123')
+            """
+        )
+
+
+def test_phase511_inspiration_transforms_mode_check(db_conn: sqlite3.Connection) -> None:
+    src_id = db_conn.execute(
+        """
+        INSERT INTO saved_inspiration_posts (source_post_text, source_text_hash)
+        VALUES ('hi', 'h1')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO inspiration_transforms
+              (saved_inspiration_id, transform_mode, output_text, output_text_hash, model_used)
+            VALUES (?, 'rewrite_in_pirate_voice', 'arr', 'h2', 'claude-opus-4-7')
+            """,
+            (src_id,),
+        )
+
+
+def test_phase511_inspiration_transforms_cascades_on_source_delete(
+    db_conn: sqlite3.Connection,
+) -> None:
+    src_id = db_conn.execute(
+        """
+        INSERT INTO saved_inspiration_posts (source_post_text, source_text_hash)
+        VALUES ('hi', 'h3')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO inspiration_transforms
+          (saved_inspiration_id, transform_mode, output_text, output_text_hash, model_used)
+        VALUES (?, 'structure', 'pattern', 'h4', 'claude-opus-4-7')
+        """,
+        (src_id,),
+    )
+    db_conn.execute("DELETE FROM saved_inspiration_posts WHERE id = ?", (src_id,))
+    remaining = db_conn.execute(
+        "SELECT COUNT(*) FROM inspiration_transforms WHERE saved_inspiration_id = ?",
+        (src_id,),
+    ).fetchone()[0]
+    assert remaining == 0
+
+
+def test_phase511_audit_logs_category_check(db_conn: sqlite3.Connection) -> None:
+    db_conn.execute(
+        "INSERT INTO audit_logs (event_category, event_type) VALUES ('settings', 'test')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            "INSERT INTO audit_logs (event_category, event_type) VALUES ('unknown', 'test')"
+        )
+
+
+def test_phase511_audit_logs_migration_row_present(db_conn: sqlite3.Connection) -> None:
+    # Migration 015's final statement logs its own application.
+    row = db_conn.execute(
+        """
+        SELECT event_category, event_type, success
+        FROM audit_logs
+        WHERE event_category = 'migration' AND event_type = 'migration_applied_015'
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["success"] == 1
+
+
+def test_phase511_v_campaign_progress_math(db_conn: sqlite3.Connection) -> None:
+    camp_id = db_conn.execute(
+        """
+        INSERT INTO campaigns (name, start_date, end_date)
+        VALUES ('p', '2026-05-01', '2026-05-28')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    # 3 items: 2 shipped, 1 planned → percent_shipped = 2/3, percent_planned_shipped = 2/3.
+    for status in ("shipped", "shipped", "planned"):
+        db_conn.execute(
+            """
+            INSERT INTO campaign_items (campaign_id, item_type, status)
+            VALUES (?, 'post', ?)
+            """,
+            (camp_id, status),
+        )
+    row = db_conn.execute(
+        """
+        SELECT items_total, items_shipped, items_planned,
+               percent_shipped, percent_planned_shipped
+        FROM v_campaign_progress WHERE campaign_id = ?
+        """,
+        (camp_id,),
+    ).fetchone()
+    assert row["items_total"] == 3
+    assert row["items_shipped"] == 2
+    assert row["items_planned"] == 1
+    assert abs(row["percent_shipped"] - (2 / 3)) < 1e-9
+    assert abs(row["percent_planned_shipped"] - (2 / 3)) < 1e-9
+
+
+def test_phase511_v_campaign_progress_null_when_empty(
+    db_conn: sqlite3.Connection,
+) -> None:
+    camp_id = db_conn.execute(
+        """
+        INSERT INTO campaigns (name, start_date, end_date)
+        VALUES ('empty', '2026-05-01', '2026-05-28')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    row = db_conn.execute(
+        """
+        SELECT items_total, percent_shipped, percent_planned_shipped
+        FROM v_campaign_progress WHERE campaign_id = ?
+        """,
+        (camp_id,),
+    ).fetchone()
+    assert row["items_total"] == 0
+    assert row["percent_shipped"] is None
+    assert row["percent_planned_shipped"] is None
+
+
+def test_phase511_settings_rows_present(db_conn: sqlite3.Connection) -> None:
+    keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
+    missing = set(PHASE_511_SETTINGS) - keys
+    assert not missing, f"missing Phase 5.11 settings rows: {missing}"
