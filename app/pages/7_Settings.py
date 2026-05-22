@@ -377,9 +377,30 @@ with _retention_col:
             st.rerun()
 
 # --- On-disk manifest: console-log columns inside an expander.
+# The expander's open/closed state is pinned in session_state so the
+# panel doesn't snap closed after a "Back up now" rerun — Streamlit
+# reruns the whole script top-to-bottom, and st.expander by default
+# resets to its initial `expanded` value on each rerun.
+if "backups_manifest_open" not in st.session_state:
+    st.session_state.backups_manifest_open = False
+
 _backups_dir = _backups_dir_from_settings()
 _backups = _list_backups(_backups_dir)
-with st.expander(f"Manifest · {len(_backups)} on disk"):
+with st.expander(
+    f"Manifest · {len(_backups)} on disk",
+    expanded=st.session_state.backups_manifest_open,
+):
+    # Streamlit doesn't expose an open/closed callback on st.expander
+    # itself, so we approximate persistence: render a small "keep open
+    # after the next rerun" toggle inside the expander. Checking it once
+    # is enough — the toggle's session_state key feeds back into
+    # `expanded=` above on the next render.
+    st.checkbox(
+        "Keep open across reruns",
+        key="backups_manifest_open",
+        help="If checked, this Manifest panel stays open after every "
+             "rerun (e.g. after running 'Back up now').",
+    )
     if not _backups:
         st.markdown(
             f"<span class='faint' style='color:{PALETTE['bone_dim']};'>"
