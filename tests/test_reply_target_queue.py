@@ -439,3 +439,175 @@ def test_reply_intent_enum_matches_across_spec_code_and_prompt():
         f"§29.5 reply_intent enum drift detected:\n"
         f"  spec:   {spec}\n  code:   {code}\n  prompt: {prompt}"
     )
+
+
+# ---------------------------------------------------------------------------
+# /review-2 🔵 #8 — AppTest-level coverage for the Mark Posted UI handler.
+#
+# The earlier tests exercise the SQL directly; this one boots the Streamlit
+# page, opens the Mark Posted form for an existing candidate, fills it in,
+# submits it, and asserts the posts row + reply_targets transition land
+# correctly. Catches integration drift between the form widgets and the
+# transaction body — e.g. a future rename of the reply_text field would
+# fail this test even when the SQL tests still pass.
+# ---------------------------------------------------------------------------
+import pathlib  # noqa: E402
+
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+from app.db import apply_migrations, connect  # noqa: E402
+
+
+def _seed_queue_db(db_path: pathlib.Path) -> int:
+    """Seed a candidate row and return its id."""
+    conn = connect(db_path)
+    apply_migrations(conn)
+    conn.execute(
+        """
+        INSERT INTO reply_targets
+            (discovered_via, target_post_url, target_author_handle,
+             target_text, like_count, reply_count, relevance_score,
+             engagement_surface_score, saturation_score,
+             reply_opportunity_score, recommended_action_label,
+             recommended_action_score, pillar, reply_intent)
+        VALUES
+            ('manual', 'https://x.com/builder/status/700', 'builder',
+             'building an app is not the same as building a business…',
+             312, 48, 3, 3, 2, 3, 'reply_now', 3, 'build', 'relationship')
+        """
+    )
+    rt_id = conn.execute("SELECT last_insert_rowid() AS x").fetchone()["x"]
+    conn.close()
+    return int(rt_id)
+
+
+def test_mark_posted_apptest_writes_reply_text_not_target_text(tmp_path):
+    """The AppTest-level handler integration test for /review-2 🔴 #1 + 🔵 #8.
+
+    Opens the Queue page, expands the Mark Posted form for the seeded
+    candidate, fills in the reply URL + reply text, submits, then asserts:
+      * `posts.text` carries Daniel's reply (not the target text).
+      * `posts.in_reply_to_reply_target_id` links to the candidate.
+      * `reply_targets.status` transitioned to 'posted'.
+      * `reply_targets.posted_reply_post_id` references the new post.
+    """
+    db_path = tmp_path / "apptest.db"
+    rt_id = _seed_queue_db(db_path)
+
+    import app.db as db_module
+    import app.pages as pages_module
+    original_db = db_module.DEFAULT_DB_PATH
+    original_pages = pages_module.DEFAULT_DB_PATH
+    db_module.DEFAULT_DB_PATH = db_path
+    pages_module.DEFAULT_DB_PATH = db_path
+    try:
+        page_path = pathlib.Path(__file__).resolve().parents[1] / "app" / "pages" / "10_Reply_Target_Queue.py"
+        at = AppTest.from_file(str(page_path), default_timeout=30)
+        at.run()
+        assert not at.exception, f"Queue page raised: {[e.value for e in at.exception]}"
+
+        # Click "Mark posted" to reveal the form for our seeded candidate.
+        mp_btn_key = f"rtq_mp_btn_{rt_id}"
+        at.button(key=mp_btn_key).click().run()
+        assert not at.exception, f"After clicking Mark posted: {at.exception}"
+
+        # Fill the form fields and submit.
+        at.text_input(key=f"rtq_mp_url_{rt_id}").set_value(
+            "https://x.com/dannyscalant/status/9001"
+        )
+        at.text_area(key=f"rtq_mp_text_{rt_id}").set_value(
+            "Distribution is the product when no one knows the product exists."
+        )
+        # Click the "Record posted" submit button by label. Streamlit
+        # AppTest exposes form_submit_button by index within its form.
+        # We find it by iterating buttons and matching the label text.
+        recorded_btn = None
+        for btn in at.button:
+            if btn.label == "Record posted":
+                recorded_btn = btn
+                break
+        assert recorded_btn is not None, "Record posted button not in AppTest tree"
+        recorded_btn.click().run()
+        assert not at.exception, (
+            f"After Record posted submit: {[e.value for e in at.exception]}"
+        )
+
+        # Inspect the DB: the row pair must land correctly.
+        conn = connect(db_path)
+        rt = conn.execute(
+            "SELECT status, posted_reply_post_id, reply_intent FROM reply_targets WHERE id = ?",
+            (rt_id,),
+        ).fetchone()
+        assert rt["status"] == "posted", (
+            f"reply_targets.status should be 'posted', got {rt['status']!r}"
+        )
+        assert rt["posted_reply_post_id"] is not None, (
+            "reply_targets.posted_reply_post_id was not set on transition"
+        )
+        post = conn.execute(
+            "SELECT text, type, in_reply_to_reply_target_id, reply_intent "
+            "FROM posts WHERE id = ?",
+            (rt["posted_reply_post_id"],),
+        ).fetchone()
+        assert post is not None, "posts row not inserted"
+        # /review-2 🔴 #1 regression — must store Daniel's reply, NOT the target.
+        assert "Distribution is the product" in (post["text"] or ""), (
+            f"posts.text should carry Daniel's reply; got {post['text']!r}"
+        )
+        assert "building an app" not in (post["text"] or ""), (
+            "posts.text leaked the target_text — the 🔴 #1 regression returned"
+        )
+        assert post["in_reply_to_reply_target_id"] == rt_id
+        assert post["type"] == "reply"
+        conn.close()
+    finally:
+        db_module.DEFAULT_DB_PATH = original_db
+        pages_module.DEFAULT_DB_PATH = original_pages
+
+
+def test_mark_posted_apptest_rejects_empty_reply_text(tmp_path):
+    """Empty reply text must surface an error and not write any row."""
+    db_path = tmp_path / "apptest_empty.db"
+    rt_id = _seed_queue_db(db_path)
+
+    import app.db as db_module
+    import app.pages as pages_module
+    original_db = db_module.DEFAULT_DB_PATH
+    original_pages = pages_module.DEFAULT_DB_PATH
+    db_module.DEFAULT_DB_PATH = db_path
+    pages_module.DEFAULT_DB_PATH = db_path
+    try:
+        page_path = pathlib.Path(__file__).resolve().parents[1] / "app" / "pages" / "10_Reply_Target_Queue.py"
+        at = AppTest.from_file(str(page_path), default_timeout=30)
+        at.run()
+        at.button(key=f"rtq_mp_btn_{rt_id}").click().run()
+        at.text_input(key=f"rtq_mp_url_{rt_id}").set_value(
+            "https://x.com/dannyscalant/status/9002"
+        )
+        # Deliberately leave the text area empty.
+        recorded_btn = None
+        for btn in at.button:
+            if btn.label == "Record posted":
+                recorded_btn = btn
+                break
+        assert recorded_btn is not None
+        recorded_btn.click().run()
+
+        # No transition should have happened.
+        conn = connect(db_path)
+        rt = conn.execute(
+            "SELECT status FROM reply_targets WHERE id = ?", (rt_id,)
+        ).fetchone()
+        assert rt["status"] == "candidate", (
+            f"empty reply text should leave row at 'candidate', got {rt['status']!r}"
+        )
+        # No posts row should have been written.
+        n_posts = conn.execute(
+            "SELECT COUNT(*) AS n FROM posts WHERE in_reply_to_reply_target_id = ?",
+            (rt_id,),
+        ).fetchone()["n"]
+        assert n_posts == 0
+        conn.close()
+    finally:
+        db_module.DEFAULT_DB_PATH = original_db
+        pages_module.DEFAULT_DB_PATH = original_pages
