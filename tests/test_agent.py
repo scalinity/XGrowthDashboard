@@ -214,6 +214,18 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "section_name": "interpretation",
             "iso_month": "2026-05",
         },
+        # Phase 5.11 / §28.29 — Inspiration transform tool. saved_inspiration_id
+        # filled in below; surfaces TransformError as {"status": "failed"}
+        # so the smoke test holds without ANTHROPIC_API_KEY.
+        "transform_inspiration": {
+            "saved_inspiration_id": None,
+            "mode": "structure",
+        },
+        # Phase 5.11 / §28.29 — Pure deterministic plagiarism read.
+        "score_inspiration_plagiarism_risk": {
+            "source_text": "the quick brown fox jumps over the lazy dog",
+            "output_text": "a slow red cat hides under the agile mouse",
+        },
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
@@ -235,6 +247,14 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
                 "distribution": [{"metric": "impressions", "target": "10000"}],
                 "validation": [{"metric": "downloads", "target": "5"}],
             },
+        )
+    )
+    # Seed an inspiration so transform_inspiration has a row to target.
+    from app.agent import inspiration as _inspiration
+    sample_kwargs["transform_inspiration"]["saved_inspiration_id"] = (
+        _inspiration.save_inspiration(
+            db_conn,
+            source_post_text="smoke source text for agent tool registry",
         )
     )
 

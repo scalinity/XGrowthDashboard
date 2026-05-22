@@ -31,6 +31,7 @@ from app.db import transaction
 from app.agent import account_research as _account_research
 from app.agent import brain_dump as _brain_dump
 from app.agent import campaigns as _campaigns
+from app.agent import inspiration as _inspiration
 from app.agent import monthly_review as _monthly_review
 from app.agent import profile_audit as _profile_audit
 from app.agent import content_types as _content_types
@@ -694,6 +695,57 @@ def _draft_weekly_review_section(
             "Session-1 stub: section name validated. Session-2 wires the "
             "Anthropic call that drafts the actual prose."
         ),
+    }
+
+
+# Phase 5.11 §28.29 — inspiration transform + plagiarism score tool
+# wrappers. transform_inspiration surfaces TransformError as a
+# {"status": "failed"} dict so the smoke test holds without
+# ANTHROPIC_API_KEY. score_inspiration_plagiarism_risk is pure read,
+# never raises in practice.
+def _transform_inspiration_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    saved_inspiration_id: int,
+    mode: str,
+) -> dict[str, Any]:
+    try:
+        result = _inspiration.transform(
+            conn,
+            saved_inspiration_id=int(saved_inspiration_id),
+            mode=mode,  # type: ignore[arg-type]
+        )
+    except (_inspiration.InspirationError, _inspiration.TransformError) as exc:
+        _LOG.warning(
+            "transform_inspiration tool failed (saved_inspiration_id=%s, mode=%s): %s",
+            saved_inspiration_id, mode, exc, exc_info=True,
+        )
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "saved",
+        "transform_id": result.transform_id,
+        "saved_inspiration_id": result.saved_inspiration_id,
+        "mode": result.transform_mode,
+        "output_text": result.output_text,
+        "ai_reported_risk_label": result.ai_reported_risk_label,
+        "plagiarism_risk_label": result.plagiarism_risk_label,
+        "jaccard_similarity": result.jaccard_similarity,
+        "longest_shared_ngram_length": result.longest_shared_ngram_length,
+        "tokens_used": result.tokens_used,
+    }
+
+
+def _score_inspiration_plagiarism_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    source_text: str,
+    output_text: str,
+) -> dict[str, Any]:
+    read = _inspiration.compute_plagiarism_risk(conn, source_text, output_text)
+    return {
+        "jaccard_similarity": read.jaccard_similarity,
+        "longest_shared_ngram_length": read.longest_shared_ngram_length,
+        "deterministic_risk_label": read.deterministic_risk_label,
     }
 
 
@@ -1397,7 +1449,8 @@ def _brain_dump_process_to_dict(
     }
 
 
-# AGENT_TOOLS — the registered tool catalog (23 entries after Phase 5.11 — #22 draft_monthly_review_section).
+# AGENT_TOOLS — the registered tool catalog (25 entries after Phase 5.11
+# — #23 transform_inspiration + #24 score_inspiration_plagiarism_risk).
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -1961,6 +2014,68 @@ AGENT_TOOLS: list[ToolDef] = [
         handler=lambda conn, *, section_name, iso_month: (
             _draft_monthly_review_section(
                 conn, section_name=section_name, iso_month=iso_month
+            )
+        ),
+    ),
+    # ----- #23 transform_inspiration (Phase 5.11 §28.29) -----
+    # Runs one transform mode against a saved inspiration. Persists
+    # the row and the final plagiarism_risk_label (max of AI-reported
+    # + deterministic). Surfaces TransformError as a {status: failed}
+    # dict so the smoke test holds without ANTHROPIC_API_KEY.
+    ToolDef(
+        name="transform_inspiration",
+        description=(
+            "Run one transform mode against a saved inspiration "
+            "(§28.29). Modes: structure | hook_pattern | counterpoint | "
+            "original_version | voice_profile_version | expand | "
+            "compress. Persists the row and computes the deterministic "
+            "+ AI-reported plagiarism guard; the FINAL "
+            "plagiarism_risk_label is max(ai_reported, deterministic) "
+            "so the AI cannot underreport when token overlap is high."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "saved_inspiration_id": {"type": "integer"},
+                "mode": {
+                    "type": "string",
+                    "enum": list(_inspiration.TRANSFORM_MODES),
+                },
+            },
+            "required": ["saved_inspiration_id", "mode"],
+        },
+        handler=lambda conn, *, saved_inspiration_id, mode: (
+            _transform_inspiration_to_dict(
+                conn, saved_inspiration_id=saved_inspiration_id, mode=mode
+            )
+        ),
+    ),
+    # ----- #24 score_inspiration_plagiarism_risk (Phase 5.11 §28.29) -----
+    # Pure read-only sanity-check tool. Lets the agent score a
+    # candidate output against a source independently of the transform
+    # path — useful when the model is deciding whether to call
+    # transform_inspiration at all.
+    ToolDef(
+        name="score_inspiration_plagiarism_risk",
+        description=(
+            "Compute the deterministic plagiarism read between an "
+            "external source and a candidate output (§28.29). Returns "
+            "jaccard_similarity, longest_shared_ngram_length, and the "
+            "deterministic_risk_label (low / medium / high). Read-only "
+            "— no persistence. Use to sanity-check a candidate before "
+            "spending tokens on transform_inspiration."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_text": {"type": "string"},
+                "output_text": {"type": "string"},
+            },
+            "required": ["source_text", "output_text"],
+        },
+        handler=lambda conn, *, source_text, output_text: (
+            _score_inspiration_plagiarism_to_dict(
+                conn, source_text=source_text, output_text=output_text
             )
         ),
     ),
