@@ -13,11 +13,40 @@ from dataclasses import dataclass
 
 import plotly.graph_objects as go
 
+from app.components.theme import PALETTE
+
 
 @dataclass(frozen=True)
 class FollowerPoint:
     snapshot_date: str
     followers_count: int
+
+
+def _layout_defaults() -> dict:
+    """Plotly layout overrides that match the instrument-panel palette."""
+    return {
+        "paper_bgcolor": PALETTE["ink"],
+        "plot_bgcolor": PALETTE["ink"],
+        "font": {
+            "family": "IBM Plex Sans, sans-serif",
+            "color": PALETTE["bone"],
+            "size": 12,
+        },
+        "xaxis": {
+            "gridcolor": PALETTE["hairline"],
+            "linecolor": PALETTE["hairline"],
+            "zerolinecolor": PALETTE["hairline"],
+            "tickfont": {"family": "JetBrains Mono, monospace", "size": 11, "color": PALETTE["bone_dim"]},
+        },
+        "yaxis": {
+            "gridcolor": PALETTE["hairline"],
+            "linecolor": PALETTE["hairline"],
+            "zerolinecolor": PALETTE["hairline"],
+            "tickfont": {"family": "JetBrains Mono, monospace", "size": 11, "color": PALETTE["bone_dim"]},
+        },
+        "margin": {"t": 20, "b": 60, "l": 60, "r": 20},
+        "hovermode": "x unified",
+    }
 
 
 def follower_trend_chart(
@@ -33,21 +62,19 @@ def follower_trend_chart(
     - Shaded band of ±noise_floor_per_day around the rolling mean so the eye
       can immediately tell whether today's value is "actually different" or
       noise per §12.
-
-    Returns an empty (but valid) figure when ``points`` is empty so the
-    caller can still render it without branching.
     """
     fig = go.Figure()
     if not points:
         fig.update_layout(
+            **_layout_defaults(),
             xaxis_title="Date",
             yaxis_title="Followers",
             annotations=[{
                 "text": "No follower snapshots yet — log one from the Today view.",
                 "xref": "paper", "yref": "paper",
                 "x": 0.5, "y": 0.5, "showarrow": False,
+                "font": {"family": "Fraunces, serif", "size": 14, "color": PALETTE["bone_dim"]},
             }],
-            template="simple_white",
         )
         return fig
 
@@ -69,7 +96,7 @@ def follower_trend_chart(
             x=dates + dates[::-1],
             y=upper + lower[::-1],
             fill="toself",
-            fillcolor="rgba(31, 111, 235, 0.10)",
+            fillcolor=PALETTE["noise_band"],
             line={"color": "rgba(0,0,0,0)"},
             name=f"Noise floor (±{noise_floor_per_day}/day)",
             hoverinfo="skip",
@@ -81,7 +108,7 @@ def follower_trend_chart(
             x=dates,
             y=rolling,
             mode="lines",
-            line={"dash": "dash", "color": "#1f6feb"},
+            line={"dash": "dash", "color": PALETTE["phosphor_dim"], "width": 1.5},
             name=f"{rolling_window}-day rolling mean",
         )
     )
@@ -90,16 +117,20 @@ def follower_trend_chart(
             x=dates,
             y=values,
             mode="lines+markers",
-            line={"color": "#1c1f23"},
+            line={"color": PALETTE["phosphor"], "width": 2},
+            marker={"size": 6, "color": PALETTE["bone"], "line": {"color": PALETTE["phosphor"], "width": 1}},
             name="Followers (raw)",
         )
     )
     fig.update_layout(
+        **_layout_defaults(),
         xaxis_title="Date",
         yaxis_title="Followers",
-        legend={"orientation": "h", "y": -0.2},
-        margin={"t": 20, "b": 60, "l": 60, "r": 20},
-        template="simple_white",
-        hovermode="x unified",
+        legend={
+            "orientation": "h",
+            "y": -0.22,
+            "font": {"family": "JetBrains Mono, monospace", "size": 10, "color": PALETTE["bone_dim"]},
+            "bgcolor": "rgba(0,0,0,0)",
+        },
     )
     return fig

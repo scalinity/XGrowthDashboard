@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import plotly.graph_objects as go
 
+from app.components.theme import PALETTE
+
 
 @dataclass(frozen=True)
 class FunnelStage:
@@ -85,10 +87,9 @@ def funnel_chart(stages: list[FunnelStage]) -> go.Figure:
     y_labels = [s.label for s in stages]
     bar_values = [s.value if not s.is_gap else 0 for s in stages]
     colors = [
-        "#dde1e6" if s.is_gap else "#1f6feb"
+        PALETTE["surface_raised"] if s.is_gap else PALETTE["phosphor"]
         for s in stages
     ]
-    # Make the gap row visually obvious even without numbers.
     pattern_shape = [
         "/" if s.is_gap else ""
         for s in stages
@@ -102,41 +103,57 @@ def funnel_chart(stages: list[FunnelStage]) -> go.Figure:
             marker={
                 "color": colors,
                 "line": {
-                    "color": ["#6c757d" if s.is_gap else "#1c1f23" for s in stages],
+                    "color": [
+                        PALETTE["bone_dim"] if s.is_gap else PALETTE["phosphor_dim"]
+                        for s in stages
+                    ],
                     "width": [2 if s.is_gap else 0 for s in stages],
                 },
-                "pattern": {"shape": pattern_shape},
+                "pattern": {"shape": pattern_shape, "fgcolor": PALETTE["bone_dim"]},
             },
             text=[
                 "(no conversion across this row)" if s.is_gap else f"{s.value:,}"
                 for s in stages
             ],
             textposition="auto",
+            textfont={
+                "family": "JetBrains Mono, monospace",
+                "color": PALETTE["ink"],
+                "size": 12,
+            },
             hovertext=[s.note for s in stages],
             hoverinfo="text+x",
         )
     )
-    # Keep insertion order top-to-bottom.
     fig.update_yaxes(autorange="reversed")
     fig.update_layout(
+        paper_bgcolor=PALETTE["ink"],
+        plot_bgcolor=PALETTE["ink"],
+        font={"family": "IBM Plex Sans, sans-serif", "color": PALETTE["bone"]},
         xaxis_title="Events",
         showlegend=False,
-        margin={"t": 20, "b": 60, "l": 220, "r": 40},
-        template="simple_white",
-        height=420,
+        margin={"t": 20, "b": 60, "l": 280, "r": 40},
+        height=460,
+        xaxis={
+            "gridcolor": PALETTE["hairline"],
+            "linecolor": PALETTE["hairline"],
+            "tickfont": {"family": "JetBrains Mono, monospace", "color": PALETTE["bone_dim"]},
+        },
+        yaxis={
+            "tickfont": {"family": "IBM Plex Sans, sans-serif", "color": PALETTE["bone"]},
+        },
     )
-    # Dashed horizontal line at the gap row makes the break unmissable even
-    # on monochrome printouts.
+    # Dashed horizontal line at the gap row makes the break unmissable.
     for idx, stage in enumerate(stages):
         if stage.is_gap:
             fig.add_hline(
                 y=idx,
                 line_dash="dash",
-                line_color="#6c757d",
+                line_color=PALETTE["bone_dim"],
                 line_width=2,
                 annotation_text=stage.label,
                 annotation_position="top right",
-                annotation_font={"size": 11, "color": "#6c757d"},
+                annotation_font={"size": 11, "color": PALETTE["bone_dim"], "family": "JetBrains Mono, monospace"},
             )
     return fig
 

@@ -1,0 +1,15 @@
+# Streamlit base theme. The CSS overrides in app/components/theme.py layer on
+# top of this — config.toml sets the Streamlit-managed surfaces (sidebar,
+# widget backgrounds) and CSS handles typography + custom component styling.
+# §14.7 fixes the MVP as dark-only; see project CLAUDE.md "UI work".
+
+[theme]
+base = "dark"
+primaryColor = "#5fb3a1"            # phosphor cyan-teal accent
+backgroundColor = "#0e1116"          # deep ink
+secondaryBackgroundColor = "#161a20" # raised surface
+textColor = "#e6e1d8"                # warm bone
+font = "sans serif"
+
+[server]
+headless = true

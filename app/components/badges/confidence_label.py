@@ -7,13 +7,8 @@
 friendly badge colors. The DB stays source-of-truth; this module is the
 single place the mapping lives.
 
-Colors:
-  insufficient  — gray   (#6c757d)
-  directional   — yellow (#d9a300)
-  tentative     — blue   (#1f6feb)
-  confident     — green  (#1f8a3a)
-
-Never red. Sample-size labels frame a question about evidence, not failure.
+Colors live in ``app.components.theme.PALETTE`` (single source of truth).
+Never red — sample-size labels frame a question about evidence, not failure.
 """
 
 from __future__ import annotations
@@ -21,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import streamlit as st
+
+from app.components.theme import PALETTE
 
 
 @dataclass(frozen=True)
@@ -34,26 +31,26 @@ class _Presentation:
 UI_LABEL_PRESENTATION: dict[str, _Presentation] = {
     "insufficient": _Presentation(
         ui_label="insufficient",
-        color_hex="#1c1f23",
-        background_hex="#dde1e6",
+        color_hex=PALETTE["confidence_insufficient_fg"],
+        background_hex=PALETTE["confidence_insufficient_bg"],
         description="n < 5 OR days_covered < 3 — show scatter, no medians.",
     ),
     "directional": _Presentation(
         ui_label="directional",
-        color_hex="#1c1f23",
-        background_hex="#ffe39a",
+        color_hex=PALETTE["confidence_directional_fg"],
+        background_hex=PALETTE["confidence_directional_bg"],
         description="n is 5–14 — medians + IQR shown; no ordinal ranking.",
     ),
     "tentative": _Presentation(
         ui_label="tentative",
-        color_hex="#ffffff",
-        background_hex="#1f6feb",
+        color_hex=PALETTE["confidence_tentative_fg"],
+        background_hex=PALETTE["confidence_tentative_bg"],
         description="n is 15–29 with 7+ days — ranking allowed.",
     ),
     "confident": _Presentation(
         ui_label="confident",
-        color_hex="#ffffff",
-        background_hex="#1f8a3a",
+        color_hex=PALETTE["confidence_confident_fg"],
+        background_hex=PALETTE["confidence_confident_bg"],
         description="n ≥ 30 with 14+ days — ranking with confidence.",
     ),
 }
@@ -107,11 +104,14 @@ def confidence_badge(db_label: str | None, *, post_count: int | None = None) -> 
     st.markdown(
         f"""<span title="{help_text}" style="
             display: inline-block;
-            padding: 2px 8px;
-            border-radius: 10px;
+            padding: 2px 10px;
+            border-radius: 2px;
             background-color: {pres.background_hex};
             color: {pres.color_hex};
-            font-size: 0.85em;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.74em;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
             font-weight: 600;
             ">{pres.ui_label}</span>""",
         unsafe_allow_html=True,

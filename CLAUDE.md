@@ -53,6 +53,14 @@ The user's global rule against React's `useEffect` translates to Streamlit as fo
 
 ---
 
+## UI work
+
+- **Use the `/frontend-design` skill before building or revising any UI.** Pages under `app/pages/`, components under `app/components/`, and the `app/main.py` shell all count. Invoke the skill once at the start of UI work and commit to the aesthetic direction it returns; don't ship Streamlit defaults.
+- The dashboard's aesthetic identity is the **dark "instrument-panel" theme** owned by `app/components/theme.py`: deep-ink background, warm bone text, Fraunces display serif, IBM Plex Sans body, JetBrains Mono for every number. Every page calls `apply_theme()` first thing after `st.title`. Don't introduce new color tokens or fonts in page files — extend `theme.py` and reuse.
+- §14.7 fixes the MVP theme as dark-only. Don't add a light variant until the spec says so.
+
+---
+
 ## Scope discipline
 
 - **Comprehensive scope is the default.** MVP scope is exactly what §19 of `spec.md` enumerates — do not silently strip features. If §19 says nine views, ship nine views.

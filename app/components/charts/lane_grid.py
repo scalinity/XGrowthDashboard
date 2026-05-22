@@ -26,6 +26,7 @@ from app.components.badges import (
     sample_size_badge,
     ui_label_for_db_label,
 )
+from app.components.theme import PALETTE
 
 
 @dataclass(frozen=True)
@@ -91,37 +92,60 @@ def lane_performance_grid(lane_rows: list[LaneRow]) -> None:
         )
         return
 
-    # Header row.
-    header_cols = st.columns([2, 1, 1, 2, 2, 1, 1, 1, 2])
-    header_cols[0].markdown("**Lane**")
-    header_cols[1].markdown("**Posts**")
-    header_cols[2].markdown("**Days**")
-    header_cols[3].markdown("**Median impressions (IQR)**")
-    header_cols[4].markdown("**Median engagement (IQR)**")
-    header_cols[5].markdown("**Bookmarks**")
-    header_cols[6].markdown("**Replies**")
-    header_cols[7].markdown("**Stir**")
-    header_cols[8].markdown("**Confidence**")
+    # Header row — small mono uppercase labels in the bone_dim tone.
+    def _h(label: str) -> str:
+        return (
+            f"<span style='font-family:JetBrains Mono,monospace; font-size:0.72rem;"
+            f" letter-spacing:0.08em; text-transform:uppercase;"
+            f" color:{PALETTE['bone_dim']};'>{label}</span>"
+        )
+
+    header_cols = st.columns([2, 1, 1, 2, 1, 1, 1, 2])
+    header_cols[0].markdown(_h("Lane"), unsafe_allow_html=True)
+    header_cols[1].markdown(_h("Posts"), unsafe_allow_html=True)
+    header_cols[2].markdown(_h("Days"), unsafe_allow_html=True)
+    header_cols[3].markdown(_h("Median imp [IQR]"), unsafe_allow_html=True)
+    header_cols[4].markdown(_h("Bkmks"), unsafe_allow_html=True)
+    header_cols[5].markdown(_h("Repl"), unsafe_allow_html=True)
+    header_cols[6].markdown(_h("Stir"), unsafe_allow_html=True)
+    header_cols[7].markdown(_h("Confidence"), unsafe_allow_html=True)
+
+    st.markdown(
+        f"<hr style='border:0; border-top:1px solid {PALETTE['hairline']};"
+        " margin: 0.2rem 0 0.6rem 0;' />",
+        unsafe_allow_html=True,
+    )
 
     for row in lane_rows:
-        cols = st.columns([2, 1, 1, 2, 2, 1, 1, 1, 2])
-        cols[0].write(f"`{row.pillar}` · `{row.audience}` · `{row.cta}`")
+        cols = st.columns([2, 1, 1, 2, 1, 1, 1, 2])
+        cols[0].markdown(
+            f"<span class='numeric' style='font-size:0.92rem;'>"
+            f"{row.pillar} · {row.audience} · {row.cta}</span>",
+            unsafe_allow_html=True,
+        )
         with cols[1]:
             sample_size_badge(row.post_count)
-        cols[2].write(str(row.days_covered))
-        cols[3].write(_format_median_with_iqr(row))
-        # Engagement-rate display intentionally omitted at MVP — the spec
-        # surfaces it in the per-post table, not the lane grid (the grid is
-        # impressions-led to keep the eye on volume vs. resonance).
-        ui_label = ui_label_for_db_label(row.db_confidence_label)
-        if ui_label == "insufficient":
-            cols[4].write("—")
-        else:
-            cols[4].write("(see scatter)")
-        cols[5].write(f"{row.total_bookmarks:,}")
-        cols[6].write(f"{row.total_replies:,}")
-        cols[7].write(f"{row.stir_signal_count:,}")
-        with cols[8]:
+        cols[2].markdown(
+            f"<span class='numeric'>{row.days_covered}</span>",
+            unsafe_allow_html=True,
+        )
+        cols[3].markdown(
+            f"<span class='numeric'>{_format_median_with_iqr(row)}</span>",
+            unsafe_allow_html=True,
+        )
+        cols[4].markdown(
+            f"<span class='numeric'>{row.total_bookmarks:,}</span>",
+            unsafe_allow_html=True,
+        )
+        cols[5].markdown(
+            f"<span class='numeric'>{row.total_replies:,}</span>",
+            unsafe_allow_html=True,
+        )
+        cols[6].markdown(
+            f"<span class='numeric'>{row.stir_signal_count:,}</span>",
+            unsafe_allow_html=True,
+        )
+        with cols[7]:
             confidence_badge(row.db_confidence_label, post_count=row.post_count)
 
 

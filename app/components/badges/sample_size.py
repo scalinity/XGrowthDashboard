@@ -11,6 +11,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.components.badges.confidence_label import SAMPLE_SIZE_TOOLTIP
+from app.components.theme import PALETTE
 
 
 def sample_size_badge(n: int, *, n_target: int | None = None) -> None:
@@ -27,12 +28,14 @@ def sample_size_badge(n: int, *, n_target: int | None = None) -> None:
     st.markdown(
         f"""<span title="{SAMPLE_SIZE_TOOLTIP}" style="
             display: inline-block;
-            padding: 1px 6px;
-            border-radius: 8px;
-            background-color: #1c1f23;
-            color: #ffffff;
-            font-size: 0.75em;
-            font-family: 'SF Mono', Menlo, monospace;
+            padding: 1px 8px;
+            border-radius: 2px;
+            background-color: {PALETTE['surface_raised']};
+            color: {PALETTE['bone_dim']};
+            border: 1px solid {PALETTE['hairline']};
+            font-size: 0.72em;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 0.04em;
             ">{label}</span>""",
         unsafe_allow_html=True,
         help=SAMPLE_SIZE_TOOLTIP,
