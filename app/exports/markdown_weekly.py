@@ -224,7 +224,8 @@ def _fetch_top_lanes(conn: sqlite3.Connection, limit: int = 3) -> list[sqlite3.R
         SELECT pillar, audience, cta, post_count, days_covered,
                median_impressions, median_engagement_rate, confidence_label
           FROM v_lane_performance
-         WHERE confidence_label <> 'insufficient sample'
+         WHERE confidence_label IS NOT NULL
+           AND confidence_label <> 'insufficient sample'
          ORDER BY COALESCE(median_impressions, 0) DESC
          LIMIT ?
         """,
