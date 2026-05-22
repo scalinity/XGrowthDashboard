@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -382,22 +381,35 @@ def test_retention_zero_keeps_the_freshly_created_backup(
 
 
 def test_retention_prunes_old_backups(
-    db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
+    db_conn: sqlite3.Connection,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    """W10 hardened: clock is monkeypatched so the retention threshold is
+    deterministic. The test originally seeded "recent" / "old" files via
+    os.utime against the system clock while _prune_old_backups re-read
+    time.time() separately — harmless in practice but fragile-looking.
+    Pinning time.time() to NOW removes that ambiguity.
+    """
+    NOW = 1_716_336_000.0  # fixed Unix timestamp, ~2024-05-22 (arbitrary)
+    monkeypatch.setattr("app.backup.time.time", lambda: NOW)
+
     db_conn.close()
     backups_dir = tmp_path / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
 
     # Fake an old backup file and a recent backup file by writing then
-    # rewinding mtime via os.utime.
+    # rewinding mtime relative to the frozen NOW (so both samples are
+    # captured against the same clock the prune sweep will use).
     old_file = backups_dir / "x_growth_2025-01-01_010101.db"
     old_file.write_bytes(b"dummy old backup contents")
-    fortnight_ago = time.time() - (14 * 86400)
+    fortnight_ago = NOW - (14 * 86400)
     os.utime(old_file, (fortnight_ago, fortnight_ago))
 
     recent_file = backups_dir / "x_growth_2026-05-01_010101.db"
     recent_file.write_bytes(b"dummy recent backup contents")
-    yesterday = time.time() - 86400
+    yesterday = NOW - 86400
     os.utime(recent_file, (yesterday, yesterday))
 
     # Run a real backup with a 7-day retention; pre-existing files older
