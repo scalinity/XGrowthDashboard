@@ -1050,12 +1050,28 @@ def _record_reply_target(
         ),
     )
     rt_id = int(cur.lastrowid)
-    # Expiry-clock anchor + 24h auto-skip default per §29.11.
+    # /review-2 🔵 #4 — compute the expiry timestamp inline from the same
+    # settings the maintenance job reads, instead of returning a dead None
+    # the agent can never act on. The Queue's expire_stale_candidates() is
+    # still the authority on the actual transition; this is the informational
+    # readout the agent can quote back to Daniel.
+    expires_row = conn.execute(
+        """
+        SELECT datetime(
+            'now',
+            '+' || COALESCE(
+                (SELECT CAST(json_extract(value_json, '$') AS INTEGER)
+                   FROM settings WHERE key = 'reply_target_expiry_hours'),
+                24
+            ) || ' hours'
+        ) AS expires_at_utc
+        """
+    ).fetchone()
     return {
         "reply_target_id": rt_id,
         "target_post_url": target_post_url,
         "created": True,
-        "expires_at_utc": None,  # computed lazily by the maintenance job
+        "expires_at_utc": expires_row["expires_at_utc"] if expires_row else None,
     }
 
 
