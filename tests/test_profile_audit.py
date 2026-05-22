@@ -172,6 +172,14 @@ def test_parse_response_rejects_overall_score_out_of_range() -> None:
         _pa.parse_response(json.dumps(payload))
 
 
+def test_parse_response_rejects_boolean_overall_score() -> None:
+    """P510R-4: True is an instance of int in Python — must reject anyway."""
+    payload = json.loads(_valid_audit_json())
+    payload["overall_consistency_score"] = True
+    with pytest.raises(_pa.ProfileAuditError, match="must be an integer"):
+        _pa.parse_response(json.dumps(payload))
+
+
 # ---------------------------------------------------------------------------
 # audit() end-to-end.
 # ---------------------------------------------------------------------------

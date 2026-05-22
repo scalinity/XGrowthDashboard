@@ -282,7 +282,11 @@ def _build_user_message(
 
 
 def _validate_int_score(payload: Any, key: str, *, low: int = 0, high: int = 3) -> int:
-    if not isinstance(payload, int):
+    # P510R-4: isinstance(True, int) is True in Python — without the
+    # explicit bool guard, a model emitting `"score": true` would pass
+    # validation (True == 1) and persist a boolean where the schema
+    # expects an integer.
+    if not isinstance(payload, int) or isinstance(payload, bool):
         raise ProfileAuditError(
             f"{key} must be an integer; got {type(payload).__name__}"
         )

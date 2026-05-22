@@ -117,6 +117,14 @@ def test_parse_response_rejects_overlap_score_out_of_range() -> None:
         _ar.parse_response(bad)
 
 
+def test_parse_response_rejects_boolean_overlap_score() -> None:
+    """P510R-4: isinstance(True, int) is True — must reject anyway."""
+    payload = json.loads(_valid_analysis_json())
+    payload["niche_alignment_with_daniel"]["overlap_score"] = True
+    with pytest.raises(_ar.AccountResearchError, match="must be an integer"):
+        _ar.parse_response(json.dumps(payload))
+
+
 def test_parse_response_rejects_missing_top_level_field() -> None:
     payload = json.loads(_valid_analysis_json())
     del payload["reply_strategy"]

@@ -226,7 +226,9 @@ def _build_user_message(
 
 
 def _validate_int_score(payload: Any, key: str, *, low: int = 0, high: int = 3) -> int:
-    if not isinstance(payload, int):
+    # P510R-4: bool is a subclass of int — guard so `"score": true`
+    # doesn't silently pass as 1.
+    if not isinstance(payload, int) or isinstance(payload, bool):
         raise AccountResearchError(f"{key} must be an integer; got {type(payload).__name__}")
     if not (low <= payload <= high):
         raise AccountResearchError(f"{key}={payload} outside allowed range {low}-{high}")
