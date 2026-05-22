@@ -135,10 +135,15 @@ class ContentTypeGap:
 def get_content_type_gaps(
     conn: sqlite3.Connection, *, window_days: int = 7
 ) -> dict:
-    """Counts per content type for the rolling window.
+    """Counts per V/G/P/P content type for the rolling window.
 
-    Returns ``{counts: {type: int}, window_days: int, under_represented:
-    str|None, rationale: str}``.
+    Returns ``{counts: {type: int}, unspecified_count: int,
+    window_days: int, under_represented: str|None, rationale: str}``.
+
+    P59A-S9: ``counts`` contains ONLY the four real V/G/P/P types so
+    callers can safely iterate ``counts.keys()`` without remembering
+    to skip ``'unspecified'``. The backfill bucket is exposed
+    separately as ``unspecified_count`` for transparency.
 
     The under-represented type is the V/G/P/P value with the lowest
     count over the window. Ties resolve to the canonical
@@ -160,14 +165,14 @@ def get_content_type_gaps(
     raw_counts: dict[str, int] = {row["content_type"]: int(row["n"]) for row in rows}
 
     counts: dict[str, int] = {ct: int(raw_counts.get(ct, 0)) for ct in CONTENT_TYPES}
-    counts[UNSPECIFIED] = int(raw_counts.get(UNSPECIFIED, 0))
+    unspecified_count = int(raw_counts.get(UNSPECIFIED, 0))
 
-    real_counts = {ct: counts[ct] for ct in CONTENT_TYPES}
-    total_real = sum(real_counts.values())
+    total_real = sum(counts.values())
 
     if total_real == 0:
         return {
             "counts": counts,
+            "unspecified_count": unspecified_count,
             "window_days": n,
             "under_represented": None,
             "rationale": (
@@ -176,26 +181,28 @@ def get_content_type_gaps(
             ),
         }
 
-    min_count = min(real_counts.values())
-    max_count = max(real_counts.values())
+    min_count = min(counts.values())
+    max_count = max(counts.values())
     if min_count == max_count:
         return {
             "counts": counts,
+            "unspecified_count": unspecified_count,
             "window_days": n,
             "under_represented": None,
             "rationale": "even spread — pick what you're moved by today.",
         }
 
     # Tie-break in canonical order so suggestions don't flap turn-to-turn.
-    under_represented = next(ct for ct in CONTENT_TYPES if real_counts[ct] == min_count)
-    leader = next(ct for ct in CONTENT_TYPES if real_counts[ct] == max_count)
+    under_represented = next(ct for ct in CONTENT_TYPES if counts[ct] == min_count)
+    leader = next(ct for ct in CONTENT_TYPES if counts[ct] == max_count)
     rationale = (
-        f"you've shipped {real_counts[leader]} {leader} post"
-        f"{'s' if real_counts[leader] != 1 else ''} this week, "
-        f"{real_counts[under_represented]} {under_represented}."
+        f"you've shipped {counts[leader]} {leader} post"
+        f"{'s' if counts[leader] != 1 else ''} this week, "
+        f"{counts[under_represented]} {under_represented}."
     )
     return {
         "counts": counts,
+        "unspecified_count": unspecified_count,
         "window_days": n,
         "under_represented": under_represented,
         "rationale": rationale,

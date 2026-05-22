@@ -137,7 +137,10 @@ def test_gaps_excludes_unspecified_from_under_representation(
     _insert_post(db_conn, content_type="growth")
     _insert_post(db_conn, content_type="personality")
     out = content_types.get_content_type_gaps(db_conn, window_days=7)
-    assert out["counts"]["unspecified"] == 10
+    # P59A-S9: counts contains only the four real V/G/P/P types now;
+    # the backfill bucket lives on its own key.
+    assert "unspecified" not in out["counts"]
+    assert out["unspecified_count"] == 10
     # proof is at 0; should be the under-represented suggestion.
     assert out["under_represented"] == "proof"
 
