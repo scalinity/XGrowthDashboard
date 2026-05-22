@@ -234,7 +234,19 @@ def _normalise_row(
             try:
                 decoded = json.loads(value)
             except json.JSONDecodeError:
-                out[col] = value
+                # Fail closed. raw_api_responses payloads may contain
+                # captured Authorization-style text; a non-JSON payload
+                # (xurl transcript, partial response, error body stored
+                # as text) would otherwise bypass _redact_json_blob and
+                # land cleartext in the export. The column is TEXT NOT
+                # NULL with no JSON-validity constraint, so this branch
+                # is reachable from any non-JSON write path.
+                out[col] = _REDACTED_SENTINEL
+                redactions.setdefault(
+                    cell_path,
+                    "raw_api_responses payload was not valid JSON; "
+                    "redacted to avoid leaking captured Authorization-style text",
+                )
                 continue
             redacted, was = _redact_json_blob(decoded)
             if was:

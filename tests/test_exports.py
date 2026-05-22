@@ -256,6 +256,38 @@ def test_json_export_redacts_secret_columns(db_conn, tmp_path: Path) -> None:
     assert decoded["tables"]["raw_api_responses"][0]["response_json"]["headers"]["Authorization"] == "[REDACTED]"
 
 
+def test_json_export_fail_closes_on_non_json_raw_api_response(db_conn, tmp_path: Path) -> None:
+    """Regression for #12 / CA1 🔴 C1.
+
+    raw_api_responses.response_json is TEXT NOT NULL with no JSON-validity
+    constraint. A non-JSON payload (xurl transcript, partial response, error
+    body stored as text) must NOT bypass redaction.
+    """
+    leaked_token = "Bearer sk-live-MUSTNOTAPPEAR"
+    db_conn.execute(
+        """
+        INSERT INTO raw_api_responses (
+            source, endpoint_or_command, request_params_json, response_json,
+            status_code, collected_at_utc
+        ) VALUES (
+            'xurl', 'manual_capture',
+            NULL,
+            ?, 200, '2026-05-18T12:00:00Z'
+        )
+        """,
+        (f"HTTP/1.1 200 OK\r\nAuthorization: {leaked_token}\r\n\r\n<not-json>",),
+    )
+
+    out = tmp_path / "fail_closed.json"
+    result = export_database_to_json(out, conn=db_conn)
+    body = out.read_text(encoding="utf-8")
+
+    assert leaked_token not in body
+    assert "[REDACTED]" in body
+    cell_keys = list(result.redactions.keys())
+    assert any(k.startswith("raw_api_responses.response_json") for k in cell_keys), cell_keys
+
+
 # ---------------------------------------------------------------------------
 # Test 7 — CSV round-trip preserves row count and key fields.
 # ---------------------------------------------------------------------------
