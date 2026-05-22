@@ -140,6 +140,24 @@ def test_reply_substance_thin_acknowledgment_zero() -> None:
     assert ps.reply_substance_score(reply, target) == 0
 
 
+def test_reply_substance_thin_acknowledgment_without_target_still_zero() -> None:
+    """P58R-9: a 'great post' reply scores 0 even when target_post_text is
+    None. The thin-opener check must apply to both branches."""
+    assert ps.reply_substance_score("Great post", target_post_text=None) == 0
+
+
+def test_reply_substance_without_target_non_thin_returns_one() -> None:
+    """P58R-9: a substantive-looking reply without target text earns 1
+    (no overlap evidence available), not the prior generous 2."""
+    assert (
+        ps.reply_substance_score(
+            "Worth tracking the cohort-specific funnel here, not just the headline.",
+            target_post_text=None,
+        )
+        == 1
+    )
+
+
 def test_reply_substance_overlap_three() -> None:
     target = "The X algorithm rewards specific reply substance."
     reply = "The algorithm rewarding specific replies is exactly what shifted my drafting."

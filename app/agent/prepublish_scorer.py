@@ -322,12 +322,17 @@ def reply_substance_score(text: str, target_post_text: str | None) -> int:
     - 1: pivot only, weak target tie-in.
     - 0: "great post" / "this" / "so true" — thin acknowledgment.
     """
-    if not target_post_text:
-        # No target text known — assume the reply at least has a target
-        # URL (validated upstream); give a middle score.
-        return 2
     lower = text.lower().strip()
     thin_openers = ("great post", "this", "so true", "agreed", "love this", "+1", "facts")
+    if not target_post_text:
+        # No target text known. The thin-opener check still applies — a
+        # "great post!" reply is thin regardless of whether we can read
+        # the target. Reserve the middle "2" for the case below where a
+        # real target exists but lexical overlap is sparse.
+        for opener in thin_openers:
+            if lower.startswith(opener) and len(text) < 80:
+                return 0
+        return 1
     for opener in thin_openers:
         if lower.startswith(opener) and len(text) < 80:
             return 0
