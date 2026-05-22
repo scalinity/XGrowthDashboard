@@ -336,18 +336,37 @@ def save_inspiration(
 
 
 def archive_inspiration(conn: sqlite3.Connection, *, inspiration_id: int) -> None:
+    """Mark a saved inspiration as archived. Idempotent + audit-aware.
+
+    P511R-21: filter the UPDATE on ``status = 'active'`` AND check
+    ``cur.rowcount`` before audit-logging. Two no-op cases that
+    previously polluted the audit log:
+
+    1. Re-archiving an already-archived row — same status, no real
+       change, but the unconditional UPDATE + audit fired anyway.
+    2. Archiving a nonexistent inspiration_id — UPDATE matched zero
+       rows but audit still fired.
+
+    Mirror of the no-op suppression in ``set_setting`` and
+    ``upsert_monthly_review``.
+    """
     with transaction(conn):
-        conn.execute(
-            "UPDATE saved_inspiration_posts SET status = 'archived' WHERE id = ?",
+        cur = conn.execute(
+            """
+            UPDATE saved_inspiration_posts
+            SET status = 'archived'
+            WHERE id = ? AND status = 'active'
+            """,
             (inspiration_id,),
         )
-        _audit_log.log(
-            conn,
-            event_category="data",
-            event_type="inspiration_archived",
-            target_type="saved_inspiration_post",
-            target_id=inspiration_id,
-        )
+        if cur.rowcount > 0:
+            _audit_log.log(
+                conn,
+                event_category="data",
+                event_type="inspiration_archived",
+                target_type="saved_inspiration_post",
+                target_id=inspiration_id,
+            )
 
 
 # ---------------------------------------------------------------------------

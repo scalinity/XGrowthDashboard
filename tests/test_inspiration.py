@@ -227,6 +227,46 @@ def test_p511r19_save_inspiration_accepts_http_https(
     assert sid1 > 0 and sid2 > 0 and sid3 > 0
 
 
+def test_p511r21_archive_inspiration_no_audit_on_double_archive(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Re-archiving an already-archived row writes neither a status
+    UPDATE nor an audit row. Mirror of P511R-15's no-op rule."""
+    sid = _ins.save_inspiration(db_conn, source_post_text="archive me")
+    _ins.archive_inspiration(db_conn, inspiration_id=sid)
+    audits_after_first = [
+        r
+        for r in _audit_log.query(
+            db_conn, target_type="saved_inspiration_post", target_id=sid
+        )
+        if r.event_type == "inspiration_archived"
+    ]
+    assert len(audits_after_first) == 1
+    # Re-archive — should be a no-op everywhere.
+    _ins.archive_inspiration(db_conn, inspiration_id=sid)
+    audits_after_second = [
+        r
+        for r in _audit_log.query(
+            db_conn, target_type="saved_inspiration_post", target_id=sid
+        )
+        if r.event_type == "inspiration_archived"
+    ]
+    assert len(audits_after_second) == 1, (
+        "double-archive must not write a second audit row"
+    )
+
+
+def test_p511r21_archive_inspiration_no_audit_on_missing_row(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Archiving a nonexistent inspiration_id writes no audit row."""
+    _ins.archive_inspiration(db_conn, inspiration_id=999_999)
+    audits = _audit_log.query(
+        db_conn, target_type="saved_inspiration_post", target_id=999_999
+    )
+    assert audits == []
+
+
 def test_p511r19_save_inspiration_allows_null_or_empty_url(
     db_conn: sqlite3.Connection,
 ) -> None:
