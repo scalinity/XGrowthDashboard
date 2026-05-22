@@ -22,10 +22,13 @@ Three idempotent jobs live here:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import Any
 
 from app.db import transaction
+
+_LOG = logging.getLogger(__name__)
 
 # Used by the VACUUM cleanup; mirrors §29.11 row 5.
 DEAD_STATUSES = ("skipped", "expired", "target_deleted")
@@ -34,7 +37,13 @@ DRAFTED_BANNER_AGE_HOURS = 24
 
 
 def _get_expiry_hours(conn: sqlite3.Connection) -> int:
-    """Read ``reply_target_expiry_hours`` from settings; default 24h."""
+    """Read ``reply_target_expiry_hours`` from settings; default 24h.
+
+    /review-2 🟡 #9 — a silent fallback hides settings corruption (e.g.
+    Daniel editing ``value_json`` to a JSON string when he meant a JSON
+    int). Narrow the catch to parse-shaped exceptions and log when the
+    fallback fires so a botched edit isn't invisible.
+    """
     row = conn.execute(
         "SELECT value_json FROM settings WHERE key = 'reply_target_expiry_hours'"
     ).fetchone()
@@ -42,7 +51,11 @@ def _get_expiry_hours(conn: sqlite3.Connection) -> int:
         return 24
     try:
         return int(json.loads(row["value_json"]))
-    except Exception:
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        _LOG.warning(
+            "reply_target_expiry_hours setting unparseable (%r); falling back to 24h",
+            exc,
+        )
         return 24
 
 
