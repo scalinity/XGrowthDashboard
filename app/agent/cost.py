@@ -41,6 +41,13 @@ _MODEL_RATES: dict[str, tuple[float, float]] = {
 DEFAULT_MONTHLY_CEILING_USD: float = 25.0
 DEFAULT_CEILING_WARN_FRACTION: float = 0.80
 
+# S3: coarse projected per-call cost used by the cost-ceiling preflight.
+# Calibrated for a typical Opus tool-use round trip (a few thousand input
+# tokens + small output). The real cost is recorded post-call from the
+# token counts the API returns; this constant is only the "would this
+# call breach the cap?" guess.
+PROJECTED_CALL_COST_GUESS_USD: float = 0.05
+
 
 class MonthlyCostCeilingExceeded(RuntimeError):
     """Raised when the next agent call would breach the monthly USD ceiling."""

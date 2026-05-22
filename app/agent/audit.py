@@ -107,6 +107,13 @@ def log_tool_call(
     if tool_name in PUBLISH_TOOL_NAMES:
         redacted_args, was_redacted = _redact_publish_args(arguments, confirmation_token_id)
         redacted_flag = 1 if was_redacted else 0
+        # S8: stamp notes with 'redacted' when redaction fired, so an
+        # audit reviewer can grep `notes LIKE '%redacted%'` to find the
+        # publish-tool rows without scanning tool_name. Preserves any
+        # caller-supplied notes (e.g. C5's 'iwh-gate refused') by
+        # concatenating.
+        if was_redacted:
+            notes = f"redacted; {notes}" if notes else "redacted"
     else:
         redacted_args = dict(arguments)
         redacted_flag = 0

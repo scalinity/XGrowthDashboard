@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -40,36 +40,6 @@ from app.agent import (
     recovery,
     session,
 )
-
-
-# W20: cache detect_orphans across reruns so the chat-page banner +
-# Settings panel don't both run a full-table SELECT on every rerun.
-# Keyed by the DB path so AppTest's tmp DB doesn't collide with the
-# default DB across test runs in the same process.
-@st.cache_data(ttl=5, show_spinner=False)
-def _cached_detect_orphans(_db_path: str) -> list[dict]:
-    """Cache wrapper around recovery.detect_orphans for chat-page reads.
-
-    Returns a list of dicts (cache-friendly) rather than OrphanPost
-    dataclass instances — pages only read .post_id / .text / .publish_
-    method, so the dict shape suffices and serializes cleanly under
-    st.cache_data.
-    """
-    from app.db import connect as _connect
-    _conn = _connect(_db_path)
-    try:
-        return [
-            {
-                "post_id": o.post_id,
-                "text": o.text,
-                "published_to_x_at": o.published_to_x_at,
-                "publish_attempt_count": o.publish_attempt_count,
-                "publish_method": o.publish_method,
-            }
-            for o in recovery.detect_orphans(_conn)
-        ]
-    finally:
-        _conn.close()
 from app.agent.client import (
     AgentClient,
     start_conversation,
@@ -85,7 +55,37 @@ from app.components.theme import (
     kicker,
     tool_call_block,
 )
+from app.db import DEFAULT_DB_PATH, connect as _db_connect
 from app.pages import open_connection
+
+
+# W20: cache detect_orphans across reruns so the chat-page banner +
+# Settings panel don't both run a full-table SELECT on every rerun.
+# Keyed by the DB path so AppTest's tmp DB doesn't collide with the
+# default DB across test runs in the same process.
+@st.cache_data(ttl=5, show_spinner=False)
+def _cached_detect_orphans(_db_path: str) -> list[dict]:
+    """Cache wrapper around recovery.detect_orphans for chat-page reads.
+
+    Returns a list of dicts (cache-friendly) rather than OrphanPost
+    dataclass instances — pages only read .post_id / .text / .publish_
+    method, so the dict shape suffices and serializes cleanly under
+    st.cache_data.
+    """
+    _conn = _db_connect(_db_path)
+    try:
+        return [
+            {
+                "post_id": o.post_id,
+                "text": o.text,
+                "published_to_x_at": o.published_to_x_at,
+                "publish_attempt_count": o.publish_attempt_count,
+                "publish_method": o.publish_method,
+            }
+            for o in recovery.detect_orphans(_conn)
+        ]
+    finally:
+        _conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +99,20 @@ def _bootstrap_state() -> None:
 
 
 def _format_timestamp_short(iso_str: str | None) -> str:
+    """Format a DB timestamp as 'Wed 10:34' for the sidebar session list.
+
+    S5: uses dateutil.parser.isoparse (transitive dep via Pandas /
+    Streamlit) so timestamps written as ISO-8601 ('T' separator,
+    optional fractional seconds) parse alongside the SQLite default
+    'YYYY-MM-DD HH:MM:SS' shape.
+    """
     if not iso_str:
         return "—"
     try:
-        dt = datetime.strptime(iso_str, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=timezone.utc
-        )
+        from dateutil import parser as _date_parser
+        dt = _date_parser.isoparse(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone().strftime("%a %H:%M")
     except (ValueError, TypeError):
         return iso_str[:16]
@@ -498,8 +506,7 @@ def _render() -> None:
         # Crash-recovery banner — surfaced at the top of every chat session
         # until orphans are reconciled. Cached at 5s TTL so rapid-fire
         # reruns don't full-table-scan posts on every interaction.
-        from app.db import DEFAULT_DB_PATH as _DEFAULT_DB_PATH
-        orphans = _cached_detect_orphans(str(_DEFAULT_DB_PATH))
+        orphans = _cached_detect_orphans(str(DEFAULT_DB_PATH))
         if orphans:
             st.markdown(
                 f"<div class='callout' style='border-left-color: "

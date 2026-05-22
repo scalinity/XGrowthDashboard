@@ -120,25 +120,48 @@ class MintedToken:
     expires_at_utc: str
 
 
+def _get_setting_ttl_seconds(conn: sqlite3.Connection) -> int:
+    """Read x_posting_confirmation_token_ttl_seconds from settings (S9)."""
+    import json as _json
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'x_posting_confirmation_token_ttl_seconds'"
+    ).fetchone()
+    if row is None:
+        return DEFAULT_TOKEN_TTL_SECONDS
+    try:
+        return int(_json.loads(row["value_json"]))
+    except (_json.JSONDecodeError, ValueError, TypeError):
+        return DEFAULT_TOKEN_TTL_SECONDS
+
+
 def mint_confirmation_token(
     conn: sqlite3.Connection,
     *,
     post_id: int,
     draft_text: str,
-    ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+    ttl_seconds: int | None = None,
 ) -> MintedToken:
     """Mint a single-use publish token for ``post_id`` with the given TTL.
 
     Inserts a row into ``publish_confirmation_tokens`` with the hash of a
-    freshly-minted UUID and the hash of the current draft text. Returns the
-    raw UUID to the caller — it MUST be passed synchronously into the
-    publish tool and NEVER stored.
+    freshly-minted UUID and the hash of the current draft text. Returns
+    the raw UUID to the caller — it MUST be passed synchronously into
+    the publish tool and NEVER stored.
+
+    S9: ``ttl_seconds`` defaults to the value from settings (
+    ``x_posting_confirmation_token_ttl_seconds``, default 60) rather than
+    the hardcoded constant. Explicit kwarg still wins for tests.
     """
+    effective_ttl = (
+        int(ttl_seconds)
+        if ttl_seconds is not None
+        else _get_setting_ttl_seconds(conn)
+    )
     raw_token = uuid.uuid4().hex
     token_hash = hash_token(raw_token)
     draft_hash = hash_draft_text(draft_text)
     now = _utcnow()
-    expires_at = now + timedelta(seconds=ttl_seconds)
+    expires_at = now + timedelta(seconds=effective_ttl)
     cur = conn.execute(
         """
         INSERT INTO publish_confirmation_tokens
@@ -203,11 +226,13 @@ def validate_and_consume_token(
     if row is None:
         raise MissingTokenError("no token row matches the provided raw token")
 
-    token_id = int(row["id"] if hasattr(row, "keys") else row[0])
-    row_post_id = int(row["post_id"] if hasattr(row, "keys") else row[1])
-    issued_text_hash = row["draft_text_hash_at_issue"] if hasattr(row, "keys") else row[2]
-    expires_at_str = row["expires_at_utc"] if hasattr(row, "keys") else row[3]
-    consumed_at_str = row["consumed_at_utc"] if hasattr(row, "keys") else row[4]
+    # app.db.connect sets row_factory=sqlite3.Row globally, so the prior
+    # `hasattr(row, 'keys') else row[N]` defensive fallback was dead code.
+    token_id = int(row["id"])
+    row_post_id = int(row["post_id"])
+    issued_text_hash = row["draft_text_hash_at_issue"]
+    expires_at_str = row["expires_at_utc"]
+    consumed_at_str = row["consumed_at_utc"]
 
     # (c) not consumed (check before expiry to give the more actionable error
     # when a token has been spent; expiry vs consumed are mutually exclusive
@@ -238,8 +263,8 @@ def validate_and_consume_token(
         raise PostIdMismatchError(
             f"token {token_id} references post_id={post_id} which no longer exists"
         )
-    current_text = post_row["text"] if hasattr(post_row, "keys") else post_row[0]
-    current_status = post_row["manual_confirmation_status"] if hasattr(post_row, "keys") else post_row[1]
+    current_text = post_row["text"]
+    current_status = post_row["manual_confirmation_status"]
     if hash_draft_text(current_text) != issued_text_hash:
         raise DraftTextChangedError(
             f"post_id={post_id} text has changed since token {token_id} was issued"

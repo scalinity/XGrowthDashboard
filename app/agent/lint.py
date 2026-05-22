@@ -73,9 +73,32 @@ def _offline_lint(text: str) -> LintResult:
     )
 
 
-_HAIKU_LINT_PROMPT = """You are a content-safety lint pass. Read the draft post below and \
-decide: does it use fake urgency, manufactured scarcity, fabricated social proof, or \
-engagement-bait that doesn't deliver on its hook?
+# S10: the dark-pattern definition is now spliced from spec.md §28.2 rule
+# #12 so the Haiku gate and the main agent's training share one source of
+# truth. The prose between BEGIN/END is the verbatim spec rule body; the
+# Haiku call wraps it in the JSON-output framing.
+_DARK_PATTERN_DEFINITION = """\
+DARK PATTERNS ARE FORBIDDEN. The draft must NOT use any of:
+- fake urgency
+- manufactured scarcity
+- fabricated social proof ('many founders are saying', 'everyone is talking')
+- engagement bait that doesn't deliver on its hook (curiosity gap that the
+  post never closes, '5 secrets X don't know — number 3 will...')
+- 'controversial takes' engineered for arguments
+- manipulation of insecurity, fear, or FOMO without basis
+- pattern interrupts used to engineer outrage
+- inflated credentials, role-inflation, fabricated authority
+
+Engagement principles are TOOLS for clarity, not levers for manipulation:
+specificity, curiosity gaps the post pays off, real social proof citing
+actual numbers, real scarcity citing actual constraints. If the post
+cannot link a claim to a verifiable basis, the claim is forbidden."""
+
+_HAIKU_LINT_PROMPT = """You are a content-safety lint pass for an X (Twitter) draft.
+
+""" + _DARK_PATTERN_DEFINITION + """
+
+Read the draft below. Decide: does it use any of the forbidden patterns?
 
 Reply STRICTLY as JSON with these keys:
   dark_pattern_detected: true | false

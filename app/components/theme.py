@@ -56,6 +56,13 @@ PALETTE = {
     "confidence_confident_bg":    "#2da564",
     "confidence_confident_fg":    "#0e1116",
 
+    # S6: generic warning amber — semantic alias of confidence_directional_bg.
+    # Used by surfaces that aren't confidence-band rendering (cost meter
+    # near-cap, modal char count over 280, TTL countdown last 10 s).
+    # New code that needs "this is a soft warning" should reference
+    # `warn_amber` instead of overloading `confidence_directional_bg`.
+    "warn_amber":      "#c98b16",
+
     # Functional.
     "noise_band":      "rgba(95, 179, 161, 0.12)",  # phosphor at 12% opacity
 }
@@ -340,6 +347,11 @@ def tool_call_block(
         if status == "error"
         else PALETTE["phosphor"]
     )
+    # S7: streamlit deprecates empty-label expanders in a future version;
+    # use the tool name + summary as the label so the collapsed row still
+    # carries the info even before the user expands. The interior keeps
+    # the custom phosphor/amber keyline styling.
+    expander_label = f"[{tool_name}]  ·  {summary}"
     header_html = (
         f"<span style='font-family: JetBrains Mono, monospace; "
         f"font-size: 0.78rem; letter-spacing: 0.06em; "
@@ -347,7 +359,7 @@ def tool_call_block(
         f"[{tool_name}]</span> "
         f"<span class='dim' style='font-size: 0.85rem;'>· {summary}</span>"
     )
-    with st.expander(label="", expanded=expanded):
+    with st.expander(expander_label, expanded=expanded):
         st.markdown(
             f"<div style='border-left: 2px solid {accent}; padding: 0.15rem 0.7rem; "
             f"margin: 0 0 0.4rem -0.1rem;'>{header_html}</div>",

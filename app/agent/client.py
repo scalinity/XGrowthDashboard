@@ -1,4 +1,4 @@
-"""AgentClient — Anthropic SDK streaming wrapper (§28, §14.8).
+"""AgentClient — Anthropic SDK wrapper (§28, §14.8).
 
 The client:
 
@@ -7,15 +7,18 @@ The client:
   3. Imports tool specs from ``app.agent.tools.AGENT_TOOLS`` ONLY — the
      publish tools in ``_internal_tools`` are never imported here.
   4. Enforces the §28.6 monthly cost ceiling before each round trip.
-  5. Streams the response and dispatches tool_use blocks to local handlers.
+  5. Dispatches tool_use blocks to local handlers via ``dispatch_tool_call``.
   6. Persists every assistant message + tool call to the DB.
 
-The streaming surface returns an iterator the Streamlit page consumes
-(``st.write_stream``-compatible). Tests use the non-streaming
-``send_message_sync`` path which captures the full final state.
+S11: at MVP the client is **synchronous-only** — ``send_message_sync``
+performs the full round trip and persists the result in one call. A
+streaming surface (``st.write_stream``-compatible iterator) is on the
+roadmap for V1.1+ but is not implemented yet; the architecture already
+separates the SDK boundary (``_call_model``) from the persistence path
+so the streaming upgrade is a future iteration on the existing surface.
 
 The publish tools deliberately have no path into this client. The
-``_dispatch_tool_call`` helper raises ``KeyError`` for any unknown name —
+``dispatch_tool_call`` helper raises ``KeyError`` for any unknown name —
 including the publish names — so even a hypothetical leak would fail
 loudly rather than execute.
 """
@@ -277,11 +280,15 @@ class AgentClient:
         already separates SDK call from UI render.
         """
         turn = AgentTurn(user_text=user_text, model=self.model)
-        # Cost ceiling preflight — projected cost = 0.01 USD as a coarse
-        # placeholder; the actual cost is computed post-call from the
-        # token counts the API returns.
+        # Cost ceiling preflight — the actual cost is computed post-call
+        # from the token counts the API returns. cost.PROJECTED_CALL_COST_
+        # GUESS_USD is a single tunable constant for the preflight; tune
+        # there if Opus pricing shifts materially.
         try:
-            cost.check_ceiling_or_raise(conn, projected_call_cost_usd=0.01)
+            cost.check_ceiling_or_raise(
+                conn,
+                projected_call_cost_usd=cost.PROJECTED_CALL_COST_GUESS_USD,
+            )
         except cost.MonthlyCostCeilingExceeded as exc:
             turn.error = str(exc)
             return turn
