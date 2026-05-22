@@ -1454,3 +1454,258 @@ for orphan in _orphans:
                 )
                 st.toast("orphan flagged as failed.")
                 st.rerun()
+
+
+# ===========================================================================
+# Profile Audit (§28.25, Phase 5.10) — §14.7 field 12.
+# ===========================================================================
+# Daniel runs a comprehensive review of his X surface — bio + pinned
+# post + recent posts + active voice profile + niche definition — read
+# as a unified surface. Append-only history; the audit never auto-runs.
+# A yellow reminder banner surfaces when the most recent audit is
+# older than profile_audit_cadence_reminder_days (default 90).
+hairline()
+from app.agent import profile_audit as _profile_audit  # noqa: E402 — keep panel-local
+from app.agent import coach as _coach_mod  # noqa: E402 — page-local; used only for the toggle
+
+st.markdown("### Profile audit")
+st.caption(
+    "§28.25 — periodic comprehensive review of the surface a new "
+    "follower sees: bio + pinned post + recent posts + active voice "
+    "profile + niche. The audit's load-bearing output is `top_three_"
+    "actions`. Append-only history; never auto-runs."
+)
+
+_pa_last_days = _profile_audit.days_since_last_audit(conn)
+_pa_cadence = _profile_audit.get_cadence_reminder_days(conn)
+_pa_audits = _profile_audit.list_audits(conn, limit=20)
+_pa_window_default = _profile_audit.get_recent_posts_window_days(conn)
+
+# Last-audit readout + cadence reminder.
+if _pa_last_days is None:
+    readout_card(
+        "Last audit",
+        "no audits yet",
+        caption="Run your first audit when bio + pinned post are stable.",
+        empty=True,
+    )
+elif _pa_last_days > _pa_cadence:
+    st.markdown(
+        f"""<div style='border-left:2px solid {PALETTE['warn_amber']};
+                       background:{PALETTE['surface']};
+                       padding:0.65rem 0.9rem; margin:0.5rem 0 1rem 0;
+                       border-radius:2px;'>
+            <div class='kicker' style='color:{PALETTE['warn_amber']};'>
+                CADENCE REMINDER — §28.25
+            </div>
+            <div style='margin-top:0.2rem; color:{PALETTE['bone']};'>
+                Last audit was
+                <span class='numeric'>{_pa_last_days}</span> days ago
+                (threshold:
+                <span class='numeric'>{_pa_cadence}</span>).
+                Worth a fresh read of the surface.
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+else:
+    readout_card(
+        "Last audit",
+        f"{_pa_last_days} day{'s' if _pa_last_days != 1 else ''} ago",
+        caption=f"Cadence reminder threshold: {_pa_cadence} days.",
+        accent="phosphor",
+    )
+
+# coach_refuse_without_evidence toggle (mirrors §14.10 Coach view).
+# get_setting() already JSON-decodes — no double-decode needed.
+_coach_refuse_current = bool(
+    get_setting(conn, "coach_refuse_without_evidence", default=True)
+)
+
+_coach_refuse_new = st.toggle(
+    "Coach refuses without evidence (§28.23 / §14.10)",
+    value=_coach_refuse_current,
+    key="settings_coach_refuse_toggle",
+    help=(
+        "When on (default), Coach messages with zero surviving "
+        "citations + analytical claims are replaced with a canonical "
+        "refusal before persistence. Off → uncited claims pass through."
+    ),
+)
+if _coach_refuse_new != _coach_refuse_current:
+    # set_setting() does the JSON encode — pass the raw Python bool.
+    set_setting(conn, "coach_refuse_without_evidence", _coach_refuse_new)
+    st.toast(
+        f"coach_refuse_without_evidence = {_coach_refuse_new}"
+    )
+    st.rerun()
+# Silence "unused" — the import documents the §28.23 link.
+_ = _coach_mod
+
+# Run-audit form.
+with st.expander("＋  run profile audit now", expanded=(_pa_last_days is None)):
+    _niche = _agent_niche.get_niche(conn)
+    _active_voice = _voice_profile.get_active(conn)
+    st.markdown(
+        f"""<div class='callout'>
+            <strong>read scope.</strong> The audit reads your active
+            niche, the active voice profile, the bio + pinned-post
+            text you paste below, and the most recent
+            <span class='numeric'>{_pa_window_default}</span> day(s)
+            of shipped posts (override below if needed).
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    with st.form("profile_audit_run_form", clear_on_submit=False, border=False):
+        pa_bio = st.text_area(
+            "current X bio",
+            value=get_setting(conn, "bio_text_snapshot") or "",
+            height=80,
+            help="paste your bio verbatim. Wrapped as untrusted data per §28.2.",
+        )
+        pa_pinned = st.text_area(
+            "pinned post text (required)",
+            value="",
+            height=120,
+            help="paste the text of your pinned post. The audit weights it heavily.",
+        )
+        pa_window = st.number_input(
+            "recent posts window (days)",
+            min_value=7,
+            max_value=365,
+            value=int(_pa_window_default),
+            step=1,
+        )
+        pa_submitted = st.form_submit_button(
+            "Run audit",
+            type="primary",
+        )
+        if pa_submitted:
+            if not pa_bio.strip():
+                st.error("Bio is required.")
+            elif not pa_pinned.strip():
+                st.error("Pinned post text is required.")
+            else:
+                try:
+                    pa_analysis, pa_snapshot = _profile_audit.audit(
+                        conn,
+                        bio_text=pa_bio,
+                        pinned_post_text=pa_pinned,
+                        recent_post_window_days=int(pa_window),
+                    )
+                    pa_new_id = _profile_audit.save(
+                        conn,
+                        analysis=pa_analysis,
+                        bio_snapshot=pa_bio,
+                        pinned_post_id=None,
+                        pinned_post_text=pa_pinned,
+                        snapshot=pa_snapshot,
+                    )
+                    st.toast(f"audit #{pa_new_id} saved.")
+                    st.rerun()
+                except _profile_audit.ProfileAuditError as exc:
+                    st.error(f"audit failed: {exc}")
+
+# Past audits table + diff view.
+if _pa_audits:
+    st.markdown(
+        "<div class='kicker' style='margin-top:0.8rem;'>PAST AUDITS</div>",
+        unsafe_allow_html=True,
+    )
+    for i, _pa_row in enumerate(_pa_audits):
+        _pa_data = _pa_row.get("audit") or {}
+        _pa_overall = int(_pa_data.get("overall_consistency_score", 0))
+        _pa_actions = _pa_data.get("top_three_actions") or []
+        with st.expander(
+            f"#{_pa_row['id']} · {_pa_row['audited_at_utc'][:10]} · "
+            f"overall {_pa_overall} / 3",
+            expanded=(i == 0),
+        ):
+            if not _pa_data:
+                st.warning("audit_json failed to parse — see sqlite-utils.")
+                continue
+            # Top three actions — the load-bearing field.
+            st.markdown(
+                "<div class='kicker'>TOP THREE ACTIONS</div>",
+                unsafe_allow_html=True,
+            )
+            if _pa_actions:
+                for _idx, _action in enumerate(_pa_actions, start=1):
+                    st.markdown(
+                        f"<div style='padding:0.3rem 0.7rem; margin:0.2rem 0;"
+                        f"border-left:2px solid {PALETTE['phosphor']};"
+                        f"font-family: Fraunces, IBM Plex Serif, Georgia, serif;"
+                        f"font-style: italic; color:{PALETTE['bone']};"
+                        f"font-size:0.97rem;'>"
+                        f"<span class='numeric'>{_idx}.</span> "
+                        f"{html.escape(str(_action))}</div>",
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.markdown(
+                    "<div class='faint'>(no actions returned)</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Sub-section scores in a compact strip.
+            cols = st.columns(4)
+            sub_scores = [
+                ("BIO ALIGN", _pa_data.get("bio_alignment", {}).get("score", 0)),
+                ("PINNED ALIGN", _pa_data.get("pinned_post_alignment", {}).get("score", 0)),
+                ("VOICE CONSIST.", _pa_data.get("voice_consistency_with_profile", {}).get("score", 0)),
+                ("NICHE COHER.", _pa_data.get("niche_coherence", {}).get("score", 0)),
+            ]
+            for col, (label, score) in zip(cols, sub_scores):
+                with col:
+                    readout_card(
+                        label,
+                        f"{int(score)} / 3",
+                        accent="phosphor" if int(score) >= 2 else "bone_dim",
+                    )
+
+            # Full audit_json as a collapsible payload.
+            st.markdown(
+                "<div class='kicker' style='margin-top:0.4rem;'>"
+                "FULL AUDIT JSON</div>",
+                unsafe_allow_html=True,
+            )
+            st.json(_pa_data, expanded=False)
+
+            # Compare-to-previous when applicable.
+            if i + 1 < len(_pa_audits):
+                _pa_prev = _pa_audits[i + 1]
+                _pa_prev_data = _pa_prev.get("audit") or {}
+                _pa_prev_overall = int(_pa_prev_data.get("overall_consistency_score", 0))
+                _pa_delta = _pa_overall - _pa_prev_overall
+                _pa_delta_str = (
+                    f"+{_pa_delta}" if _pa_delta > 0 else str(_pa_delta)
+                )
+                st.markdown(
+                    f"<div class='kicker' style='margin-top:0.5rem;'>"
+                    f"COMPARE TO PREVIOUS</div>"
+                    f"<div class='dim' style='font-size:0.86rem;'>"
+                    f"vs #{_pa_prev['id']} ({_pa_prev['audited_at_utc'][:10]}): "
+                    f"overall <span class='numeric'>{_pa_prev_overall}</span> "
+                    f"→ <span class='numeric'>{_pa_overall}</span> "
+                    f"(delta <span class='numeric'>{_pa_delta_str}</span>)"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Daniel's editable notes for THIS audit row.
+            _notes_key = f"pa_notes_{_pa_row['id']}"
+            if _notes_key not in st.session_state:
+                st.session_state[_notes_key] = _pa_row.get("daniel_notes") or ""
+            st.text_area(
+                "your notes (what you acted on, what you deferred)",
+                key=_notes_key,
+                height=80,
+            )
+            if st.button("save notes", key=f"pa_save_notes_{_pa_row['id']}"):
+                _profile_audit.update_notes(
+                    conn,
+                    audit_id=_pa_row["id"],
+                    notes=st.session_state[_notes_key],
+                )
+                st.toast("notes saved.")
+                st.rerun()
