@@ -64,7 +64,11 @@ def test_every_view_compiles(db_conn: sqlite3.Connection) -> None:
 def test_schema_migrations_records_each_file(db_conn: sqlite3.Connection) -> None:
     rows = db_conn.execute("SELECT filename FROM schema_migrations ORDER BY filename").fetchall()
     filenames = [row["filename"] for row in rows]
-    assert filenames == ["001_initial.sql", "002_views.sql"]
+    assert filenames == [
+        "001_initial.sql",
+        "002_views.sql",
+        "003_backup_settings.sql",
+    ]
 
 
 def test_apply_migrations_is_idempotent(db_path: Path) -> None:
@@ -72,7 +76,11 @@ def test_apply_migrations_is_idempotent(db_path: Path) -> None:
     first_run = apply_migrations(conn)
     second_run = apply_migrations(conn)
     conn.close()
-    assert first_run == ["001_initial.sql", "002_views.sql"]
+    assert first_run == [
+        "001_initial.sql",
+        "002_views.sql",
+        "003_backup_settings.sql",
+    ]
     assert second_run == []
 
 
