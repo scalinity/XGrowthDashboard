@@ -1196,6 +1196,9 @@ Tracks agent-generated drafts before they become posts (or get rejected). The ag
 | `final_post_id`     | int nullable     | foreign key to `posts.id` if shipped                                      |
 | `user_feedback`     | text nullable    | what Daniel said when revising                                            |
 | `revision_of`       | int nullable     | foreign key to prior `agent_drafts.id` if this is a revision              |
+| `prepublish_score_id` | int nullable   | foreign key to `prepublish_scores.id`. Populated by the §28.11 scorer at `save_draft_*` time. NULL if the scorer hasn't run yet (e.g., legacy rows from before Phase 5.8). |
+| `confidence_label`  | enum nullable    | `fact \| inference \| speculation \| mixed`. Required by §28.2 rule #14 on every analytical claim emitted with a draft. NULL when the draft is creative-only (no analytical claim attached). |
+| `similarity_warning_json` | text nullable | JSON. `{"max_cosine": float 0-1, "nearest_post_id": int, "nearest_text_excerpt": str, "label": "near_duplicate"|"close_echo"|"distinct"}`. Written by the §28.13 repetition guard at `save_draft_*` time. NULL if embeddings layer is unavailable. |
 
 Indexes:
 
@@ -1229,6 +1232,105 @@ Indexes:
 index(lane, priority) where is_active = true
 unique(x_handle)
 ```
+
+---
+
+### `voice_profiles`
+
+Generated voice fingerprints derived from Daniel's own past posts. Distinct from `voice_samples` (which are hand-picked raw exemplars). The profile is a compact JSON summary that is spliced into the system prompt alongside the raw samples, so the agent gets both verbatim references AND a structural read of Daniel's actual writing patterns. See §28.12.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `generated_at_utc` | datetime | when this snapshot was generated |
+| `is_active` | boolean | exactly one row may have `is_active = true` (enforced by partial unique index); activation is atomic — deactivate-then-insert in a single transaction |
+| `source_post_window_days` | integer | how many days of `posts` were sampled to build this snapshot (default `voice_profile_window_days = 90`) |
+| `source_post_count` | integer | how many posts actually fed the synthesis (after filtering by `posts.x_post_id IS NOT NULL` and `posts.text IS NOT NULL`) |
+| `profile_json` | text | JSON. Schema: `{"hook_patterns": [str], "cadence": {"avg_chars": int, "avg_sentences": float, "one_idea_per_line_rate": 0-1}, "vocabulary_signatures": [str], "tone_markers": [str], "stop_phrases": [str], "self_description": str (1-2 sentences in first person)}`. `self_description` is what gets spliced into the system prompt; the rest is structural data the agent can be asked to reflect on. |
+| `model_used` | text | e.g. `claude-haiku-4-5-20251001` — recorded so future re-generations can be compared with the same model |
+| `tokens_used` | integer | cost-tracking |
+| `superseded_by_profile_id` | int nullable | back-reference once a newer profile takes over `is_active` |
+
+Indexes:
+
+```text
+unique(is_active) where is_active = true
+index(generated_at_utc desc)
+```
+
+Notes:
+- Voice samples (`voice_samples`) and voice profile (`voice_profiles`) are complementary, NOT alternatives. Voice samples are raw post text Daniel picked. The profile is a structural read of his actual writing. The system prompt carries both.
+- Regeneration is manual-button only (Settings → Growth Agent → "Regenerate voice profile from last N days"). Never automatic on a cron — Daniel decides when his voice has shifted enough to warrant a refresh.
+- A profile with `source_post_count < voice_profile_min_source_posts` (default 10) is rejected at write time; the regenerate handler surfaces "not enough posts to build a profile" instead of saving a thin one.
+
+---
+
+### `post_embeddings`
+
+Embedding vectors keyed to `posts.id`. Powers the §28.13 repetition guard. SQLite has no native vector type; vectors are stored as `BLOB` (raw float32 little-endian) and similarity is computed in Python with numpy cosine. For MVP single-user volume (Daniel's lifetime post count is in the low thousands) a brute-force in-memory cosine scan is fast enough; a vector index can be added in V1.X if scan time crosses 200ms.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `post_id` | integer pk | FK to `posts.id` `ON DELETE CASCADE` |
+| `embedding_blob` | blob | raw float32 little-endian, length `embedding_dim * 4` bytes |
+| `embedding_dim` | integer | dimensionality (e.g. 1024). Stored per-row so a model change doesn't silently corrupt similarity math — readers MUST verify `embedding_dim` matches the current `embedding_model_dim` setting before comparing. |
+| `model_name` | text | e.g. `voyage-3-lite` or `text-embedding-3-small`. Required. |
+| `model_version` | text | e.g. `2024-09-01`. Optional but recommended; allows fleet upgrades. |
+| `created_at_utc` | datetime | |
+| `source_text_hash` | text | `sha256(posts.text)` at embedding time. If `posts.text` is later edited, the hash mismatch invalidates the cached embedding and forces re-embed. |
+
+Indexes:
+
+```text
+index(model_name, model_version)
+index(created_at_utc)
+```
+
+Notes:
+- Embedding model and dimensionality are NOT centralized in `settings` (see §28.13 for the rationale — the embedding layer is a swappable adapter, not a tuneable). Migration to a new model is an explicit re-embed-all operation, gated by a Settings → Maintenance button, not a silent settings change.
+- If the embedding provider is unavailable (network down, rate-limited, API key missing), the §28.13 guard returns `similarity_warning_json = NULL` and the agent draft proceeds. The repetition guard is a soft check that informs, never a hard gate.
+- A daily VACUUM cleanup deletes rows where the parent `posts.id` no longer exists (cascade handles this, but the VACUUM keeps SQLite's page tree compact).
+
+---
+
+### `prepublish_scores`
+
+Per-draft heuristic scores produced by the §28.11 pre-publish scorer. One row per `agent_drafts.id` that has been scored. Scores are deterministic functions of the draft text + a small set of context inputs (target post text for replies, lane, recent post window); the scorer is NOT an LLM call by default (see §28.11 for the deterministic-first rule).
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `agent_draft_id` | integer fk | `agent_drafts.id` `ON DELETE CASCADE` |
+| `scored_at_utc` | datetime | |
+| `clarity_score` | integer | 0-3 |
+| `hook_strength_score` | integer | 0-3 |
+| `specificity_score` | integer | 0-3 |
+| `length_fit_score` | integer | 0-3 |
+| `format_fit_score` | integer | 0-3 |
+| `topic_fit_score` | integer | 0-3 |
+| `reply_substance_score` | integer nullable | 0-3, only populated when `draft_kind = reply` |
+| `cta_strength_score` | integer nullable | 0-3, NULL when `cta = none` |
+| `voice_fit_score` | integer | 0-3 — agreement between the draft and the active `voice_profiles.profile_json` |
+| `composite_label` | enum | `weak \| viable \| strong` — derived from the scores per §28.11 §"Composite label derivation". This label is the ONLY thing the UI shows by default; individual scores are revealed on click. No numeric composite. |
+| `warnings_json` | text nullable | JSON array of one-line strings: e.g. `["hook is generic", "ends without a clear ask, but cta=none, so okay"]`. The scorer's plain-language read. |
+| `scorer_version` | text | semver of the scorer (e.g. `prepublish-scorer/0.1.0`); incremented when the algorithm changes so historical rows are interpretable |
+| `tokens_used` | integer | 0 for the deterministic path; non-zero only if §28.11's optional LLM augmentation is enabled |
+
+Indexes:
+
+```text
+unique(agent_draft_id)
+index(scored_at_utc)
+index(composite_label)
+```
+
+Notes:
+- The scorer is a pure function of (draft text, draft metadata, active voice profile). Re-running it on the same inputs yields the same output — drift between runs is a bug.
+- The scorer never blocks a draft. It informs. The IWH framework + dark-pattern lint (§28.2 rules #12 #13) are the hard gates; this is a "before you click Publish, here's a read" panel.
+- `composite_label` derivation table (recomputed on every row write so it's never out of date with the scores):
+  - `strong` if `count(scores >= 2) >= 6` and `count(scores == 3) >= 2` and no score is 0.
+  - `weak` if `count(scores == 0) >= 1` or `count(scores >= 2) <= 3`.
+  - `viable` otherwise.
 
 ---
 
@@ -2754,6 +2856,14 @@ No push notification required. A "Weekly review due" banner in the app is enough
 
 11. **Scheduled publish drafts** — draft now, schedule the publish for later (still requires fresh confirmation at publish time, not at schedule time).
 
+12. **Drafting Intelligence Pack (Phase 5.8 — see §28.11 through §28.15):**
+
+    * Pre-publish heuristic scorer (`prepublish_scores` table + `app/agent/prepublish_scorer.py`) with `composite_label` chips in Today, Next Rep, Agent Chat, and a historical view in Content Performance.
+    * Generated voice profile (`voice_profiles` table + `app/agent/voice_profile.py`) with the Settings → Growth Agent regeneration panel and prompt-builder splice.
+    * Repetition guard (`post_embeddings` table + `app/agent/repetition_guard.py` + `scripts/embed_posts.py` backfill) with the `similarity_warning_json` banner above the draft text.
+    * Confidence labels on agent outputs (`agent_drafts.confidence_label` + `agent_messages.confidence_label` + `app/agent/confidence_patterns.py`) enforced by orchestrator parsing.
+    * Approval payload hash — user-visible enforcement (extension to §28.10 modal behavior, no new table).
+
 ### Can wait — V1.1+
 
 1. xurl-based account snapshot collection.
@@ -3398,6 +3508,107 @@ Examples of things this tool cannot tell you:
 * [ ] Day-21 calibration view: show four engagement-surface thresholds vs. actual distribution of `engagement_surface_score` on posted replies; show lint block + override rate.
 * [ ] X API rate-limit handling on the refresh job: log and skip without silent score drift.
 
+### Phase 5.8 — Drafting Intelligence Pack (see §28.11 through §28.15 for full spec)
+
+A bundle of five additive features that strengthen the Growth Agent's drafting and approval flow without changing existing contracts. None of the five is a hard gate; all are informational layers stacked on top of the §28.5/§28.10/§28.2 mechanisms already in place. Implementation order below is the recommended ship order — voice profile feeds the scorer; scorer + repetition guard surface in the same UI panels; confidence labels and payload-hash UX are independent.
+
+**Migration:**
+
+* [ ] Migration `migrations/010_drafting_intelligence.sql`:
+
+  * [ ] Create `voice_profiles` table per §10 schema. Partial unique index on `is_active = true`. Seed-row insert is NOT part of the migration — the first profile is generated by Daniel from Settings after at least 10 posts exist.
+  * [ ] Create `post_embeddings` table per §10 schema. FK `post_id` `ON DELETE CASCADE`. Indexes per the table notes.
+  * [ ] Create `prepublish_scores` table per §10 schema. FK `agent_draft_id` `ON DELETE CASCADE`. Unique index on `agent_draft_id`. Indexes per the table notes.
+  * [ ] Add columns to `agent_drafts`: `prepublish_score_id` (int nullable, FK), `confidence_label` (text nullable, CHECK in `{fact, inference, speculation, mixed}`), `similarity_warning_json` (text nullable). Backfill existing rows to NULL.
+  * [ ] Add column to `agent_messages`: `confidence_label` (text nullable, same CHECK). Backfill existing rows to NULL.
+  * [ ] Add settings rows: `voice_profile_window_days = 90`, `voice_profile_min_source_posts = 10`, `repetition_guard_lookback_days = 180`, `repetition_guard_near_duplicate_threshold = 0.92`, `repetition_guard_close_echo_threshold = 0.78`, `prepublish_scorer_llm_augmentation_enabled = false`, `modal_hash_recheck_debounce_ms = 300`, `modal_edit_settle_seconds = 2`. Documented `note` per row.
+
+**Voice profile (§28.12):**
+
+* [ ] Implement `app/agent/voice_profile.py`:
+
+  * [ ] `generate(window_days: int) -> VoiceProfileRow` — reads `posts`, calls Haiku with `config/voice_profile_prompt.md`, validates returned JSON against §10 `voice_profiles.profile_json` schema, writes atomic deactivate-then-insert in a single transaction.
+  * [ ] `get_active() -> VoiceProfileRow | None`.
+  * [ ] `diff(old_profile_json, new_profile_json) -> dict` — used by the Settings UI.
+* [ ] Create `config/voice_profile_prompt.md` — structured-output prompt that returns the §10 `profile_json` schema. Reads scope is explicit: post text + classifications only, NEVER tester PII.
+* [ ] Settings → Growth Agent → "Voice profile" panel: current profile metadata, regenerate button with N-days input, success/failure banners, diff view on success.
+* [ ] Extend `app/agent/prompt_builder.py`: splice `voice_profiles.profile_json.self_description` into §28.3 Section 1; prepend compact `cadence` / `vocabulary_signatures[:5]` / `stop_phrases[:5]` rendering above the raw voice samples in §28.3 Section 5.
+* [ ] Extend the pre-commit drift check: verify the splice executes and that `voice_profiles.is_active = true` row count is 0 or 1.
+
+**Pre-publish heuristic scorer (§28.11):**
+
+* [ ] Implement `app/agent/prepublish_scorer.py`:
+
+  * [ ] One pure function per dimension: `clarity_score(text) -> int`, `hook_strength_score(text) -> int`, `specificity_score(text) -> int`, etc. (nine total per the §28.11 table). Each function has a docstring defining what 0 / 1 / 2 / 3 mean.
+  * [ ] `score(draft_text, draft_kind, pillar, audience, cta, active_voice_profile) -> PrepublishScoresRow` — orchestrates all dimensions, computes `composite_label` per §10 derivation, returns a row ready for insert.
+  * [ ] `compute_composite_label(scores: dict) -> str` — pure function, unit-testable.
+* [ ] Wire into `app/agent/tools.py::_save_draft_post` and `_save_draft_reply`: after the IWH + dark-pattern preflight, before the `agent_drafts` insert, call `score(...)`, write to `prepublish_scores`, set `agent_drafts.prepublish_score_id`.
+* [ ] UI surfaces:
+
+  * [ ] Today (§14.1) — `composite_label` chip next to agent drafts.
+  * [ ] Next Rep (§14.2) — same.
+  * [ ] Agent Chat (§14.8) — chip + click-to-reveal 0-3 score panel + `warnings_json` excerpts.
+  * [ ] Content Performance (§14.4) — historical `composite_label` × actual-engagement scatter, calibration view.
+* [ ] Unit tests with golden inputs in `tests/test_prepublish_scorer.py`: at least one input per `composite_label` value, plus boundary cases for the derivation thresholds.
+
+**Repetition guard (§28.13):**
+
+* [ ] Implement `app/agent/embeddings.py`:
+
+  * [ ] Provider adapter interface with `embed(texts: list[str]) -> list[np.ndarray]`. Default implementation calls Voyage AI's `voyage-3-lite`.
+  * [ ] Provider key in `.env`: `VOYAGE_API_KEY=...` (or `OPENAI_API_KEY` if the adapter is switched). Loaded the same way as `ANTHROPIC_API_KEY` (§28.8).
+* [ ] Implement `app/agent/repetition_guard.py`:
+
+  * [ ] `check(draft_text, draft_kind, lookback_days) -> dict | None` — embeds the draft, cosine-scans `post_embeddings` rows within lookback, returns the schema in §10 `agent_drafts.similarity_warning_json`. Returns `None` if the provider is unavailable.
+  * [ ] Re-embed-on-mismatch logic: if `source_text_hash` doesn't match current `posts.text`, re-embed that one row inline before comparing.
+* [ ] Wire into `_save_draft_post` / `_save_draft_reply`: after the scorer, before the insert, call `check(...)`, set `agent_drafts.similarity_warning_json`.
+* [ ] Create `scripts/embed_posts.py`:
+
+  * [ ] Resumable backfill — skips rows that already have a `post_embeddings` row.
+  * [ ] Respects provider rate limits (sleep between batches per provider spec).
+  * [ ] `--re-embed-all` flag for provider migration; logs a banner in Settings → Maintenance while the script runs.
+* [ ] UI surface: yellow banner above the draft text in Today / Next Rep / Agent Chat when `similarity_warning_json.label IN ('near_duplicate', 'close_echo')`. Banner shows the nearest post's excerpt + "intentional / let me rewrite" choice (just informational; no DB write).
+* [ ] Settings → Growth Agent: "Repetition guard status" panel showing the configured provider, row count in `post_embeddings`, "Run backfill" button if `post_embeddings` is empty or stale.
+
+**Confidence labels (§28.14):**
+
+* [ ] Implement `app/agent/session.py::extract_confidence_labels(message_text: str) -> list[str]` — regex-extract `<confidence>([a-z]+)</confidence>` tags, validate, compute dominant label per the tie-breaking rule (speculation > inference > mixed > fact).
+* [ ] Create `app/agent/confidence_patterns.py` — list of regex patterns identifying analytical claims. Comment each pattern with an example match. Patterns include: percentage-change phrasing, "lane X is the winner / outperformed", "this caused", "responsible for", "the data shows".
+* [ ] Implement `app/agent/session.py::detect_untagged_claims(message_text: str) -> int` — scans for analytical-claim regex matches that are NOT inside a `<confidence>` tag. Returns count of unmatched analytical claims; >0 increments the IWH humility-failure counter.
+* [ ] Wire into the orchestrator: after each agent message is assembled, run `extract_confidence_labels` and `detect_untagged_claims`. Persist dominant label on `agent_drafts.confidence_label` (if the message produced a draft) or `agent_messages.confidence_label`.
+* [ ] UI surface: inline colored chips in Agent Chat (green/blue/yellow/gray) at the end of claim sentences. Historical surface on Content Performance per-post agent reasoning.
+* [ ] Update `config/agent_system_prompt.md` Section 8 (Output format): add the `<confidence>` tag requirement with three example tags. Splice rule #14 into Section 3 via the existing build-step splicer.
+* [ ] Extend `draft_weekly_review_section` (§28.4 tool #9): output emits `<confidence>` tag per section. Extend the §24 weekly-export blocker: `confidence_label = speculation` blocks export until acknowledged or rewritten.
+* [ ] Tests: feed agent output with mixed tag patterns; assert dominant label per tie-breaking rule. Feed analytical-claim text without tags; assert `detect_untagged_claims` flags it.
+
+**Approval payload hash — user-visible enforcement (§28.15):**
+
+* [ ] Extend the confirmation modal in §14.8:
+
+  * [ ] On modal open, compute `current_draft_text_hash = sha256(posts.text)` and store in `st.session_state[f"modal_hash_{post_id}"]`.
+  * [ ] Text area pre-filled with `posts.text`; bind to `st.session_state[f"modal_text_{post_id}"]`.
+  * [ ] Debounced (300ms default) re-hash on text change; render yellow "you've edited this draft" banner when hashes differ; disable Publish button for 2 seconds after each edit.
+* [ ] Extend the Publish click-handler in `app/agent/confirmation.py`:
+
+  * [ ] Read current modal text; if different from `posts.text`, issue an `UPDATE posts SET text = ? WHERE id = ?` BEFORE generating the confirmation token.
+  * [ ] If a non-consumed token already exists for this `post_id`, expire it (set `expires_at_utc = now() - 1`) before minting a new one. Log invalidation to `agent_tool_calls.notes = "prior token invalidated by re-modal"`.
+* [ ] Tests:
+
+  * [ ] Modal open → edit text → click Publish: assert single live token, hash matches post-edit text, audit row records pre/post-edit hash diff.
+  * [ ] Two-modal race: open modal A, open modal B, click Publish in A then B. Assert A's token is invalidated when B mints; B's publish succeeds, A's would fail rule #10 (c).
+
+**QA across the pack:**
+
+* [ ] All 192 (or current count) existing tests pass.
+* [ ] Ruff clean on every new module.
+* [ ] Boot smoke: `uv run streamlit run app/main.py --server.headless true` shows no exceptions; Settings → Growth Agent → "Voice profile" panel renders even with zero profile rows (with the "generate your first profile" CTA).
+* [ ] End-to-end: from a clean agent_drafts row, drive `_save_draft_post` → assert `prepublish_score_id` is set, `similarity_warning_json` is set, `confidence_label` is set if the message had tags; then drive the confirmation modal → assert the payload-hash banner triggers on edit and the click-handler invalidates the prior token if a second modal mints one.
+
+**Documentation:**
+
+* [ ] Update `docs/IMPLEMENTATION_STATUS.md` with the Phase 5.8 features and any deferred behaviors.
+* [ ] README addition: brief description of the Drafting Intelligence Pack and how to seed it (run `scripts/embed_posts.py` then click "Regenerate voice profile" in Settings).
+
 ### Phase 6 — V1.1: Data collection (deferred from MVP)
 
 * [ ] Configure xurl auth outside the app.
@@ -3562,6 +3773,7 @@ When other spec sections reference a prompt area (e.g., "voice samples are injec
 11. **Audit every publish — with raw-token redaction.** Every publish (success and failure) is logged in `agent_tool_calls`. The tool dispatcher MUST redact the raw `confirmation_token` from `arguments_json` BEFORE the audit row is inserted, replacing it with `{ "confirmation_token_id": <publish_confirmation_tokens.id> }`. The audit row sets `redacted_arguments = true`. The successful-publish audit log includes: the final draft text (post-edit), the `consumed_at_utc` timestamp, the `confirmation_token_id` (NEVER the raw token), and the resulting `x_post_id`. Do NOT rely on the Anthropic SDK's default argument-logging — that path will leak the raw token. Redaction happens in `app/agent/tools.py` between tool invocation and audit-log insert.
 12. **Engagement psychology serves clarity, not manipulation — dark patterns are forbidden, and the prohibition is enforced by a separate lint pass.** The agent draws on engagement principles (specificity, curiosity gaps, cognitive ease, identity-affirming hooks) to make posts effective. It NEVER uses dark patterns: no fake urgency, no manufactured outrage, no fabricated social proof, no engagement bait that doesn't deliver, no "controversial takes" engineered for arguments, no manipulation of vulnerable audiences (self-doubt, fear, FOMO without basis). Enforcement: the orchestrator runs a **dark-pattern lint pass** (a separate small-model invocation with a one-shot prompt: "Does this draft use fake urgency, manufactured scarcity, fabricated social proof, or engagement-bait that doesn't deliver? Reply yes/no with one-line reasoning.") on every draft BEFORE calling `save_draft_*`. If the lint pass returns yes, the draft is treated as a failed IWH revision (counts toward `iwh_max_revision_attempts`). The agent cannot disable or short-circuit the lint pass — it lives in `app/agent/lint.py`, outside the agent loop.
 13. **Intelligence, wisdom, humility — orchestrator-tracked revision counter.** Every post should reflect substantive thought (intelligence), long-arc judgment about whether the post should exist (wisdom), and honest acknowledgment of limits (humility). If a draft fails any of those three (self-score < `iwh_self_score_minimum` OR the dark-pattern lint pass returns yes), the orchestrator increments `agent_drafts.iwh_attempt_index` and sends the draft back for revision. On attempt `iwh_max_revision_attempts + 1` (default: the 4th attempt), the orchestrator refuses to call the save_draft tool and emits a refusal back to the conversation. **The revision counter lives in `app/agent/session.py` and `agent_drafts.iwh_attempt_index`, NOT in the agent's context window** — Daniel cannot tell the agent "skip the count," and prompt-injection in pasted reply text cannot reset it. The agent emits structured `<iwh_self_score>` tags (three integers 0-3) with each draft; the orchestrator reads them and decides.
+14. **Confidence labels on every analytical claim — orchestrator-validated.** Whenever the agent emits a statement that names a number, attributes movement, or draws a conclusion from data, it MUST attach a `<confidence>` tag with one of four values: `fact` (the number/event is directly in a tool result the agent just received), `inference` (the conclusion is drawn from data but involves judgment — e.g. "self lane likely needs more reps"), `speculation` (the agent has no data and is guessing — e.g. "this hook style might land better"), `mixed` (a claim that combines factual citation with inference). The orchestrator parses these tags and persists the dominant label on `agent_drafts.confidence_label` (for claims attached to drafts) and `agent_messages.confidence_label` (for analytical messages). Untagged analytical claims are detected by a small regex sweep in `app/agent/session.py` (matches "X% increase", "lane Y is the winner", "this caused", etc. against a list in `app/agent/confidence_patterns.py`) — an untagged match counts as a Section-2 humility failure (rule #13 IWH humility score drops by 1 for that draft). The full enforcement spec is §28.14.
 
 ### 28.3 System prompt structure
 
@@ -3763,6 +3975,8 @@ Voice samples anchor the agent's drafting voice. Workflow:
 
 Seed strategy: at first Phase 5.5 build, Daniel marks 3-5 of his strongest existing posts as voice samples before the first agent use. Without samples, the agent falls back to a base system prompt (banner warns).
 
+**Voice samples are complemented by the generated voice profile (§28.12).** Samples are raw exemplars Daniel hand-picked. The profile is a structural read of Daniel's actual writing across the last N days, synthesized by a small-model call into a compact JSON spec'd in §10 `voice_profiles`. Both are spliced into the system prompt — samples carry tone-by-example, profile carries cadence and vocabulary signatures. See §28.12 for the regeneration workflow.
+
 ### 28.6 Cost management
 
 - Per-call cost estimated from token counts and per-model rate snapshot at call time. The rate snapshot is stored on each message (`agent_messages.rate_snapshot_json`) so retroactive auditing isn't broken if Anthropic pricing changes.
@@ -3843,6 +4057,158 @@ Cancellation at any step (before step 5 click) returns to draft state. The draft
 - Editing the draft text after a token is generated invalidates the token (rule #10 check (d) fails on hash mismatch); fresh confirmation required.
 - The agent's tool registry does NOT include a tool that reads `publish_confirmation_tokens` or `st.session_state`. The token registry is unreachable from the agent loop by construction (rule #10).
 - A single token authorizes ONE atomic publish operation (with bounded internal retry on transient errors). One Daniel click → at most one live X post.
+
+### 28.11 Pre-publish heuristic scorer
+
+The dark-pattern lint (§28.2 rule #12) catches what a draft should NOT do. The pre-publish scorer is its positive counterpart: a deterministic, fast read of what the draft IS doing well or weakly, surfaced in the UI before Daniel clicks "Publish to X." The scorer never blocks; it informs.
+
+**Design rules:**
+
+1. **Deterministic-first.** The default scorer is a pure Python function over the draft text + draft metadata + active voice profile. No LLM call. Same inputs → same outputs. Reasoning: an LLM scorer drifts run-to-run and would make the Today panel feel slot-machine-y; a deterministic scorer is repeatable and debuggable. The scorer lives at `app/agent/prepublish_scorer.py` and is unit-tested with golden inputs.
+2. **Optional LLM augmentation, opt-in only.** A `prepublish_scorer_llm_augmentation_enabled` setting (default `false`) can layer a small-model second pass that produces the `warnings_json` plain-language read. The deterministic scores are unchanged by this layer.
+3. **Voice-profile-aware.** The `voice_fit_score` reads the active `voice_profiles.profile_json` (§28.12) — vocabulary signatures, cadence, one-idea-per-line rate — and scores how close the draft sits to Daniel's actual writing. If no active voice profile exists, `voice_fit_score = NULL` and the composite label is computed without it.
+4. **Never blocks the publish flow.** The §28.10 click-handler does not consult `prepublish_scores`. The scorer runs at `save_draft_*` time and writes its row; the UI consumes the row to render the panel; that's it.
+5. **`composite_label` only by default.** The Today / Next Rep / Agent Chat panels show `composite_label` (`weak | viable | strong`) as a colored chip. Individual 0-3 scores reveal on click. No numeric composite. This mirrors §11 `v_lane_performance`'s graduated-confidence discipline: the precision the underlying numbers suggest is more precision than the input supports.
+
+**Score dimensions (all 0-3, definitions live in `app/agent/prepublish_scorer.py` as docstrings on the scoring functions):**
+
+| Dimension | What 3 looks like | What 0 looks like |
+| --- | --- | --- |
+| `clarity_score` | one idea, clean syntax, would be read correctly on first pass at 0.8s of attention | jargon-dense, multiple ideas mashed together, parsing required |
+| `hook_strength_score` | first sentence is concrete + carries the post; would stop a scroll | generic opener; could be the first line of any post |
+| `specificity_score` | real nouns, real numbers, real artifacts. "Three failed dinner attempts before 7pm." | "many," "people," "things." |
+| `length_fit_score` | within `x_short_post_target_chars` (200) for a standalone, or earns its longer length | over `x_post_max_chars` (280), or way under what the idea needs |
+| `format_fit_score` | sentence-per-line where appropriate; ending lands | wall of text or aimless trailing |
+| `topic_fit_score` | clearly inside the declared pillar | drift from the declared pillar |
+| `reply_substance_score` | addresses the original post substantively before pivoting to Daniel's angle | thin "great post" with a self-promo bolt-on |
+| `cta_strength_score` | clear ask matching `cta` field; reader knows what to do next | "what do you think?" generic ask, or no ask when one is declared |
+| `voice_fit_score` | reads like a row sampled from `voice_profiles.profile_json`'s `vocabulary_signatures` / `cadence` | reads like an LLM trying to sound like a creator |
+
+**`composite_label` derivation:** see §10 `prepublish_scores` table notes.
+
+**UI surfaces:**
+
+- Today (§14.1) — when an agent draft is on the page, a `composite_label` chip next to the draft text.
+- Next Rep (§14.2) — same as Today for per-lane drafts.
+- Agent Chat (§14.8) — `composite_label` chip + click-to-reveal scores panel in the draft action row.
+- Content Performance (§14.4) — post-publish view of historical `prepublish_scores` for shipped agent drafts, so Daniel can correlate "what the scorer said before I published" with "what actually happened." Drives §28.11 calibration over time.
+
+**Calibration cadence:** after every 50 shipped agent drafts (or quarterly, whichever comes first), Daniel reviews the `composite_label` × actual-engagement scatter in Content Performance and tunes the threshold constants in §10 `prepublish_scores` notes if the labels are mis-calibrated to his sense.
+
+### 28.12 Generated voice profile
+
+A compact JSON description of how Daniel actually writes — cadence, hooks, vocabulary, tone — synthesized from his recent posts and spliced into the system prompt alongside `voice_samples`. See §10 `voice_profiles` table for the persisted schema.
+
+**Workflow:**
+
+1. Daniel opens Settings → Growth Agent → "Voice profile."
+2. The panel shows the currently-active profile (`is_active = true`) with metadata: when it was generated, how many source posts fed it, the `self_description` line that gets spliced into Section 1 of the system prompt.
+3. "Regenerate from last N days" button (N defaults to `voice_profile_window_days = 90`, editable per-run). On click:
+   - Query `posts` for rows where `x_post_id IS NOT NULL AND text IS NOT NULL AND created_at_utc >= now() - N days`.
+   - If `count < voice_profile_min_source_posts` (default 10), abort and show "not enough posts in window — try a longer N or wait until you've shipped more."
+   - Otherwise, single Haiku call with a structured-output prompt (template at `config/voice_profile_prompt.md`) that returns the `profile_json` schema in §10.
+   - Insert the new row; in the SAME transaction, set the previously-active row's `is_active = false` and `superseded_by_profile_id`. Atomic activation — never a moment when 0 or 2 rows are active.
+   - On failure (model returns bad JSON, Anthropic 5xx after bounded retry): leave the active row unchanged, surface "regeneration failed, prior profile still active."
+4. Diff view: when a new profile is generated, the panel shows a side-by-side of the old and new `profile_json` so Daniel can see what shifted before committing — but commit is automatic on successful generation; the diff is informational.
+
+**Splice into system prompt:**
+
+- §28.3 Section 1 (Identity and niche) — at build time, append `voice_profiles.profile_json.self_description` as the closing paragraph of Section 1, prefixed with `"Voice self-description (generated from your last N days):"`.
+- §28.3 Section 5 (Voice samples) — at build time, prepend a compact rendering of `cadence`, `vocabulary_signatures[:5]`, `stop_phrases[:5]` from the profile, ABOVE the raw voice samples.
+- `app/agent/prompt_builder.py` is responsible for the splice; the pre-commit drift check (§28.3 build step) is extended to verify the splice happens and the `voice_profiles` row count `is_active = true` is exactly 0 or 1.
+
+**Privacy and read scope:** the profile is generated from `posts` rows only — never from `stir_testers`, `stir_conversion_events.qualitative_feedback`, or any `agent_messages`. The generation prompt explicitly enumerates the read scope, and the small-model call gets only the post text + classifications, never tester PII.
+
+**No automatic regeneration.** No cron. Daniel decides when his voice has shifted enough to refresh. The Settings panel surfaces "last regenerated N days ago" so it's visible without nagging.
+
+### 28.13 Repetition guard via embedding similarity
+
+Before saving a draft, the orchestrator computes a cosine-similarity check against Daniel's recent posts. The goal is not to block repetition (sometimes a returning idea earns the repeat); it is to surface "you said almost exactly this on 2026-04-12" so Daniel can decide consciously. See §10 `post_embeddings` table for the persisted schema.
+
+**Flow:**
+
+1. At `save_draft_post` / `save_draft_reply` time, after IWH self-score check and dark-pattern lint pass, the orchestrator calls `app/agent/repetition_guard.py::check(draft_text, draft_kind, lookback_days)`.
+2. The guard embeds the draft text (single embedding call to the configured provider) and cosine-compares against `post_embeddings` rows whose parent `posts.created_at_utc >= now() - repetition_guard_lookback_days` (default 180).
+3. Top-1 nearest neighbor + its cosine distance are returned.
+4. The orchestrator writes `agent_drafts.similarity_warning_json` per §10's schema, with `label` derived from the cosine score:
+   - `near_duplicate` if cosine >= `repetition_guard_near_duplicate_threshold` (default 0.92)
+   - `close_echo` if cosine >= `repetition_guard_close_echo_threshold` (default 0.78)
+   - `distinct` otherwise
+5. The UI surfaces `near_duplicate` and `close_echo` as a yellow banner above the draft text, with the linked nearest post's text excerpt and a "Yes, I'm intentionally returning to this idea / No, let me rewrite" choice. `distinct` shows nothing.
+
+**Soft check, never a gate.** The guard does not block `save_draft`. The IWH framework + dark-pattern lint are the hard gates; this is informational. Daniel can ship a near-duplicate consciously.
+
+**Backfill at Phase 5.8 install:** all rows in `posts` where `x_post_id IS NOT NULL AND text IS NOT NULL` get embedded in a one-shot backfill script (`scripts/embed_posts.py`); the script is resumable (checks `post_embeddings.post_id` before embedding) and respects the configured embedding provider's rate limits.
+
+**Provider choice:** the embedding provider is a configuration in `app/agent/embeddings.py`, NOT a setting. Defaults: Voyage AI's `voyage-3-lite` (cheap, 1024-dim, good for this use). OpenAI's `text-embedding-3-small` is the documented alternative. Switching providers requires (1) editing the adapter, (2) running `scripts/embed_posts.py --re-embed-all`, (3) the Settings → Maintenance UI shows the migration state. No silent provider swap.
+
+**Failure modes:**
+
+- Embedding provider unavailable / rate-limited / API key missing → guard returns `similarity_warning_json = NULL`; draft proceeds; Settings → Growth Agent shows "repetition guard offline" banner.
+- `post_embeddings` table is empty (fresh install before backfill) → guard returns `similarity_warning_json = NULL`; first-run Settings panel surfaces "run `scripts/embed_posts.py` to enable the repetition guard."
+- `posts.text` was edited after embedding → `source_text_hash` mismatch on read; guard re-embeds that one post inline before computing the comparison.
+
+### 28.14 Confidence labels on agent outputs
+
+The structural enforcement of §28.2 rule #14. Every analytical claim the agent emits carries one of four labels: `fact`, `inference`, `speculation`, `mixed`.
+
+**Tag format:**
+
+The agent emits inline `<confidence>fact</confidence>` (etc.) tags adjacent to the claim they label. For drafts that include an analytical justification, the tag attaches to the justification, not the draft text itself. Example agent output:
+
+```
+Here's a draft for the build lane:
+
+[draft text]
+
+Reasoning: the build lane has 0 posts in the last 7 days <confidence>fact</confidence>,
+which suggests it's a good slot to fill <confidence>inference</confidence>. A
+specificity-forward hook would likely outperform a generic one <confidence>speculation</confidence>.
+```
+
+**Orchestrator parsing (`app/agent/session.py::extract_confidence_labels`):**
+
+1. After the agent's response is assembled, scan the message text for `<confidence>([a-z]+)</confidence>` tags.
+2. Validate each captured label against `{fact, inference, speculation, mixed}`. Unknown labels → IWH humility failure (rule #13).
+3. Persist the dominant label (most frequent; ties broken in the order speculation > inference > mixed > fact, i.e. the least-confident tag wins ties, which favors humility) on:
+   - `agent_drafts.confidence_label` for messages that produced a draft (linked via `save_draft_*` tool result).
+   - `agent_messages.confidence_label` for analytical messages without a draft.
+4. If the message contains analytical claims (detected by regex sweep against `app/agent/confidence_patterns.py` — patterns include "lane X is the winner", "this caused", "%-change phrasing", "outperformed", etc.) AND no `<confidence>` tag is present, increment the IWH humility-failure counter for the current draft.
+
+**UI surface:**
+
+- Agent Chat (§14.8) — confidence labels render as small colored chips inline with the claim text: green `fact`, blue `inference`, yellow `speculation`, gray `mixed`. Hovering shows the label name.
+- Content Performance (§14.4) — per-post agent reasoning shows the historical confidence label so Daniel can see which lessons the agent was confident vs. guessing about.
+- Weekly Review (§14.6) — agent-drafted sections (`draft_weekly_review_section`) carry a per-section confidence label; the export-blocked rule (§24) is extended: a section with `confidence_label = speculation` cannot be exported until Daniel either edits it or marks "I'm publishing this speculation deliberately."
+
+**Why this is a separate rule from §28.2 #12 / #13:** dark-pattern lint catches manipulation; IWH catches shallowness; confidence labels catch overclaiming. They overlap but are not redundant — a draft can be honest (no dark pattern), substantive (IWH passes), and still slide a `speculation` past as if it were `fact`. The label system makes the epistemic claim explicit at the structural level.
+
+### 28.15 Approval payload hash — user-visible enforcement
+
+§28.10 step 5 + §10 `publish_confirmation_tokens.draft_text_hash_at_issue` already enforce that editing the draft text after the confirmation token is generated invalidates the token. This subsection extends that enforcement with a user-visible warning so the failure mode is debuggable instead of silent.
+
+**Behavior:**
+
+1. When the confirmation modal opens, the modal computes `current_draft_text_hash = sha256(posts.text)` and stores it in the modal's React-style component state (Streamlit: a deterministic `st.session_state[f"modal_hash_{post_id}"]` key, scoped to the modal lifetime).
+2. The modal renders an editable text area pre-filled with `posts.text`. Daniel can edit in place.
+3. On every keystroke (debounced to `modal_hash_recheck_debounce_ms`, default 300), the modal recomputes `sha256(text_area_value)` and compares to `current_draft_text_hash`.
+4. If the hashes differ, the modal:
+   - Shows a yellow banner: "You've edited this draft since opening the modal. The approval hash will be regenerated when you click Publish — this is fine, just confirming you meant to."
+   - Disables the "Publish now" button for `modal_edit_settle_seconds` (default 2) so a stray paste doesn't trip an immediate publish.
+   - Re-enables Publish after the settle delay.
+5. On click "Publish now":
+   - Streamlit click-handler reads the current text from `st.session_state[f"modal_text_{post_id}"]`.
+   - If different from `posts.text`, the handler issues an `UPDATE posts SET text = ? WHERE id = ?` BEFORE generating the confirmation token. The token's `draft_text_hash_at_issue` is computed against the just-updated text, not the pre-edit version.
+   - Audit row in `agent_tool_calls` records both the pre-edit and post-edit hashes when they differ, with `notes = "draft edited at modal time"`.
+6. If a token already exists for this `post_id` (e.g. Daniel opened the modal twice), the handler INVALIDATES the prior token (set `expires_at_utc = now() - 1 second`) before generating the new one. Audit-logged. This prevents the "two modals open, two valid tokens" race.
+
+**Why surface this as a separate subsection instead of folding into §28.10:** §28.10's existing hash-mismatch check is correct but silent — a Daniel edit between modal-open and Publish-click currently produces a confusing "token validation failed" error. The user-visible warning + automatic token regeneration in §28.15 turns the silent failure into a smooth experience: the hash mechanism is still load-bearing security, but Daniel sees what's happening.
+
+**Hard constraints (carried from §28.10):**
+
+- The token is still server-side-generated, single-use, TTL-bounded, and SHA-256-hashed at rest.
+- The agent still has no read access to `publish_confirmation_tokens` or `st.session_state`.
+- Two simultaneous modal sessions still cannot both publish — the second token-mint invalidates the first by construction.
 
 ---
 
@@ -4454,6 +4820,26 @@ Notes on this revision:
 71. **§22 master edge-case table gains a one-line pointer** at the bottom to §29.11 so future readers find the reply-target-discovery cases without searching.
 
 72. **§0 revision note adds a fourth paragraph** introducing §29 and noting the renumber to §30.
+
+### Drafting Intelligence Pack addition (2026-05-22) — §28.11 through §28.15
+
+Cross-pollination from a comparison with CreatorOS (Daniel's prior X-growth tool, fully built). Five features identified as philosophically aligned with the XGrowth thesis (single-user instrument, deterministic-first, never hard-gate without cause) were added as Phase 5.8 Should-ship. No existing contracts changed.
+
+73. **Pre-publish heuristic scorer (§28.11).** Deterministic 9-dimension 0-3 scorer (clarity, hook, specificity, length, format, topic, reply substance, CTA, voice fit) producing a single `composite_label` chip (`weak | viable | strong`) above each agent draft. Surfaced in Today, Next Rep, Agent Chat, and historically in Content Performance for calibration. Never blocks publish — informational counterpart to the §28.2 #12 dark-pattern lint. (§10 `prepublish_scores`, §28.11, §25 Phase 5.8)
+74. **Generated voice profile (§28.12).** Structural read of Daniel's actual writing (cadence, hooks, vocabulary, stop phrases, self-description) synthesized by a Haiku call from the last N days of posts. Complements `voice_samples` (raw exemplars) — both are spliced into the system prompt at build time. Manual regeneration only, no cron. Atomic activation. (§10 `voice_profiles`, §28.5, §28.12, §25 Phase 5.8)
+75. **Repetition guard via embedding similarity (§28.13).** Embedding cosine scan of every new agent draft against the last N days of `posts`; surfaces `near_duplicate` (≥0.92) and `close_echo` (≥0.78) as a yellow banner with the nearest post's excerpt + "intentional / let me rewrite" affordance. Voyage AI `voyage-3-lite` default; swappable adapter at `app/agent/embeddings.py`. Soft check — never blocks. (§10 `post_embeddings`, §28.13, §25 Phase 5.8)
+76. **Confidence labels on agent outputs (§28.14).** Added §28.2 rule #14 requiring `<confidence>fact | inference | speculation | mixed</confidence>` tags on every analytical claim, parsed by the orchestrator and persisted on `agent_drafts.confidence_label` / `agent_messages.confidence_label`. Untagged analytical claims (detected via `app/agent/confidence_patterns.py`) trigger an IWH humility-failure increment. Weekly Review export is blocked when a section is labeled `speculation` until acknowledged. (§28.2 rule #14, §10 `agent_drafts.confidence_label`, §28.14, §25 Phase 5.8)
+77. **Approval payload hash — user-visible enforcement (§28.15).** Extension to §28.10's existing `draft_text_hash_at_issue` mechanism: the confirmation modal now re-hashes on each keystroke (debounced), surfaces a yellow "you've edited" banner when hashes differ, disables Publish briefly to absorb stray pastes, automatically invalidates prior tokens when a second modal mints one, and audit-logs pre/post-edit hash diffs. Turns the previously-silent hash-mismatch failure into a smooth experience without weakening the security mechanism. (§28.10, §28.15, §25 Phase 5.8)
+
+Deliberately rejected from the CreatorOS comparison:
+
+- Blogs / long-form authoring — explicit §0 + §19 scope (X-only).
+- Multi-provider AI — §28 commits to Claude.
+- OAuth scope escalation, Chrome extension auth, personal save tokens — single-user local tool (§7.1).
+- pgvector / HNSW — overengineered for low-thousands lifetime post volume; numpy cosine over `post_embeddings` BLOBs is sufficient (§28.13).
+- Compare-and-swap on draft status + idempotency keys for publish jobs — meaningful in multi-instance deployments; XGrowth is single-instance and §28.10's two-step confirm + W12 `UNIQUE(post_id)` cover the realistic risk.
+- Campaigns / experiments tables — useful but expand schema scope; reconsider in V1.2 if reply-strategy iteration in §29 warrants the formal structure.
+- AI Coach as a separate view — Weekly Review (§14.6) plus the new §28.14 confidence-label discipline cover this without a dedicated surface.
 
 [1]: https://docs.x.com/x-api/fundamentals/data-dictionary "Data Dictionary - X"
 [2]: https://docs.x.com/x-api/getting-started/about-x-api "About the X API - X"
