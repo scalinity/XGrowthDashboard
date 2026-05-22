@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.db import transaction
+
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 NICHE_ALIGNMENT_PROMPT_PATH: Path = PROJECT_ROOT / "config" / "niche_alignment_prompt.md"
 
@@ -99,22 +101,34 @@ def set_niche(
     """
     p_clean = problem.strip()
     pn_clean = person.strip()
-    conn.execute(
-        """
-        INSERT INTO settings (key, value_json, note)
-        VALUES ('niche_problem', ?, 'One-sentence: the problem you solve. Empty BLOCKS agent drafting (§28.2 rule #15).')
-        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
-        """,
-        (json.dumps(p_clean),),
-    )
-    conn.execute(
-        """
-        INSERT INTO settings (key, value_json, note)
-        VALUES ('niche_person', ?, 'One-sentence: the person you solve it for. Empty BLOCKS agent drafting (§28.2 rule #15).')
-        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
-        """,
-        (json.dumps(pn_clean),),
-    )
+    # P59A-W2: BEGIN IMMEDIATE wrapper. Both UPSERTs must land together;
+    # otherwise a mid-flight error leaves Daniel with half-defined niche
+    # (rule #15 then refuses with a confusing "set both" while the UI
+    # shows the half-saved state as if intentional).
+    # P59A-W13: also update `note` on conflict so the Python writer's
+    # note text wins consistently — otherwise migration-seeded text
+    # drifts from in-app-edited text based on order of operations.
+    with transaction(conn):
+        conn.execute(
+            """
+            INSERT INTO settings (key, value_json, note)
+            VALUES ('niche_problem', ?, 'One-sentence: the problem you solve. Empty BLOCKS agent drafting (§28.2 rule #15).')
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                note = excluded.note
+            """,
+            (json.dumps(p_clean),),
+        )
+        conn.execute(
+            """
+            INSERT INTO settings (key, value_json, note)
+            VALUES ('niche_person', ?, 'One-sentence: the person you solve it for. Empty BLOCKS agent drafting (§28.2 rule #15).')
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                note = excluded.note
+            """,
+            (json.dumps(pn_clean),),
+        )
     return NicheDefinition(problem=p_clean, person=pn_clean)
 
 
