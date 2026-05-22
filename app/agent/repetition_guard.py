@@ -51,15 +51,16 @@ class SimilarityWarning:
     nearest_text_excerpt: str
     label: str  # "near_duplicate" | "close_echo" | "distinct"
 
+    def as_dict(self) -> dict:
+        return {
+            "max_cosine": round(self.max_cosine, 4),
+            "nearest_post_id": int(self.nearest_post_id),
+            "nearest_text_excerpt": self.nearest_text_excerpt,
+            "label": self.label,
+        }
+
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "max_cosine": round(self.max_cosine, 4),
-                "nearest_post_id": int(self.nearest_post_id),
-                "nearest_text_excerpt": self.nearest_text_excerpt,
-                "label": self.label,
-            }
-        )
+        return json.dumps(self.as_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +271,7 @@ def check(
         nearest_text_excerpt=excerpt,
         label=label,
     )
-    return json.loads(warning.to_json())
+    return warning.as_dict()
 
 
 # ---------------------------------------------------------------------------
