@@ -13,10 +13,11 @@ the contract is enforced in two places.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date as _date_t
+
+from app.agent import settings_io
 
 
 # Default copied from §13's velocity_7d_display_threshold so the rules
@@ -26,16 +27,9 @@ DEFAULT_NOISE_FLOOR: int = 10
 
 
 def get_noise_floor(conn: sqlite3.Connection) -> int:
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = ?",
-        ("velocity_projection_noise_floor_followers",),
-    ).fetchone()
-    if row is None:
-        return DEFAULT_NOISE_FLOOR
-    try:
-        return int(json.loads(row["value_json"]))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return DEFAULT_NOISE_FLOOR
+    return settings_io.get_int(
+        conn, "velocity_projection_noise_floor_followers", DEFAULT_NOISE_FLOOR
+    )
 
 
 @dataclass(frozen=True)

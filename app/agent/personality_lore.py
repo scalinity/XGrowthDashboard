@@ -27,6 +27,8 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
+from app.agent import settings_io
+
 
 # A reasonable stopword list keeps description-tokenization signal high.
 # Kept small on purpose — the source pool is Daniel-authored short
@@ -123,30 +125,12 @@ def list_active(
 
 def get_splice_count(conn: sqlite3.Connection) -> int:
     """Read ``personality_lore_splice_count`` (default 5)."""
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = ?",
-        ("personality_lore_splice_count",),
-    ).fetchone()
-    if row is None:
-        return 5
-    try:
-        return int(json.loads(row["value_json"]))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return 5
+    return settings_io.get_int(conn, "personality_lore_splice_count", 5)
 
 
 def get_overuse_threshold(conn: sqlite3.Connection) -> int:
     """Read ``personality_lore_overuse_threshold`` (default 8)."""
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = ?",
-        ("personality_lore_overuse_threshold",),
-    ).fetchone()
-    if row is None:
-        return 8
-    try:
-        return int(json.loads(row["value_json"]))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return 8
+    return settings_io.get_int(conn, "personality_lore_overuse_threshold", 8)
 
 
 # ---------------------------------------------------------------------------

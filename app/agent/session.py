@@ -117,26 +117,18 @@ def parse_iwh_self_score(assistant_text: str) -> IwhScore | None:
 
 
 # ---------------------------------------------------------------------------
-# Settings helpers.
+# Settings helpers — delegate to app.agent.settings_io (P59A-W8 DRY).
 # ---------------------------------------------------------------------------
-def _setting_int(conn: sqlite3.Connection, key: str, default: int) -> int:
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = ?", (key,)
-    ).fetchone()
-    if row is None:
-        return default
-    try:
-        return int(json.loads(row["value_json"]))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return default
-
-
 def get_iwh_self_score_minimum(conn: sqlite3.Connection) -> int:
-    return _setting_int(conn, "iwh_self_score_minimum", DEFAULT_IWH_SELF_SCORE_MINIMUM)
+    from app.agent import settings_io
+    return settings_io.get_int(
+        conn, "iwh_self_score_minimum", DEFAULT_IWH_SELF_SCORE_MINIMUM
+    )
 
 
 def get_iwh_max_revision_attempts(conn: sqlite3.Connection) -> int:
-    return _setting_int(
+    from app.agent import settings_io
+    return settings_io.get_int(
         conn, "iwh_max_revision_attempts", DEFAULT_IWH_MAX_REVISION_ATTEMPTS
     )
 

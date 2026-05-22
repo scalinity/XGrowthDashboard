@@ -14,9 +14,10 @@ it (the CHECK exists so the migration can backfill legacy rows).
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
+
+from app.agent import settings_io
 
 
 # The four allowed types for new agent drafts. 'unspecified' exists at
@@ -206,16 +207,7 @@ def get_content_type_gaps(
 # ---------------------------------------------------------------------------
 def get_recommendation_window_days(conn: sqlite3.Connection) -> int:
     """Read ``content_type_recommendation_window_days`` (default 7)."""
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = ?",
-        ("content_type_recommendation_window_days",),
-    ).fetchone()
-    if row is None:
-        return 7
-    try:
-        return int(json.loads(row["value_json"]))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return 7
+    return settings_io.get_int(conn, "content_type_recommendation_window_days", 7)
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.agent import settings_io
 from app.db import transaction
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -59,26 +60,11 @@ CANONICAL_REFUSAL: str = (
 # ---------------------------------------------------------------------------
 # Reads.
 # ---------------------------------------------------------------------------
-def _read_setting_str(conn: sqlite3.Connection, key: str) -> str:
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = ?", (key,)
-    ).fetchone()
-    if row is None:
-        return ""
-    try:
-        val = json.loads(row["value_json"])
-    except (json.JSONDecodeError, TypeError):
-        return ""
-    if val is None:
-        return ""
-    return str(val)
-
-
 def get_niche(conn: sqlite3.Connection) -> NicheDefinition:
     """Return the active niche definition (possibly empty)."""
     return NicheDefinition(
-        problem=_read_setting_str(conn, "niche_problem"),
-        person=_read_setting_str(conn, "niche_person"),
+        problem=settings_io.get_str(conn, "niche_problem", ""),
+        person=settings_io.get_str(conn, "niche_person", ""),
     )
 
 
