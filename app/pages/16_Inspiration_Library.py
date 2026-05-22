@@ -277,6 +277,17 @@ def main() -> None:
             transforms = _ins.list_transforms(
                 conn, saved_inspiration_id=selected["id"]
             )
+            # P511R-5: read override state once for every high-risk
+            # transform so the disabled-flag check below has fresh data
+            # after each rerun. has_been_overridden goes against audit_
+            # logs (server-side; agent has no access per §28.30).
+            override_state: dict[int, bool] = {
+                int(t["id"]): _ins.has_been_overridden(
+                    conn, transform_id=int(t["id"])
+                )
+                for t in transforms
+                if t["plagiarism_risk_label"] == "high"
+            }
         if not transforms:
             st.markdown(
                 "<div class='dim'>no transforms yet for this inspiration.</div>",
@@ -319,30 +330,46 @@ def main() -> None:
                         key=f"send_drafts_{t['id']}",
                     )
                 else:
-                    st.error(
-                        "HIGH plagiarism risk — deterministic Jaccard/n-gram "
-                        "exceeded threshold (§28.29). 'Send to drafts' is "
-                        "disabled until you acknowledge the overlap below."
-                    )
-                    st.text_input(
-                        "override reason (required to acknowledge)",
-                        key=f"override_reason_{t['id']}",
-                    )
-                    st.button(
-                        "acknowledge high-risk override",
-                        key=f"override_{t['id']}",
-                        on_click=_override_high_risk_cb,
-                        kwargs={"transform_id": t["id"]},
-                    )
-                    st.button(
-                        "send to drafts",
-                        key=f"send_drafts_{t['id']}",
-                        disabled=True,
-                        help=(
-                            "Disabled by §28.29 high-risk gate. Override + "
-                            "audit-log first."
-                        ),
-                    )
+                    # P511R-5: high-risk gate flips off once Daniel
+                    # records an override (audit-logged). has_been_
+                    # overridden was just read above against audit_logs.
+                    is_overridden = override_state.get(int(t["id"]), False)
+                    if is_overridden:
+                        st.warning(
+                            "HIGH plagiarism risk — you acknowledged the "
+                            "overlap, so 'Send to drafts' is enabled. The "
+                            "override is recorded in the audit log."
+                        )
+                        st.button(
+                            "send to drafts",
+                            key=f"send_drafts_{t['id']}",
+                            help="High-risk gate lifted by your prior override.",
+                        )
+                    else:
+                        st.error(
+                            "HIGH plagiarism risk — deterministic Jaccard/n-gram "
+                            "exceeded threshold (§28.29). 'Send to drafts' is "
+                            "disabled until you acknowledge the overlap below."
+                        )
+                        st.text_input(
+                            "override reason (required to acknowledge)",
+                            key=f"override_reason_{t['id']}",
+                        )
+                        st.button(
+                            "acknowledge high-risk override",
+                            key=f"override_{t['id']}",
+                            on_click=_override_high_risk_cb,
+                            kwargs={"transform_id": t["id"]},
+                        )
+                        st.button(
+                            "send to drafts",
+                            key=f"send_drafts_{t['id']}",
+                            disabled=True,
+                            help=(
+                                "Disabled by §28.29 high-risk gate. Override + "
+                                "audit-log first."
+                            ),
+                        )
 
 
 main()

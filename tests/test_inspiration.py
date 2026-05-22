@@ -328,6 +328,35 @@ def test_record_plagiarism_override_audit_logged(
 
 
 # ---------------------------------------------------------------------------
+# P511R-5: has_been_overridden — flips the §14.13 high-risk gate.
+# ---------------------------------------------------------------------------
+def test_p511r5_has_been_overridden_false_when_no_override(
+    db_conn: sqlite3.Connection,
+) -> None:
+    assert _ins.has_been_overridden(db_conn, transform_id=999) is False
+
+
+def test_p511r5_has_been_overridden_true_after_record(
+    db_conn: sqlite3.Connection,
+) -> None:
+    _ins.record_plagiarism_override(
+        db_conn, transform_id=123, reason="reviewed"
+    )
+    assert _ins.has_been_overridden(db_conn, transform_id=123) is True
+
+
+def test_p511r5_has_been_overridden_scoped_per_transform(
+    db_conn: sqlite3.Connection,
+) -> None:
+    # An override on transform 7 must not unlock transform 8.
+    _ins.record_plagiarism_override(
+        db_conn, transform_id=7, reason="reviewed"
+    )
+    assert _ins.has_been_overridden(db_conn, transform_id=7) is True
+    assert _ins.has_been_overridden(db_conn, transform_id=8) is False
+
+
+# ---------------------------------------------------------------------------
 # Agent tools #23 + #24.
 # ---------------------------------------------------------------------------
 def test_tool_registry_includes_both_inspiration_tools() -> None:

@@ -513,7 +513,9 @@ def record_plagiarism_override(
     Returns the audit_logs row id so the UI can confirm the override
     landed. Does NOT mutate the transform row — the plagiarism_risk_label
     stays ``high``; the override is a Daniel-attested acknowledgment that
-    he saw the overlap and chose to ship anyway.
+    he saw the overlap and chose to ship anyway. The §14.13 view reads
+    the override state via :func:`has_been_overridden` to flip the
+    'Send to drafts' gate.
     """
     if not reason or not reason.strip():
         raise InspirationError("override reason is required.")
@@ -525,6 +527,37 @@ def record_plagiarism_override(
         target_id=transform_id,
         details={"reason": reason.strip()},
     )
+
+
+def has_been_overridden(
+    conn: sqlite3.Connection, *, transform_id: int
+) -> bool:
+    """Has Daniel logged a high-risk plagiarism override for this transform?
+
+    P511R-5: the §14.13 UI uses this to flip the 'Send to drafts' gate
+    after an override is recorded. The gate previously stayed
+    ``disabled=True`` forever even after the override was logged — the
+    override was theater. This helper makes the override real.
+
+    Reads ``audit_logs`` server-side; the agent has no access to that
+    table (§28.30 read-scope rule) so this stays a Daniel-facing
+    surface. The helper lives in the inspiration module rather than
+    ``audit_log`` so the caller's mental model is "ask inspiration
+    about an inspiration thing" — the audit_log module is the floor,
+    not the read-API for every feature.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM audit_logs
+        WHERE event_category = 'data'
+          AND event_type = 'inspiration_plagiarism_override'
+          AND target_type = 'inspiration_transform'
+          AND target_id = ?
+        LIMIT 1
+        """,
+        (str(transform_id),),
+    ).fetchone()
+    return row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +628,7 @@ __all__: Iterable[str] = (
     "archive_inspiration",
     "compute_plagiarism_risk",
     "final_risk",
+    "has_been_overridden",
     "jaccard_similarity",
     "list_inspirations",
     "list_transforms",
