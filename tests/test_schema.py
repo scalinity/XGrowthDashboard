@@ -74,6 +74,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "010_reply_targets_idx.sql",
     "011_drafting_intelligence.sql",
     "012_niche_content_type.sql",
+    "013_strategic_analysis.sql",
 )
 
 
@@ -514,3 +515,165 @@ def test_phase59_settings_rows_present(db_conn: sqlite3.Connection) -> None:
     keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
     missing = set(PHASE_59_SETTINGS) - keys
     assert not missing, f"missing Phase 5.9 settings rows: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.10 — Strategic Analysis Pack (migration 013).
+# ---------------------------------------------------------------------------
+PHASE_510_TABLES: tuple[str, ...] = (
+    "brain_dumps",
+    "account_research_reports",
+    "profile_audits",
+)
+
+PHASE_510_SETTINGS: tuple[str, ...] = (
+    "coach_refuse_without_evidence",
+    "coach_citation_strip_log_threshold",
+    "brain_dump_max_candidate_drafts",
+    "profile_audit_recent_posts_window_days",
+    "profile_audit_cadence_reminder_days",
+)
+
+
+def test_phase510_tables_exist(db_conn: sqlite3.Connection) -> None:
+    rows = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    names = {row["name"] for row in rows}
+    missing = set(PHASE_510_TABLES) - names
+    assert not missing, f"Phase 5.10 tables missing: {missing}"
+
+
+def test_phase510_brain_dumps_status_check(db_conn: sqlite3.Connection) -> None:
+    # Default status is unprocessed per §28.22 capture-first flow.
+    row_id = db_conn.execute(
+        """
+        INSERT INTO brain_dumps (raw_text) VALUES ('kitchen-scanner missed ginger again')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    status = db_conn.execute(
+        "SELECT status FROM brain_dumps WHERE id = ?", (row_id,)
+    ).fetchone()[0]
+    assert status == "unprocessed"
+    # CHECK constraint rejects unknown status values.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            "INSERT INTO brain_dumps (raw_text, status) VALUES ('x', 'committed')"
+        )
+
+
+def test_phase510_account_research_handle_versioning(db_conn: sqlite3.Connection) -> None:
+    # Multiple reports per handle are allowed — versioned history per §28.24.
+    db_conn.execute(
+        """
+        INSERT INTO account_research_reports
+          (target_handle, created_at_utc, analysis_json, model_used)
+        VALUES ('@foo', '2026-05-01T00:00:00', '{}', 'claude-opus-4-7')
+        """
+    )
+    db_conn.execute(
+        """
+        INSERT INTO account_research_reports
+          (target_handle, created_at_utc, analysis_json, model_used)
+        VALUES ('@foo', '2026-05-22T00:00:00', '{}', 'claude-opus-4-7')
+        """
+    )
+    rows = db_conn.execute(
+        "SELECT COUNT(*) FROM account_research_reports WHERE target_handle = '@foo'"
+    ).fetchone()[0]
+    assert rows == 2
+    # But unique(target_handle, created_at_utc) prevents duplicate timestamps.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO account_research_reports
+              (target_handle, created_at_utc, analysis_json, model_used)
+            VALUES ('@foo', '2026-05-22T00:00:00', '{}', 'claude-opus-4-7')
+            """
+        )
+
+
+def test_phase510_account_research_linked_reply_target_fk(
+    db_conn: sqlite3.Connection,
+) -> None:
+    # Insert a reply_targets row to link to.
+    rt_id = db_conn.execute(
+        """
+        INSERT INTO reply_targets
+          (discovered_via, target_post_url, target_author_handle)
+        VALUES ('manual', 'https://x.com/foo/status/1', '@foo')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    arr_id = db_conn.execute(
+        """
+        INSERT INTO account_research_reports
+          (target_handle, analysis_json, model_used, linked_reply_target_id)
+        VALUES ('@foo', '{}', 'claude-opus-4-7', ?)
+        RETURNING id
+        """,
+        (rt_id,),
+    ).fetchone()[0]
+    # ON DELETE SET NULL — deleting the reply target nulls the back-reference.
+    db_conn.execute("DELETE FROM reply_targets WHERE id = ?", (rt_id,))
+    linked = db_conn.execute(
+        "SELECT linked_reply_target_id FROM account_research_reports WHERE id = ?",
+        (arr_id,),
+    ).fetchone()[0]
+    assert linked is None
+
+
+def test_phase510_profile_audits_window_check(db_conn: sqlite3.Connection) -> None:
+    # Default window is 30 days per §28.25 / migration 013.
+    row_id = db_conn.execute(
+        """
+        INSERT INTO profile_audits
+          (bio_snapshot, audit_json, model_used)
+        VALUES ('hi', '{}', 'claude-opus-4-7')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    win = db_conn.execute(
+        "SELECT recent_posts_window_days FROM profile_audits WHERE id = ?", (row_id,)
+    ).fetchone()[0]
+    assert win == 30
+    # CHECK rejects non-positive windows.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO profile_audits
+              (bio_snapshot, audit_json, model_used, recent_posts_window_days)
+            VALUES ('hi', '{}', 'claude-opus-4-7', 0)
+            """
+        )
+
+
+def test_phase510_agent_messages_evidence_citations_column(
+    db_conn: sqlite3.Connection,
+) -> None:
+    cols = {row[1] for row in db_conn.execute("PRAGMA table_info(agent_messages)")}
+    assert "evidence_citations_json" in cols
+    # Backfills NULL for pre-existing rows AND new rows that don't set it.
+    conv_id = db_conn.execute(
+        """
+        INSERT INTO agent_conversations (status) VALUES ('active') RETURNING id
+        """
+    ).fetchone()[0]
+    msg_id = db_conn.execute(
+        """
+        INSERT INTO agent_messages (conversation_id, role, content)
+        VALUES (?, 'user', 'hi') RETURNING id
+        """,
+        (conv_id,),
+    ).fetchone()[0]
+    cit = db_conn.execute(
+        "SELECT evidence_citations_json FROM agent_messages WHERE id = ?", (msg_id,)
+    ).fetchone()[0]
+    assert cit is None
+
+
+def test_phase510_settings_rows_present(db_conn: sqlite3.Connection) -> None:
+    keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
+    missing = set(PHASE_510_SETTINGS) - keys
+    assert not missing, f"missing Phase 5.10 settings rows: {missing}"

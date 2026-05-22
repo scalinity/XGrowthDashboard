@@ -170,6 +170,34 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         5,
         "Top-N active personality_lore rows spliced into system prompt Section 5 (§28.21).",
     ),
+    # Phase 5.10 — Strategic Analysis Pack (§28.22-§28.25). Mirrors
+    # migration 013_strategic_analysis.sql so a fresh DB initialized via
+    # init_db agrees with one initialized via raw migrations only.
+    (
+        "coach_refuse_without_evidence",
+        True,
+        "When true (default), Coach messages with zero surviving citations + analytical claims are replaced with a canonical refusal before persistence (§28.23).",
+    ),
+    (
+        "coach_citation_strip_log_threshold",
+        3,
+        "Average citations stripped per Coach message over the last 20; exceeding this surfaces a strip-rate-high banner in Settings (§28.23).",
+    ),
+    (
+        "brain_dump_max_candidate_drafts",
+        5,
+        "Hard ceiling on candidate drafts returned per Brain Dump processing pass (§28.22).",
+    ),
+    (
+        "profile_audit_recent_posts_window_days",
+        30,
+        "Days of recent posts fed into the §28.25 Profile Audit when Daniel doesn't override on the form.",
+    ),
+    (
+        "profile_audit_cadence_reminder_days",
+        90,
+        "After this many days since last audit, §14.7 field 12 surfaces a yellow reminder banner. Audits NEVER auto-run (§28.25).",
+    ),
 ]
 
 
