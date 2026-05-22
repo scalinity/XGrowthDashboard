@@ -23,8 +23,8 @@ from app.exports.allowlists import (
     ALLOWLISTS,
     POSTS_ALLOWLIST,
     columns_for_export,
-    excluded_columns,
-    opt_in_columns,
+    get_excluded_columns,
+    get_opt_in_columns,
 )
 
 
@@ -138,7 +138,7 @@ def test_csv_export_excludes_excluded_columns_even_with_opt_in(
     # Sanity: no live allowlist currently has any excluded columns.
     for table in ALLOWLISTS:
         assert all(
-            c not in excluded_columns(table)
+            c not in get_excluded_columns(table)
             for c in ALLOWLISTS[table]["default_columns"] + ALLOWLISTS[table]["opt_in_columns"]
         )
 
@@ -363,7 +363,7 @@ def test_every_allowlist_column_exists_in_schema(db_conn) -> None:
 # ---------------------------------------------------------------------------
 def test_opt_in_and_excluded_columns_are_disjoint() -> None:
     for table in ALLOWLISTS:
-        assert set(opt_in_columns(table)).isdisjoint(set(excluded_columns(table))), table
+        assert set(get_opt_in_columns(table)).isdisjoint(set(get_excluded_columns(table))), table
 
 
 # ---------------------------------------------------------------------------

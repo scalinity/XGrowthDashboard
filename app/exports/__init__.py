@@ -41,8 +41,8 @@ from app.exports.allowlists import (
     TableAllowlist,
     UnknownTableError,
     columns_for_export,
-    excluded_columns,
-    opt_in_columns,
+    get_excluded_columns,
+    get_opt_in_columns,
 )
 
 if TYPE_CHECKING:
@@ -68,8 +68,8 @@ __all__ = [
     "TableAllowlist",
     "UnknownTableError",
     "columns_for_export",
-    "excluded_columns",
-    "opt_in_columns",
+    "get_excluded_columns",
+    "get_opt_in_columns",
     # Lazy (exporter functions + result dataclasses + errors).
     "CsvExportResult",
     "JsonExportResult",

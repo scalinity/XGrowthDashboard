@@ -528,11 +528,11 @@ def columns_for_export(table_name: str, *, include_opt_in: bool = False) -> list
     return chosen
 
 
-def opt_in_columns(table_name: str) -> list[str]:
+def get_opt_in_columns(table_name: str) -> list[str]:
     """Return ``opt_in_columns`` for ``table_name`` (may be empty)."""
     return list(_get(table_name)["opt_in_columns"])
 
 
-def excluded_columns(table_name: str) -> list[str]:
+def get_excluded_columns(table_name: str) -> list[str]:
     """Return ``excluded_columns`` for ``table_name`` (may be empty)."""
     return list(_get(table_name)["excluded_columns"])
