@@ -522,22 +522,32 @@ def process(
             response_text, max_candidates=max_candidates
         )
     except BrainDumpError as exc:
-        _mark_failed(
-            conn,
-            brain_dump_id,
-            error_message=str(exc),
-            model_used=model,
-            tokens_used=tokens_used,
-        )
+        # P510R-12: guard the persistence write so its own failure
+        # (DB lock, IO) doesn't shadow the original error. Original
+        # always propagates; persistence failure logs but doesn't
+        # bury the diagnostic.
+        try:
+            _mark_failed(
+                conn,
+                brain_dump_id,
+                error_message=str(exc),
+                model_used=model,
+                tokens_used=tokens_used,
+            )
+        except Exception:  # noqa: BLE001
+            pass  # original exc still raised below
         raise
     except Exception as exc:
-        _mark_failed(
-            conn,
-            brain_dump_id,
-            error_message=f"{type(exc).__name__}: {exc}",
-            model_used=model,
-            tokens_used=tokens_used,
-        )
+        try:
+            _mark_failed(
+                conn,
+                brain_dump_id,
+                error_message=f"{type(exc).__name__}: {exc}",
+                model_used=model,
+                tokens_used=tokens_used,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         raise BrainDumpError(f"unexpected error: {type(exc).__name__}: {exc}") from exc
 
     _mark_processed(
