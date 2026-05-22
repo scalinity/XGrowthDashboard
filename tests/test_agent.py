@@ -132,6 +132,46 @@ def test_iwh_counter_increments_via_revise_draft_not_agent_output(db_conn):
     assert row["status"] == "proposed"
 
 
+def test_revised_drafts_are_publishable(db_conn):
+    """C2 regression: every revise_draft must mint a posts row so the
+    publish modal can find it via `WHERE agent_draft_id = ?`.
+
+    Before C2, only first-attempt drafts had a linked posts row; revisions
+    silently failed to publish because the click-handler raised "Internal:
+    agent_drafts row has no linked posts row." This is the entire IWH
+    revision flow — every draft past attempt 1 was unpublishable.
+    """
+    out = _save_draft_post(
+        db_conn, text="v1", pillar="stir", audience="icp", cta="ask"
+    )
+    rev = _revise_draft(
+        db_conn, draft_post_id=out["draft_id"], feedback="weak", new_text="v2"
+    )
+    # The revise tool MUST return a post_id and the row MUST exist.
+    assert "post_id" in rev, "revise_draft did not return a post_id"
+    post_row = db_conn.execute(
+        "SELECT id, text, agent_draft_id, manual_confirmation_status FROM posts WHERE id = ?",
+        (rev["post_id"],),
+    ).fetchone()
+    assert post_row is not None, "revise_draft did not mint a posts row"
+    assert post_row["text"] == "v2"
+    assert post_row["agent_draft_id"] == rev["new_draft_id"]
+    assert post_row["manual_confirmation_status"] == "draft"
+
+    # Daniel can now mint a token + publish — i.e. the modal's lookup
+    # succeeds.
+    minted = confirmation.mint_confirmation_token(
+        db_conn, post_id=int(rev["post_id"]), draft_text="v2"
+    )
+    result = publish_post_to_x(
+        db_conn,
+        post_id=int(rev["post_id"]),
+        confirmation_token=minted.raw_token,
+    )
+    assert result.success is True
+    assert result.method == "manual_clipboard"
+
+
 # ===========================================================================
 # 3. Six-check confirmation token chain — each path
 # ===========================================================================

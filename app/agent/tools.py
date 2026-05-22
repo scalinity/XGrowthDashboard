@@ -545,6 +545,7 @@ def _revise_draft(
         return {"error": f"draft {draft_post_id} not found"}
 
     new_index = int(src["iwh_attempt_index"]) + 1
+    post_type = "reply" if src["draft_kind"] == "reply" else "standalone"
     with transaction(conn):
         rev_cur = conn.execute(
             """
@@ -572,12 +573,37 @@ def _revise_draft(
             ),
         )
         new_id = int(rev_cur.lastrowid)
+
+        # C2: mint a corresponding posts row so the publish modal can find
+        # it via `SELECT id FROM posts WHERE agent_draft_id = ?`. Without
+        # this, every IWH revision produced a draft that could not be
+        # published — the modal raised "Internal: agent_drafts row has no
+        # linked posts row." `_save_draft_post`/`_save_draft_reply` already
+        # do this; the revise path was the missing case.
+        post_cur = conn.execute(
+            """
+            INSERT INTO posts
+                (created_at_utc, created_date, text, type, posted_via,
+                 manual_confirmation_status, agent_draft_id)
+            VALUES (datetime('now'), date('now'), ?, ?, 'agent_assisted',
+                    'draft', ?)
+            """,
+            (new_text, post_type, new_id),
+        )
+        post_id = int(post_cur.lastrowid)
+
+        conn.execute(
+            "UPDATE agent_drafts SET final_post_id = ? WHERE id = ?",
+            (post_id, new_id),
+        )
+
         conn.execute(
             "UPDATE agent_drafts SET status = 'superseded' WHERE id = ?",
             (int(src["id"]),),
         )
     return {
         "new_draft_id": new_id,
+        "post_id": post_id,
         "iwh_attempt_index": new_index,
         "superseded_draft_id": int(src["id"]),
     }
