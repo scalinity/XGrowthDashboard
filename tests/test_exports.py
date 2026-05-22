@@ -340,6 +340,53 @@ def test_csv_round_trip_preserves_data(db_conn, tmp_path: Path) -> None:
     assert by_id["x-3"]["text"] == 'third post with "quotes"'
 
 
+def test_csv_export_handles_sqlite_keyword_identifiers(db_conn, tmp_path: Path) -> None:
+    """Regression for #29 / CA1 🔵 S4.
+
+    The defensive ``app.exports._sql.quote_identifier`` helper protects
+    against column or table names that collide with SQLite keywords or
+    contain hyphens/embedded quotes. The live allowlist names are all
+    boring ASCII today, so this exercises the helper directly via a
+    bespoke table and a synthetic allowlist entry.
+    """
+    db_conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS "weird-table" (
+            "select" TEXT NOT NULL,
+            "order"  INTEGER,
+            "from"   TEXT
+        )
+        """
+    )
+    db_conn.execute(
+        'INSERT INTO "weird-table" ("select", "order", "from") VALUES (?, ?, ?)',
+        ("alpha", 1, "x"),
+    )
+    db_conn.execute(
+        'INSERT INTO "weird-table" ("select", "order", "from") VALUES (?, ?, ?)',
+        ("beta", 2, "y"),
+    )
+    db_conn.commit()
+
+    from app.exports import allowlists as al
+
+    al.ALLOWLISTS["weird-table"] = {
+        "default_columns": ["select", "order", "from"],
+        "opt_in_columns": [],
+        "excluded_columns": [],
+    }
+    try:
+        out = tmp_path / "weird.csv"
+        result = export_table_to_csv("weird-table", out, conn=db_conn)
+        assert result.row_count == 2
+        with out.open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        assert rows[0]["select"] == "alpha"
+        assert rows[1]["order"] == "2"
+    finally:
+        del al.ALLOWLISTS["weird-table"]
+
+
 # ---------------------------------------------------------------------------
 # Defensive guard — every registered allowlist refers to columns that exist
 # in the current schema. If Phase 5.5 adds new entries to ``default_columns``,
