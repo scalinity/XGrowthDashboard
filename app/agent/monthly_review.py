@@ -254,6 +254,13 @@ def _content_type_extremes(
 
     Reads ``v_post_latest_metrics`` joined to ``posts.content_type``.
     Skipped when no posts in the window or content_type axis is empty.
+
+    P511R-9: filter on ``date(p.published_to_x_at)`` — the post's
+    PUBLISH date — rather than ``date(v.created_at_utc)`` which is
+    the metric-snapshot insert date. A post published last month with
+    a fresh metric snapshot taken this month was previously misattributed
+    to this month's content-type axis. Mirrors the §28.17 lane-
+    performance convention.
     """
     rows = conn.execute(
         """
@@ -261,7 +268,8 @@ def _content_type_extremes(
         FROM v_post_latest_metrics v
         JOIN posts p ON p.id = v.post_id
         WHERE p.content_type IS NOT NULL
-          AND date(v.created_at_utc) BETWEEN ? AND ?
+          AND p.published_to_x_at IS NOT NULL
+          AND date(p.published_to_x_at) BETWEEN date(?) AND date(?)
         GROUP BY p.content_type
         HAVING n >= 1
         ORDER BY avg_rate DESC NULLS LAST
