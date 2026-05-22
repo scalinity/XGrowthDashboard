@@ -215,6 +215,14 @@ def check(
     """Run the cosine-similarity check. Returns the JSON-ready dict, or
     `None` when the guard cannot run (no embeddings yet, provider down,
     etc.) — caller persists NULL in that case.
+
+    Side effect (P58R-26): writes to `post_embeddings` inside the
+    caller's transaction via `_refresh_stale_embedding` when a corpus
+    row's `source_text_hash` no longer matches its parent `posts.text`.
+    If the caller's outer transaction rolls back (e.g. a CHECK
+    violation on the new draft), the inline re-embed is dropped too —
+    callers composing this inside narrower transactions should know
+    that the re-embed is not durable on rollback.
     """
     if not draft_text or not draft_text.strip():
         return None
