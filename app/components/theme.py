@@ -603,9 +603,13 @@ def _score_meter_segment(label: str, value: int | None) -> str:
         v = max(0, min(3, int(value)))
         color = SCORE_STEP_COLORS[v]
         bars = []
-        # Four discrete bars; the i-th bar is bright if i <= v, else dim.
+        # /review-2 🔵 #1 — v=0 used to light one bar in `bone_faint`,
+        # visually indistinguishable from the "unscored" cell (also dashed +
+        # bone_faint). Semantically 0 means "no signal," so paint all four
+        # bars off (hairline) and let the numeral disambiguate. v >= 1 still
+        # lights `v + 1` bars in the per-step color.
         for i in range(4):
-            on = i <= v
+            on = v >= 1 and i <= v
             bg = color if on else PALETTE["hairline"]
             bars.append(
                 f"<div style='flex:1; height:3px; background:{bg};'></div>"
