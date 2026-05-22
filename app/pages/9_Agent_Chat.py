@@ -418,15 +418,51 @@ def _render_publish_modal(conn) -> None:
 
     st.markdown("<hr class='hairline' />", unsafe_allow_html=True)
     kicker("publish to X")
-    st.markdown(
-        f"<div style='font-family: Fraunces, serif; font-size: 1.3rem; "
-        f"color: {PALETTE['bone']}; padding: 1.2rem 0; max-width: 38rem;'>"
-        f"{modal['text']}</div>",
-        unsafe_allow_html=True,
+
+    # Phase 5.8 / §28.15 — snapshot the at-open hash so the rerun loop
+    # can detect "Daniel edited after open" and surface the banner.
+    # Snapshot lives in st.session_state, keyed per post_id, so the
+    # rerun cycle is idempotent (snapshot only on first render after
+    # _open_publish_modal flipped the session_state field).
+    post_id = modal["post_id"]
+    hash_key = f"modal_hash_{post_id}"
+    text_key = f"modal_text_{post_id}"
+    if hash_key not in st.session_state:
+        st.session_state[hash_key] = confirmation.hash_draft_text(modal["text"])
+    # Pre-fill the bound text area with the prior modal text on first open,
+    # or with whatever the user has typed on subsequent reruns.
+    if text_key not in st.session_state:
+        st.session_state[text_key] = modal["text"]
+
+    edited_text = st.text_area(
+        "draft (editable — changes are applied to posts.text on publish)",
+        key=text_key,
+        max_chars=280,
+        height=140,
     )
-    char_count = len(modal["text"])
+    current_hash = confirmation.hash_draft_text(edited_text)
+    char_count = len(edited_text)
+    text_changed = current_hash != st.session_state[hash_key]
+
+    if text_changed:
+        st.markdown(
+            f"<div style='border-left: 3px solid {PALETTE['warn_amber']}; "
+            f"background: {PALETTE['surface_raised']}; "
+            f"padding: 0.5rem 0.8rem; margin: 0.4rem 0;'>"
+            f"<div class='numeric' style='font-size: 0.7rem; letter-spacing: "
+            f"0.08em; color: {PALETTE['warn_amber']}; text-transform: uppercase;'>"
+            f"DRAFT EDITED · §28.15</div>"
+            f"<div style='font-size: 0.85rem; color: {PALETTE['bone']}; "
+            f"margin-top: 0.3rem;'>"
+            f"You've edited this draft since the modal opened. The approval "
+            f"hash will be regenerated when you click Publish — this is "
+            f"fine, just confirming you meant to."
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
     char_color = (
-        PALETTE["confidence_directional_bg"]
+        PALETTE["warn_amber"]
         if char_count > 280
         else PALETTE["bone_dim"]
     )
@@ -437,18 +473,14 @@ def _render_publish_modal(conn) -> None:
     )
 
     st.markdown("<div style='margin: 1.2rem 0;'></div>", unsafe_allow_html=True)
-    # Static TTL note in place of the prior animated countdown (C4 + W4
-    # combined: removing the rerun loop + dropping the pre-minted token
-    # means there's no live TTL to render. The actual mint happens
-    # below; the six-check chain enforces server-side expiry).
     st.markdown(
         "<div class='kicker'>publish window</div>"
         "<div class='faint' style='font-size: 0.82rem;'>"
-        "On confirm: a single-use sha256-hashed token is minted with a "
-        "60-second TTL and immediately consumed by the publish call. "
-        "The raw token never leaves this click-handler's local stack "
-        "frame (§28.10). If you take longer than 60 s between minting "
-        "and confirming, the server rejects the click and you can retry."
+        "On confirm: any text edit above is committed to posts.text, prior "
+        "unconsumed tokens for this post are invalidated, a fresh single-use "
+        "sha256-hashed token is minted with a 60-second TTL, and the "
+        "publish call consumes it. The raw token never leaves this "
+        "click-handler's local stack frame (§28.10 + §28.15)."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -464,7 +496,7 @@ def _render_publish_modal(conn) -> None:
     # X cap so the publish_post_atomic length check doesn't have to fire.
     can_publish = (
         confirm_text.strip().lower() == "confirm"
-        and char_count <= 280
+        and 0 < char_count <= 280
     )
     col_a, col_b = st.columns([1, 1])
     with col_a:
@@ -474,17 +506,28 @@ def _render_publish_modal(conn) -> None:
             disabled=not can_publish,
             key="publish_confirm_btn",
         ):
+            # Phase 5.8 / §28.15 step 5 — if the modal text differs from
+            # posts.text, write the edit BEFORE minting. The token's
+            # draft_text_hash_at_issue is then computed against the
+            # just-updated text, not the pre-edit version.
+            confirmation.update_post_text_for_publish(
+                conn,
+                post_id=post_id,
+                new_text=edited_text,
+                message_id=modal["message_id"],
+            )
+            # Phase 5.8 / §28.15 step 6 — kill any prior unconsumed
+            # token so a stale modal session cannot race-publish.
+            confirmation.invalidate_unconsumed_tokens_for_post(
+                conn, post_id=post_id
+            )
             # ---- Raw-token critical section — keep it tight. ----
-            # mint() returns a MintedToken whose .raw_token lives ONLY in
-            # this local variable. The publish call below consumes it in
-            # a single synchronous Python call. After the call returns
-            # the local goes out of scope and the raw value is unreachable.
             minted = confirmation.mint_confirmation_token(
-                conn, post_id=modal["post_id"], draft_text=modal["text"]
+                conn, post_id=post_id, draft_text=edited_text
             )
             result = _internal_tools.publish_post_to_x(
                 conn,
-                post_id=modal["post_id"],
+                post_id=post_id,
                 confirmation_token=minted.raw_token,
                 message_id=modal["message_id"],
             )
@@ -496,10 +539,16 @@ def _render_publish_modal(conn) -> None:
                 "error": result.error,
             }
             st.session_state.publish_modal = None
+            # Drop the per-modal session-state keys so a future open
+            # starts from a clean slate.
+            st.session_state.pop(hash_key, None)
+            st.session_state.pop(text_key, None)
             st.rerun()
     with col_b:
         if st.button("cancel", key="publish_cancel_btn"):
             st.session_state.publish_modal = None
+            st.session_state.pop(hash_key, None)
+            st.session_state.pop(text_key, None)
             st.rerun()
 
 

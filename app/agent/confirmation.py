@@ -134,6 +134,84 @@ def _get_setting_ttl_seconds(conn: sqlite3.Connection) -> int:
         return DEFAULT_TOKEN_TTL_SECONDS
 
 
+def invalidate_unconsumed_tokens_for_post(
+    conn: sqlite3.Connection, *, post_id: int, now: datetime | None = None
+) -> int:
+    """§28.15 — expire any unconsumed token for ``post_id`` by setting
+    ``expires_at_utc = now() - 1 second``.
+
+    Returns the count of rows updated. Caller (the publish click-handler)
+    runs this BEFORE minting a new token so a stale modal session can
+    never produce a valid token that races the current modal's publish.
+
+    The unconsumed-token check uses ``consumed_at_utc IS NULL`` — already-
+    consumed rows are immutable history and never touched.
+    """
+    now = now or _utcnow()
+    past_marker = (now - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        """
+        UPDATE publish_confirmation_tokens
+        SET expires_at_utc = ?
+        WHERE post_id = ?
+          AND consumed_at_utc IS NULL
+          AND expires_at_utc > ?
+        """,
+        (past_marker, int(post_id), now.strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    return int(cur.rowcount or 0)
+
+
+def update_post_text_for_publish(
+    conn: sqlite3.Connection,
+    *,
+    post_id: int,
+    new_text: str,
+    message_id: int | None = None,
+) -> bool:
+    """§28.15 step 5 — write modal-edit text to ``posts.text`` and audit
+    the pre/post hash diff. Returns True when the text actually changed
+    (and was written), False when it matched the prior on-disk value.
+
+    The audit row goes through ``agent_tool_calls`` with
+    ``tool_name = 'publish_modal_edit'`` and
+    ``notes = 'draft edited at modal time'`` so the §28.10 audit trail
+    captures the edit without needing a new table.
+    """
+    import json as _json
+
+    row = conn.execute(
+        "SELECT text FROM posts WHERE id = ?", (int(post_id),)
+    ).fetchone()
+    if row is None:
+        return False
+    current_text = row["text"] or ""
+    if current_text == new_text:
+        return False
+    pre_hash = hash_draft_text(current_text)
+    post_hash = hash_draft_text(new_text)
+    conn.execute(
+        "UPDATE posts SET text = ? WHERE id = ?",
+        (new_text, int(post_id)),
+    )
+    if message_id is not None:
+        conn.execute(
+            """
+            INSERT INTO agent_tool_calls
+              (message_id, tool_name, arguments_json, redacted_arguments,
+               result_json, status, notes)
+            VALUES (?, 'publish_modal_edit', ?, 0, ?, 'success',
+                    'draft edited at modal time')
+            """,
+            (
+                int(message_id),
+                _json.dumps({"post_id": int(post_id)}),
+                _json.dumps({"pre_edit_hash": pre_hash, "post_edit_hash": post_hash}),
+            ),
+        )
+    return True
+
+
 def mint_confirmation_token(
     conn: sqlite3.Connection,
     *,
