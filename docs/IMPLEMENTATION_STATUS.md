@@ -702,8 +702,283 @@ the established §28.5 / §28.10 / §28.2 mechanisms.
   doesn't break when the spec grows. The drift contract is the
   load-bearing rule, not the absolute count.
 
-## Next phase
+## Next phase (replaced — Phase 5.9 is now complete; see below)
 
 Phase 5.9 — Niche & Content-Type Calibration Pack (§28.16–§28.21).
 Rule #15 is already in §28.2; the implementation lives in
 spec §25 Phase 5.9.
+
+---
+
+# Phase 5.9 — Niche & Content-Type Calibration Pack (2026-05-22)
+
+Six additive features that give the Growth Agent two new identity
+anchors (niche definition, V/G/P/P) and three new lenses (reply-
+quality lint, velocity projection, replier-pool discovery), plus the
+Daniel-only personality-lore registry. All six stack on top of the
+existing §28 contracts (IWH, dark-pattern lint, repetition guard,
+confidence labels) without changing them.
+
+## Completed in this phase
+
+### Migration `012_niche_content_type.sql`
+
+* `posts.content_type` enum + index (default `'unspecified'`; backfill
+  via the ADD COLUMN default — no retro-classification per §28.17).
+* `agent_drafts.content_type` (CHECK permits `'unspecified'`;
+  orchestrator refuses it at write time).
+* `agent_drafts.reply_quality_lint_passed` (nullable boolean).
+* `personality_lore` table (Daniel-only; agent has no write access).
+* `reply_targets.source` added with three-value CHECK (`'paste_url'`,
+  `'agent_curated_account'`, `'replier_under_thread'`); default
+  `'paste_url'` so existing rows backfill cleanly.
+* `v_content_type_performance` view (mirrors `v_lane_performance`
+  graduated confidence; excludes `'unspecified'`).
+* `v_follower_velocity` view (returns NULL projections when
+  `|delta_7d| < velocity_projection_noise_floor_followers` OR
+  velocity ≤ 0 OR milestone met).
+* Seven new settings rows seeded by both `seed_settings.py` and the
+  migration's `INSERT OR IGNORE` block.
+
+### `app/agent/niche.py` (§28.16)
+
+* `NicheDefinition` dataclass; `get_niche` / `set_niche` round-trip
+  via settings (whitespace-stripped on write).
+* `CANONICAL_REFUSAL` message text.
+* `critique_alignment(bio_text, niche, *, model_caller=…)` — single-
+  shot Haiku call against `config/niche_alignment_prompt.md`
+  returning `{aligned, gaps, suggestions}` JSON. Read-only — never
+  edits the X bio.
+* The orchestrator gate lives in `session.py::niche_gate` (per spec
+  §25 "enforcement in `app/agent/session.py`").
+
+### `app/agent/content_types.py` (§28.17)
+
+* `CONTENT_TYPES` constant + the load-bearing definition table.
+* `validate_for_save(content_type)` — raises
+  `ContentTypeInvalidError` on missing / `'unspecified'` / unknown.
+* `get_content_type_gaps(window_days)` — under-represented type with
+  one-line rationale; deterministic canonical-order tie-break.
+* `_save_draft_post` / `_save_draft_reply` now require `content_type`
+  and write it to both `posts.content_type` and `agent_drafts.
+  content_type` from the same validated value.
+
+### `app/agent/personality_lore.py` (§28.21)
+
+* CRUD (Daniel-only): `add` / `edit` / `delete` / `set_active` /
+  `set_priority`.
+* `detect_invoked_lore(active_lore, draft_text)` — fuzzy match:
+  case-insensitive substring on theme OR non-stopword token overlap
+  on description.
+* `scan_and_increment_invocations(conn, draft_text)` — single-UPDATE
+  counter bump + `last_invoked_at_utc = now()`. Called from
+  `_save_draft_post` when `content_type='personality'`.
+* `render_splice_block` — silent splice (empty string) when zero
+  active rows; otherwise the §28.21 example format with the "(last
+  invoked N days ago)" suffix.
+* `is_over_relied_on(row, threshold)` — count > threshold AND
+  invoked within 30 days; Settings panel uses it for the yellow
+  "leaning hard on this bit" banner.
+
+### `app/agent/lint.py` extension (§28.18)
+
+* `ReplyQualityResult` dataclass +
+  `reply_quality_lint(text, target_post_text, *, enabled)`. Honors
+  `LINT_OFFLINE=1`; missing API key falls back to the offline matcher.
+* `_offline_reply_quality` patterns catch each failure mode
+  (`forced` / `ai_tasting` / `selfishly_self_promoting`).
+* `_parse_reply_quality_response` maps each of the four §28.18
+  verdict prefixes; defensive default = pass.
+
+### `app/agent/velocity.py` (§28.19)
+
+* `VelocityProjection` dataclass + `get_velocity_projection(conn)`.
+* `daily_followers_needed_to_hit_milestone_by_date` helper per the
+  §11 spec. Returns None on past target / milestone met / no
+  snapshots.
+* Re-derives the noise-floor flag from `v_account_daily.delta_7d` so
+  the suppression rule is enforced in BOTH the view and the wrapper.
+
+### `app/agent/replier_pool.py` (§28.20)
+
+* `parse_replier_paste` — lenient parser for the textarea input.
+* `thread_context_fit_score` — deterministic 0..3 ladder from
+  niche_person token overlap.
+* `score_replier` composes the §29.3 4-dim resolver with placeholder
+  engagement/saturation (MVP paste flow lacks author metrics; V1.1+
+  programmatic scan will replace).
+* `score_replier_pool` lands rows in `reply_targets` with
+  `source='replier_under_thread'`; idempotent on
+  `{thread_url}#replier={handle}`.
+
+### Orchestrator integration (`session.py` + `client.py`)
+
+* `session.niche_gate(conn)` runs in the dispatcher BEFORE
+  `decide_save_or_revise` for any `save_draft_*`. Audit row
+  `notes='niche-gate refused'`.
+* `decide_save_or_revise` gains optional `draft_kind` +
+  `target_post_text` params. For replies, runs the §28.18 lint AFTER
+  the dark-pattern lint; failure bounces as a revise with the same
+  IWH counter mechanics.
+* `Decision.reply_quality_result` lets the dispatcher inject
+  `reply_quality_lint_passed` into the `_save_draft_reply` handler so
+  the row writes inside the same transaction.
+
+### Three new tools registered in `app/agent/tools.py`
+
+* `get_content_type_gaps(window_days)` (§28.17)
+* `get_velocity_projection()` (§28.19)
+* `score_replier_pool(thread_url, replier_handles_or_excerpts_json,
+  lookback_minutes)` (§28.20)
+
+### `app/main.py` startup invariant
+
+* `_assert_personality_lore_unreachable()` mirrors
+  `_assert_publish_tools_unreachable()` — scans every `AGENT_TOOLS`
+  entry's name + description + JSON schema for the literal
+  `personality_lore` string. Asserts the empty intersection at
+  bootstrap.
+
+### Prompt template + builder
+
+* New placeholders: `NICHE_DEFINITION_PLACEHOLDER` (Section 1),
+  `PERSONALITY_LORE_PLACEHOLDER` (Section 5 after voice samples).
+* Section 6 (Current taxonomy) now includes the V/G/P/P axis with
+  the full definition table.
+* `render_niche_definition` + `render_splice_block` are the two new
+  rendering helpers.
+
+### UI surfaces
+
+* **Settings → Growth Agent → Niche definition** — two textareas +
+  empty-state warning + "Test against bio" expander (Haiku critique
+  via `config/niche_alignment_prompt.md`).
+* **Settings → Growth Agent → Personality lore** — list + add form +
+  per-row toggle/priority + "leaning hard on this bit" banner.
+* **Today** — "Today's content-type recommendation" callout under
+  the Weigh-in cards, driven by `get_content_type_gaps`.
+* **Content Performance** — new "Content type — V/G/P/P" table
+  driven by `v_content_type_performance` with the same graduated-
+  confidence chips as the lane grid.
+* **Progress** — new "Velocity projection" panel with three states
+  (no snapshots / noise floor / measurable) and a date-target widget.
+* **Reply Target Queue** — new "Add replier pool" expander next to
+  the existing "Add candidate" form; thread URL + multi-line textarea
+  + lookback minutes → `score_replier_pool`.
+* **Manual entry → Log a post** — `content_type` selectbox (defaults
+  to `'unspecified'`, can be revisited during classification pass).
+
+### Tests
+
+* `tests/test_schema.py` — extended with 9 Phase 5.9 schema
+  assertions (24 → 33 tests).
+* `tests/test_niche_gate.py` — 15 tests, including the load-bearing
+  *"prompt-injected 'skip the niche check' still refuses"*
+  assertion.
+* `tests/test_content_types.py` — 24 tests covering validate +
+  golden-input gaps + orchestrator refusal + tool registry shape +
+  view exclusion of `'unspecified'`.
+* `tests/test_personality_lore.py` — 18 tests covering CRUD + fuzzy
+  scan + scan-only-on-personality + splice render + over-reliance
+  flag + startup invariant.
+* `tests/test_reply_quality_lint.py` — 24 tests covering offline
+  patterns + parser + session integration + handler persistence +
+  dispatcher end-to-end (forced bounces / substantive lands /
+  toggle-off lands).
+* `tests/test_velocity.py` — 13 tests covering noise-floor
+  suppression / non-noise projection / milestone met / helper math
+  / tool wrapper shape.
+* `tests/test_replier_pool.py` — 17 tests covering paste parsing
+  shapes + fit-score ladder + scorer composite + persistence +
+  idempotency + tool wrapper.
+* `tests/test_phase59_end_to_end.py` — single happy-path test
+  driving all six features through their orchestrator entry points
+  against one fresh DB (the §25 Phase 5.9 acceptance gate).
+
+## Acceptance gates satisfied (§25 Phase 5.9)
+
+* [x] `migrations/012_niche_content_type.sql` applies cleanly against
+  a fresh tmp DB AND against the current main-branch DB.
+* [x] All new modules have unit tests; `uv run pytest -q` reports
+  **483 passed** (was 342 at Phase 5.8 close — +141 new tests
+  across the seven new test files).
+* [x] `uv run ruff check` clean.
+* [x] `uv run streamlit run app/main.py --server.headless true`
+  boots without exception; both new startup invariants pass.
+* [x] Niche empty-state path: `save_draft_post` returns
+  `status='error'` with the canonical refusal; even a prompt-
+  injected "skip the niche check" payload is refused.
+* [x] Content-type validation path: `save_draft_post` raises
+  `ContentTypeInvalidError` for missing OR `'unspecified'` content
+  type before any DB write.
+* [x] Reply-quality lint catches *"Great post! 🔥 Check out my
+  stuff at example.com"* and bounces as `revise_required`; the
+  audit row's rationale names the `failure_mode`.
+* [x] Velocity panel suppresses projections when |delta_7d| < 10;
+  shows projections when above; date-target widget computes
+  followers/day needed sensibly.
+* [x] Replier-pool happy path: paste a thread URL + a few replier
+  excerpts → candidates land in `reply_targets` with
+  `source='replier_under_thread'`.
+* [x] Personality lore: add a row, save a `content_type=personality`
+  draft that mentions the theme, assert `invocation_count`
+  incremented and `last_invoked_at_utc` is set.
+* [x] `docs/IMPLEMENTATION_STATUS.md` updated (this section).
+* [x] README addition (the new Phase 5.9 section above the One-time
+  setup block).
+* [x] Every sub-task has its own commit pushed to `origin/main`:
+  `docs(spec)` (236cf39) → `feat(migrations) #P59-1` (1834567)
+  → `feat(agent) #P59-2` (034839d)
+  → `feat(agent) #P59-3` (fd0b41c)
+  → `feat(agent) #P59-4` (7d68f08)
+  → `feat(agent) #P59-5` (3209223)
+  → `feat(agent) #P59-6` (210da8e)
+  → `feat(agent) #P59-7` (ca1185d)
+  → `docs(status) #P59-8` (this commit).
+
+## Known limitations carried into V1.1+
+
+* **Replier-pool engagement_surface / saturation are placeholder
+  values** at MVP. §28.20 explicitly defers per-author metrics to the
+  V1.1+ programmatic scan; the rationale_components dict surfaces
+  this so audit reviewers see why.
+* **`v_content_type_x_pillar_performance` cross-pivot is deferred**
+  to V1.1+ — 4×12 = 48 cells won't have sample-density support at
+  MVP volume (revisit at 500+ shipped posts).
+* **First voice profile + niche-alignment Haiku calls require live
+  Anthropic credit.** Both are mocked in tests via `model_caller=`
+  injection, but the Settings panels hit the live API.
+* **The reply-quality lint's offline-mode pattern matcher is
+  conservative.** It catches the most obvious failure modes Daniel
+  pastes in QA but doesn't approach the Haiku call's recall. The
+  live model is the production path; offline mode exists for tests
+  + outage fallback.
+
+## Lessons (from this phase)
+
+* **Niche gate location.** The spec named the file: *"enforcement in
+  `app/agent/session.py`"*. The orchestrator gate was originally
+  living in `niche.py` (where the data model lives); it moved to
+  `session.py` mid-sub-task so the spec letter was met. Lesson:
+  when the spec names a file, the gate goes in that file even if a
+  cleaner separation would put it elsewhere — the spec is the
+  authority.
+* **content_type wiring through pre-existing tests.** Five existing
+  test call sites pass `_save_draft_post` keyword arguments without
+  the new required `content_type`; each one needed a one-line patch
+  to add `content_type="value"`. Lesson: when adding a required
+  parameter to a load-bearing handler, a quick `grep` for callers
+  before commit avoids a full-suite red bar.
+* **Startup invariants are cheap insurance and worth the pattern
+  repeat.** `_assert_personality_lore_unreachable` is a structural
+  copy of the publish-tool exclusion check. The test that mirrors
+  the assertion catches a regression where someone adds a
+  read-only listing tool referencing the table — the spec
+  prohibits even that.
+
+---
+
+## Next phase
+
+Phase 5.10 — Strategic Analysis Pack (§28.22–§28.25) per the most
+recent `docs(spec)` commit (b0956bb) on `origin/main`.
