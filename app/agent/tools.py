@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.db import transaction
+from app.agent import content_types as _content_types
 from app.agent import prepublish_scorer as _prepublish_scorer
 from app.agent import repetition_guard as _repetition_guard
 from app.agent import voice_profile as _voice_profile
@@ -709,6 +710,7 @@ def _save_draft_post(
     pillar: str,
     audience: str,
     cta: str,
+    content_type: str | None = None,
     hypothesis: str | None = None,
     hypothesis_id: int | None = None,
     why_posted: str | None = None,  # noqa: ARG001 — stored on post_classifications later
@@ -720,6 +722,11 @@ def _save_draft_post(
     agent_reasoning: str | None = None,
     confidence_label: str | None = None,
 ) -> dict[str, Any]:
+    # Phase 5.9 / §28.17 — orchestrator-enforced V/G/P/P validation. Raises
+    # ContentTypeInvalidError on missing / 'unspecified' / unknown. The
+    # CHECK constraint also permits 'unspecified' so the migration can
+    # backfill legacy rows; this guard is the runtime contract.
+    ct = _content_types.validate_for_save(content_type)
     with transaction(conn):
         draft_cur = conn.execute(
             """
@@ -727,8 +734,8 @@ def _save_draft_post(
                 (session_id, conversation_id, draft_kind, text, pillar,
                  audience, cta, hypothesis_id, agent_reasoning,
                  voice_self_score, iwh_attempt_index, status,
-                 confidence_label)
-            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                 confidence_label, content_type)
+            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
             """,
             (
                 session_id,
@@ -742,6 +749,7 @@ def _save_draft_post(
                 json.dumps(voice_self_score) if voice_self_score else None,
                 int(iwh_attempt_index),
                 confidence_label,
+                ct,
             ),
         )
         draft_id = int(draft_cur.lastrowid)
@@ -750,11 +758,11 @@ def _save_draft_post(
             """
             INSERT INTO posts
                 (created_at_utc, created_date, text, type, posted_via,
-                 manual_confirmation_status, agent_draft_id)
+                 manual_confirmation_status, agent_draft_id, content_type)
             VALUES (datetime('now'), date('now'), ?, 'standalone',
-                    'agent_assisted', 'draft', ?)
+                    'agent_assisted', 'draft', ?, ?)
             """,
-            (text, draft_id),
+            (text, draft_id, ct),
         )
         post_id = int(post_cur.lastrowid)
 
@@ -830,6 +838,7 @@ def _save_draft_reply(
     target_post_url: str,
     target_post_text: str | None = None,
     pillar: str | None = None,
+    content_type: str | None = None,
     hypothesis: str | None = None,  # noqa: ARG001 — Session 2 stores on classifications
     voice_self_score: dict[str, int] | None = None,
     iwh_attempt_index: int = 1,
@@ -838,6 +847,8 @@ def _save_draft_reply(
     agent_reasoning: str | None = None,
     confidence_label: str | None = None,
 ) -> dict[str, Any]:
+    # Phase 5.9 / §28.17 — required, same enforcement as posts.
+    ct = _content_types.validate_for_save(content_type)
     with transaction(conn):
         draft_cur = conn.execute(
             """
@@ -845,8 +856,8 @@ def _save_draft_reply(
                 (session_id, conversation_id, draft_kind, text, pillar,
                  target_post_url, target_post_text, agent_reasoning,
                  voice_self_score, iwh_attempt_index, status,
-                 confidence_label)
-            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                 confidence_label, content_type)
+            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
             """,
             (
                 session_id,
@@ -859,6 +870,7 @@ def _save_draft_reply(
                 json.dumps(voice_self_score) if voice_self_score else None,
                 int(iwh_attempt_index),
                 confidence_label,
+                ct,
             ),
         )
         draft_id = int(draft_cur.lastrowid)
@@ -867,11 +879,11 @@ def _save_draft_reply(
             """
             INSERT INTO posts
                 (created_at_utc, created_date, text, type, posted_via,
-                 manual_confirmation_status, agent_draft_id)
+                 manual_confirmation_status, agent_draft_id, content_type)
             VALUES (datetime('now'), date('now'), ?, 'reply',
-                    'agent_assisted', 'draft', ?)
+                    'agent_assisted', 'draft', ?, ?)
             """,
-            (text, draft_id),
+            (text, draft_id, ct),
         )
         post_id = int(post_cur.lastrowid)
 
@@ -1406,11 +1418,20 @@ AGENT_TOOLS: list[ToolDef] = [
                         "specific open hypothesis from get_open_hypotheses."
                     ),
                 },
+                "content_type": {
+                    "type": "string",
+                    "enum": list(_content_types.CONTENT_TYPES),
+                    "description": (
+                        "V/G/P/P axis per §28.17. Required. The orchestrator "
+                        "refuses 'unspecified' even though the CHECK permits "
+                        "it. Pick the one that describes the post's PURPOSE."
+                    ),
+                },
                 "why_posted": {"type": "string"},
                 "expected_signal": {"type": "string"},
                 "agent_reasoning": {"type": "string"},
             },
-            "required": ["text", "pillar", "audience", "cta"],
+            "required": ["text", "pillar", "audience", "cta", "content_type"],
         },
         handler=_save_draft_post,
     ),
@@ -1427,10 +1448,18 @@ AGENT_TOOLS: list[ToolDef] = [
                 "target_post_url": {"type": "string"},
                 "target_post_text": {"type": "string"},
                 "pillar": {"type": "string"},
+                "content_type": {
+                    "type": "string",
+                    "enum": list(_content_types.CONTENT_TYPES),
+                    "description": (
+                        "V/G/P/P axis per §28.17. Required. The orchestrator "
+                        "refuses 'unspecified'."
+                    ),
+                },
                 "hypothesis": {"type": "string"},
                 "agent_reasoning": {"type": "string"},
             },
-            "required": ["text", "target_post_url"],
+            "required": ["text", "target_post_url", "content_type"],
         },
         handler=_save_draft_reply,
     ),
@@ -1451,6 +1480,25 @@ AGENT_TOOLS: list[ToolDef] = [
             "required": ["draft_post_id", "feedback", "new_text"],
         },
         handler=_revise_draft,
+    ),
+    ToolDef(
+        name="get_content_type_gaps",
+        description=(
+            "Counts per V/G/P/P content type over the last window_days "
+            "(default 7 from `content_type_recommendation_window_days`). "
+            "Returns the under-represented type with a one-line rationale "
+            "the agent can quote when Daniel asks 'what should I post "
+            "today?'. Read-only (§28.17)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "window_days": {"type": "integer", "default": 7},
+            },
+        },
+        handler=lambda conn, window_days=7: _content_types.get_content_type_gaps(
+            conn, window_days=int(window_days)
+        ),
     ),
     ToolDef(
         name="record_reply_target",

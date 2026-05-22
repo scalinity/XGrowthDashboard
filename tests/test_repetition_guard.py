@@ -333,6 +333,7 @@ def test_save_draft_post_survives_guard_crash(db_conn, monkeypatch) -> None:
         pillar="build",
         audience="icp",
         cta="none",
+        content_type="value",
     )
     assert "draft_id" in result
     assert result["similarity_warning"] is None
@@ -362,6 +363,7 @@ def test_save_draft_post_writes_similarity_warning(db_conn, monkeypatch) -> None
         pillar="build",
         audience="icp",
         cta="none",
+        content_type="value",
     )
     # Score still wired.
     assert result["prepublish_label"] in ("weak", "viable", "strong")

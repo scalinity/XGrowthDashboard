@@ -206,6 +206,91 @@ lane_performance_grid(lane_rows)
 
 hairline()
 
+# Phase 5.9 / §28.17 — V/G/P/P content-type slice. Same graduated-
+# confidence labels as v_lane_performance. content_type='unspecified'
+# rows are EXCLUDED from the view at the SQL layer (see migration 012).
+st.markdown("## Content type — V/G/P/P (§28.17)")
+st.caption(
+    "Performance sliced by *purpose* (value / growth / personality / proof) — "
+    "orthogonal to pillar (topic). Same confidence ladder as the lane grid. "
+    "Rows with content_type='unspecified' are excluded from this view: "
+    "they're a backfill bucket, not an active learning category."
+)
+_ct_rows = conn.execute(
+    """
+    SELECT content_type, post_count, days_covered,
+           median_impressions, iqr_impressions_low, iqr_impressions_high,
+           median_engagement_rate, confidence_label
+    FROM v_content_type_performance
+    ORDER BY CASE content_type
+       WHEN 'value' THEN 0 WHEN 'growth' THEN 1
+       WHEN 'personality' THEN 2 WHEN 'proof' THEN 3 ELSE 9 END
+    """
+).fetchall()
+if not _ct_rows:
+    st.markdown(
+        f"<div class='faint' style='font-size: 0.85rem; color: "
+        f"{PALETTE['bone_dim']};'>"
+        f"No classified posts yet. As you log posts with a V/G/P/P "
+        f"content_type, this table fills in."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    _ct_html: list[str] = [
+        f"<tr style='border-bottom: 1px solid {PALETTE['hairline']};'>"
+        f"<th style='text-align:left; padding:0.4rem 0.6rem 0.4rem 0; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>type</th>"
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>n</th>"
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>days</th>"
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>median impressions</th>"
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>median ER</th>"
+        f"<th style='text-align:left; padding:0.4rem 0; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>confidence</th>"
+        f"</tr>"
+    ]
+    for _r in _ct_rows:
+        _imp = (
+            f"{int(_r['median_impressions']):,}"
+            if _r["median_impressions"] is not None else "—"
+        )
+        _er = (
+            f"{_r['median_engagement_rate']:.3f}"
+            if _r["median_engagement_rate"] is not None else "—"
+        )
+        _ui_label = ui_label_for_db_label(_r["confidence_label"] or "insufficient sample")
+        _chip_bg = confidence_color_for_ui_label(_ui_label)
+        _ct_html.append(
+            f"<tr>"
+            f"<td style='padding:0.3rem 0.6rem 0.3rem 0; color:{PALETTE['bone']};'>"
+            f"<code>{_r['content_type']}</code></td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{int(_r['post_count'] or 0)}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{int(_r['days_covered'] or 0)}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{_imp}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{_er}</td>"
+            f"<td style='padding:0.3rem 0;'>"
+            f"<span style='background:{_chip_bg}; padding:1px 6px; border-radius:2px;"
+            f" font-family:JetBrains Mono,monospace; font-size:0.7rem;"
+            f" letter-spacing:0.08em; text-transform:uppercase; color:#0e1116;'>"
+            f"{_ui_label}</span></td></tr>"
+        )
+    st.markdown(
+        "<table style='border-collapse: collapse; font-family: IBM Plex Sans, sans-serif;'>"
+        + "".join(_ct_html)
+        + "</table>",
+        unsafe_allow_html=True,
+    )
+
+hairline()
+
 # Scatter — raw evidence beneath the aggregate.
 st.markdown("## Raw evidence — last 30 days")
 st.markdown(

@@ -188,6 +188,31 @@ else:
 
 hairline()
 
+# Phase 5.9 / §28.17 — content-type recommendation. Surfaces the
+# under-represented V/G/P/P slice over the rolling window so Daniel
+# sees the gap before he picks today's draft. NOT a daily-cadence
+# prescription (the source video pushes V/G/P/P every day; XGrowth
+# explicitly rejects that — see §13 hard rule 5).
+from app.agent.content_types import (  # noqa: E402 — page-local import
+    get_content_type_gaps as _get_ct_gaps,
+    get_recommendation_window_days as _get_ct_window,
+)
+_ct_window = _get_ct_window(conn)
+_ct_gap = _get_ct_gaps(conn, window_days=_ct_window)
+if _ct_gap["under_represented"]:
+    callout(
+        f"<em>Today's content-type recommendation:</em> "
+        f"<span class='numeric'>{_ct_gap['under_represented']}</span> · "
+        f"<span class='faint'>{_ct_gap['rationale']}</span>"
+    )
+else:
+    callout(
+        f"<em>Today's content-type recommendation:</em> "
+        f"<span class='faint'>{_ct_gap['rationale']}</span>"
+    )
+
+hairline()
+
 # 3. Daily reps progress.
 st.markdown("## Daily reps")
 reps_row = _today_reps(conn)

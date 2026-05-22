@@ -101,7 +101,8 @@ def test_iwh_counter_increments_via_revise_draft_not_agent_output(db_conn):
     value the agent emits.
     """
     out = _save_draft_post(
-        db_conn, text="v1", pillar="stir", audience="icp", cta="ask"
+        db_conn, text="v1", pillar="stir", audience="icp", cta="ask",
+        content_type="value",
     )
     draft_id = out["draft_id"]
     assert out["iwh_attempt_index"] == 1
@@ -160,10 +161,12 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         "save_draft_post": {
             "text": "test draft", "pillar": "stir",
             "audience": "icp", "cta": "ask",
+            "content_type": "value",  # Phase 5.9 / §28.17 required
         },
         "save_draft_reply": {
             "text": "test reply",
             "target_post_url": "https://x.com/foo/status/123",
+            "content_type": "value",  # Phase 5.9 / §28.17 required
         },
         "revise_draft": {
             # draft_post_id filled in below after save_draft_post runs.
@@ -172,6 +175,8 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         "record_reply_target": {
             "target_post_url": "https://x.com/foo/status/123"
         },
+        # Phase 5.9 / §28.17 — new read tool.
+        "get_content_type_gaps": {"window_days": 7},
     }
 
     from app.agent.tools import AGENT_TOOLS
@@ -300,7 +305,8 @@ def test_revised_drafts_are_publishable(db_conn):
     revision flow — every draft past attempt 1 was unpublishable.
     """
     out = _save_draft_post(
-        db_conn, text="v1", pillar="stir", audience="icp", cta="ask"
+        db_conn, text="v1", pillar="stir", audience="icp", cta="ask",
+        content_type="value",
     )
     rev = _revise_draft(
         db_conn, draft_post_id=out["draft_id"], feedback="weak", new_text="v2"

@@ -195,6 +195,7 @@ def test_dispatcher_falls_through_to_iwh_gate_when_niche_set(
             "pillar": "build",
             "audience": "icp",
             "cta": "none",
+            "content_type": "value",  # Phase 5.9 / §28.17 required
         },
         message_id=msg_id,
         assistant_text="<iwh_self_score>{\"intelligence\":3,\"wisdom\":3,\"humility\":3}</iwh_self_score>",

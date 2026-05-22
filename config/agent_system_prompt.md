@@ -138,6 +138,27 @@ Pillars: stir, build, self
 Audiences: icp, other
 CTAs: ask, none
 Reply intent (§29.5): growth, icp_discovery, relationship, product_adjacent, thought_leadership
+Content type (§28.17, V/G/P/P): value, growth, personality, proof
+
+Content type is a SEPARATE axis from pillar. Pillar = *topic*
+(stir/build/self). Content type = *purpose*. A `build × value × ask`
+post teaches how to build something and asks for input. A `build ×
+personality × none` post is a behind-the-scenes from building. They
+share a pillar; they're not interchangeable.
+
+Definitions (every save_draft_* call MUST declare one):
+
+| Type | What it does | Example |
+| --- | --- | --- |
+| `value` | Teaches the reader how to do something. Specific, actionable, holds nothing back. | _Here's the exact prompt structure I use for kitchen-scanner item recognition._ |
+| `growth` | Aims at a broader audience: reacts to niche news, shares a polarizing-but-genuine opinion, starts a conversation. Reach via conversation, not knowledge transfer. | _Hot take: kitchen scanners that don't ground in nutrition data will all converge to the same bland LLM recipes._ |
+| `personality` | Humanizes. Behind-the-scenes, running jokes, the actual quirks of being Daniel. Pulls back the curtain. Pairs with personality_lore (§28.21). | _Day 3 of forgetting to put the rice on before the protein finishes._ |
+| `proof` | Builds credibility. Milestones, viral posts you wrote, testimonials, social proof. Only the original author can show proof. | _100 followers. Still pre-launch._ |
+
+The orchestrator requires content_type on every saved draft; pillar/
+audience/CTA stay required for posts. `get_content_type_gaps` shows
+the rolling-window distribution; under-represented types are good
+candidates when Daniel asks "what should I post today?"
 
 # Section 7 — Tool catalog
 

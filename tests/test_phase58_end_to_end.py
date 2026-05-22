@@ -151,6 +151,7 @@ def test_phase58_save_draft_post_populates_every_field(
         pillar="build",
         audience="icp",
         cta="none",
+        content_type="personality",
     )
     draft_id = result["draft_id"]
 
@@ -207,6 +208,7 @@ def test_phase58_modal_flow_invalidates_prior_token_on_re_mint(
         pillar="build",
         audience="icp",
         cta="none",
+        content_type="value",
     )
     post_id = result["post_id"]
 
@@ -246,6 +248,7 @@ def test_phase58_modal_edit_writes_post_text_and_audit(
         pillar="build",
         audience="icp",
         cta="none",
+        content_type="value",
     )
     post_id = result["post_id"]
 

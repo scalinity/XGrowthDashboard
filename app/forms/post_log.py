@@ -35,6 +35,17 @@ _TYPE_UI_TO_SCHEMA: dict[str, str] = {
     "quote": "quote",
 }
 
+# Phase 5.9 / §28.17 — manual posts can be classified too. Daniel may
+# leave this as 'unspecified' (the default) when logging fast and revisit
+# it during the classification pass.
+_CONTENT_TYPE_CHOICES: tuple[str, ...] = (
+    "unspecified",
+    "value",
+    "growth",
+    "personality",
+    "proof",
+)
+
 
 def submit_post(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     """Insert a ``posts`` row. Returns the new id.
@@ -89,6 +100,17 @@ def submit_post(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
 
     type_schema = _TYPE_UI_TO_SCHEMA[type_ui]
 
+    # Phase 5.9 / §28.17 — manual flow: 'unspecified' is the documented
+    # default. The CHECK constraint on posts.content_type rejects junk
+    # values; the orchestrator only enforces non-unspecified on agent
+    # drafts, never on manual logging.
+    content_type = payload.get("content_type") or "unspecified"
+    if content_type not in _CONTENT_TYPE_CHOICES:
+        raise FormError(
+            "content_type validation failed.",
+            field_errors={"content_type": f"Must be one of {_CONTENT_TYPE_CHOICES}."},
+        )
+
     cursor = conn.execute(
         """
         INSERT INTO posts (
@@ -102,8 +124,9 @@ def submit_post(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             in_reply_to_user,
             posted_via,
             manual_confirmation_status,
-            contains_link
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)
+            contains_link,
+            content_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?)
         """,
         (
             x_post_id,
@@ -116,6 +139,7 @@ def submit_post(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             (payload.get("in_reply_to_user") or None),
             manual_confirmation_status,
             1 if payload.get("contains_link") else 0,
+            content_type,
         ),
     )
     return int(cursor.lastrowid)
@@ -225,6 +249,18 @@ def render(conn: sqlite3.Connection, *, key_prefix: str = "post_log") -> None:
             key=f"{key_prefix}_rtuser",
         )
 
+        content_type = st.selectbox(
+            "Content type (§28.17 V/G/P/P axis)",
+            options=_CONTENT_TYPE_CHOICES,
+            index=0,
+            key=f"{key_prefix}_content_type",
+            help=(
+                "Purpose of the post, orthogonal to pillar/topic. "
+                "Leave 'unspecified' when logging fast — revisit during "
+                "the classification pass."
+            ),
+        )
+
         contains_link = st.checkbox(
             "Contains link", key=f"{key_prefix}_contains_link"
         )
@@ -242,6 +278,7 @@ def render(conn: sqlite3.Connection, *, key_prefix: str = "post_log") -> None:
             "in_reply_to_x_post_id": in_reply_to_x_post_id.strip(),
             "in_reply_to_user": in_reply_to_user.strip(),
             "contains_link": contains_link,
+            "content_type": content_type,
         }
         try:
             new_id = submit_post(conn, payload)
