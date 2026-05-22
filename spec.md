@@ -1658,7 +1658,7 @@ Comprehensive append-only log of state-changing events. Distinct from `agent_too
 | `id` | integer pk | |
 | `occurred_at_utc` | datetime | |
 | `event_category` | enum | `auth`, `x_op`, `publish`, `settings`, `export`, `data`, `admin`, `migration` |
-| `event_type` | text | specific event within the category — e.g. `x_oauth_connected`, `publish_succeeded`, `settings_changed_niche_problem`, `export_csv_posts`, `data_deleted_post`, `migration_applied_014` |
+| `event_type` | text | specific event within the category — e.g. `x_oauth_connected`, `publish_succeeded`, `settings_changed_niche_problem`, `export_csv_posts`, `data_deleted_post`, `migration_applied_015` |
 | `actor` | text | always `'daniel'` for this single-user app; column present for forward-compat / audit-tool consistency |
 | `target_type` | text nullable | e.g. `post`, `voice_profile`, `setting`, `campaign`, `agent_draft` |
 | `target_id` | text nullable | id of the target as a string (because settings and views use non-int keys); NULL when the event doesn't reference a single row |
@@ -4588,7 +4588,7 @@ Five features: Campaigns (with items + retrospective), Monthly AI reviews (along
 
 **Migration:**
 
-* [ ] Migration `migrations/014_growth_layer_qol.sql`:
+* [ ] Migration `migrations/015_growth_layer_qol.sql`:
 
   * [ ] Create `campaigns` table per §10 schema. FK `parent_experiment_id` ON DELETE SET NULL.
   * [ ] Create `campaign_items` table per §10 schema. FK `campaign_id` ON DELETE CASCADE; other FKs ON DELETE SET NULL.
@@ -4598,7 +4598,7 @@ Five features: Campaigns (with items + retrospective), Monthly AI reviews (along
   * [ ] Create `audit_logs` table per §10 schema. Append-only; no ALTER paths for UPDATE/DELETE in this migration.
   * [ ] Create `v_campaign_progress` view per §11.
   * [ ] Add settings rows: `inspiration_plagiarism_jaccard_high_threshold = 0.65`, `inspiration_plagiarism_jaccard_medium_threshold = 0.35`, `inspiration_plagiarism_ngram_high_threshold = 8`, `inspiration_plagiarism_ngram_medium_threshold = 5`, `monthly_review_auto_draft_enabled = false`, `audit_log_retention_days = 365`, `calendar_default_view = 'week'`. Documented `note` per row.
-  * [ ] Log a `migration_applied_014` row to `audit_logs` as the migration's final step (audit log writes-through from day one).
+  * [ ] Log a `migration_applied_015` row to `audit_logs` as the migration's final step (audit log writes-through from day one). (Slot 014 was taken by `014_velocity_view_expose_noise_floor.sql` during Phase 5.9; spec corrected on 2026-05-22 before Phase 5.11 work began.)
 
 **Campaigns (§28.26):**
 
