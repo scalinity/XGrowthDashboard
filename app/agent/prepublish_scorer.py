@@ -26,11 +26,14 @@ constants here; do not move the contract.
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
 
 from app.agent import voice_profile as _voice_profile
+
+_LOG = logging.getLogger(__name__)
 
 SCORER_VERSION = "prepublish-scorer/0.1.0"
 
@@ -450,6 +453,14 @@ def compute_composite_label(scores: dict[str, int | None]) -> str:
     """
     vals = [v for v in scores.values() if v is not None]
     if not vals:
+        # P58R-23 — every dimension came back None. The schema CHECK
+        # rejects anything but weak/viable/strong, so we still return
+        # "weak"; but log at WARNING so future calibration knows when
+        # the degenerate path fires. A non-zero rate here is a signal
+        # that the scorer's per-dim None gates have drifted.
+        _LOG.warning(
+            "compute_composite_label degenerate path: every dimension is None"
+        )
         return "weak"  # degenerate; treat as weak rather than 'unknown'
     zero_count = sum(1 for v in vals if v == 0)
     two_plus = sum(1 for v in vals if v >= 2)
