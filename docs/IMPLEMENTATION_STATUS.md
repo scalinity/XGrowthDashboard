@@ -3,9 +3,9 @@
 | Field          | Value                                  |
 | -------------- | -------------------------------------- |
 | Project        | X Growth Dashboard                     |
-| Current phase  | 5.5 — Growth Agent                     |
+| Current phase  | 5.6 — Reply Target Discovery           |
 | Spec version   | 2026-05-21 (see `spec.md` §0 revision notes) |
-| Next phase     | `phase-5.6-reply-target-discovery.md`  |
+| Next phase     | `phase-7-qa.md`                        |
 
 ---
 
@@ -373,3 +373,183 @@ click-handler.
 Phase 5.5 must NOT be extended in the same session — Daniel reviews
 the agent surface (system prompt, IWH gate behavior, publish modal
 UX) before the reply-target subsystem is layered on top.
+
+---
+
+# Phase 5.6 — Reply Target Discovery (2026-05-22)
+
+## Completed in this phase
+
+### Migration `009_reply_targets.sql`
+
+* New table `reply_targets` (§29.6) — full schema with CHECK constraints
+  on `discovered_via`, `status`, `recommended_action_label`, `skip_reason`,
+  `reply_intent`, and per-dimension 0..3 score range checks.
+* Four indexes: `unique(target_post_url)`, partial
+  `unique(target_x_post_id) WHERE target_x_post_id IS NOT NULL`,
+  `(status, recommended_action_score DESC, last_checked_at_utc DESC)`,
+  and partial `(reply_intent) WHERE status='posted'`.
+* `posts.in_reply_to_reply_target_id` (FK → reply_targets, SET NULL)
+  + `posts.reply_intent` (CHECK against §29.5 enum).
+* `reply_sessions.target_reply_target_ids_json` (JSON array).
+* Eight settings rows: `engagement_surface_floor_likes`,
+  `engagement_surface_pct_of_author`, `engagement_surface_high_floor_likes`,
+  `engagement_surface_high_pct`, `reply_candidate_review_daily_target`,
+  `reply_high_engagement_mix_pct`, `reply_target_expiry_hours`,
+  `reply_target_lint_enabled`.
+* `v_daily_reps` dropped and recreated with four new §29.9 columns:
+  `candidates_reviewed_today`, `high_engagement_replies_shipped`,
+  `icp_intent_replies_shipped`, `average_engagement_surface_of_posted`.
+
+### Resolver + threshold helpers (`app/agent/reply_targets.py`)
+
+* `resolve_recommended_action(...)` — pure, deterministic, matches
+  §29.3 verbatim. Refuses NULL on any MVP dimension.
+* `engagement_surface_thresholds(...)` — §29.4 with floor fallback when
+  `target_author_follower_count` is NULL.
+* `engagement_surface_score(...)` — 0..3 mapping; 2→3 boundary is
+  `3 * high_threshold` (the working interpretation of "saturated viral";
+  flagged for Daniel's review in the closeout below).
+* `saturation_score(...)` — 0..3 mapping from `reply_count` per §29.3
+  thread-position bands.
+* Single source of truth tuples: `REPLY_INTENT_ENUM`, `SKIP_REASON_ENUM`,
+  `DISCOVERED_VIA_ENUM` (MVP set; `grok_semantic` deferred to V1.2),
+  `STATUS_ENUM`.
+
+### Tools #6 and #7 (`app/agent/tools.py`)
+
+* `score_reply_candidates` — accepts either a list of candidate dicts
+  OR a `reply_target_id`. Computes engagement_surface + saturation
+  deterministically; passes through caller-provided relevance +
+  reply_opportunity. Persists scoring on the row; leaves
+  `recommended_action_label` NULL when judgments are absent. Side-effect:
+  creates rows for fresh candidates, idempotent on `target_post_url`.
+* `record_reply_target` — writes to the expanded §29.6 schema;
+  idempotent on `target_post_url`; partial-update enrichment on
+  re-record; rejects `reply_intent` values outside §29.5.
+* Input schemas in the `AGENT_TOOLS` registry updated to surface the
+  full extended properties + the §29.5 enum on `reply_intent`.
+
+### Reply Target Queue view (`app/pages/10_Reply_Target_Queue.py`)
+
+* Ninth MVP view. Magazine-kicker title (§29 · INSTRUMENT 9/9),
+  four-card counter strip (candidates / drafted / posted today /
+  skipped today), filter bar (status / pillar / reply_intent /
+  recommended_action / author), collapsible "Add candidate" form,
+  candidate cards with score bank + recommended-action badge +
+  rationale + per-row actions (Open / Draft / Skip / Mark posted).
+* Per-row Mark-posted runs the atomic transaction (insert posts row,
+  link `in_reply_to_reply_target_id`, transition reply_targets to
+  `posted`, set `posted_reply_post_id`) inside a single `transaction()`.
+* Skip dropdown uses the §29.7 seven-value enum.
+* Boot-time `expire_stale_candidates(conn)` + sticky stale-drafted
+  banner (`§29.11` row 3) at page top.
+
+### Next Rep panel (`app/pages/2_Next_Rep.py`)
+
+* Replaced Phase 3 placeholder with a windowed view onto reply_targets:
+  top 5 candidates, biggest-gap pillar bias when computable, per-row
+  score bank + recommended_action badge + condensed metadata, "See full
+  queue →" link, empty state with deep link.
+
+### Today daily-reps extension (`app/pages/1_Today.py`)
+
+* Sub-counter block under the existing "Replies today: X/12" metric
+  row: high-engagement count (with configurable mix target), ICP intent
+  count, candidates reviewed (with daily-review target).
+
+### Maintenance jobs (`app/jobs/reply_target_maintenance.py`)
+
+* `expire_stale_candidates` — transitions `status='candidate'` rows
+  older than `reply_target_expiry_hours` to `status='expired'`.
+* `stale_drafted_candidates` — read-only listing of `status='drafted'`
+  rows >24h old (the Queue's banner reads from this).
+* `vacuum_cleanup_dead_candidates` — daily cleanup of `skipped /
+  expired / target_deleted` rows older than 90 days; wired into
+  `app/backup.py` so it runs alongside the VACUUM INTO daily.
+
+### System prompt + drift check
+
+* `config/agent_system_prompt.md` Section 6 — added `Reply intent
+  (§29.5): growth, icp_discovery, ...` line.
+* `app/agent/prompt_builder.py` — added `verify_reply_intent_enum_
+  matches()` (spec table parse + code-tuple compare + prompt-template
+  parse) and `extract_reply_intent_enum_from_spec/prompt` helpers.
+* CI guard test `test_reply_intent_enum_matches_across_spec_code_and_
+  prompt` asserts all three sets stay equal.
+
+### New theme components (`app/components/theme.py`)
+
+* `score_bank(R, E, S, O, engagement_footnote=…)` — four stepped
+  meters side-by-side (R / E / S / O). Same step-color ladder as
+  `iwh_meter`. NULL-author rows render with an "E*" header + the
+  "floor — no author size" footnote per §29.4.
+* `recommended_action_badge(label)` — stepped intensity ladder
+  (phosphor → phosphor_dim → surface_raised → surface).
+  Skip strikes through. No red anywhere.
+* `recommended_action_keyline_color(label)` — paired keyline color
+  for candidate-card left borders so the action ladder is visible at
+  the edge of peripheral vision.
+
+### Tests
+
+* `tests/test_reply_target_resolver.py` — **256-combo exhaustive
+  resolver test** plus engagement-surface threshold tests, saturation
+  boundary tests, and resolver NULL/illegal-input guards.
+* `tests/test_reply_target_queue.py` — record/idempotent-upsert,
+  score/null-author-floor-fallback/judgment-absent, maintenance jobs
+  (expiry, drafted banner, VACUUM cleanup), Mark-posted atomic
+  transaction + rollback path, URL parsing, drift-check assertion.
+* `tests/test_v_daily_reps_extension.py` — confirms the four new
+  §29.9 columns aggregate correctly (distinct-touched-today count,
+  high-engagement filter, ICP-intent filter, mean-engagement,
+  NULL-when-no-replies).
+
+## Acceptance gates satisfied (§25 Phase 5.6)
+
+* [x] **256-combo resolver test passes (16 tests).** Non-negotiable.
+* [x] Candidate add → score → detail render path works end-to-end.
+* [x] Skip with each `skip_reason` value writes correctly (CHECK at
+  the DB layer + UI dropdown covers all 7 values).
+* [x] Mark posted (manual) populates `posts.in_reply_to_reply_target_
+  id` and `posts.reply_intent` and transitions both rows correctly in
+  one transaction (test covers rollback path too).
+* [x] Duplicate-URL insert is rejected with "already in queue" UI;
+  DB-layer enforced by the `unique(target_post_url)` index.
+* [x] Expiry job transitions correctly.
+* [x] `target_author_follower_count = NULL` path uses floors and the
+  Queue UI labels the score with the footnote.
+* [x] §14.2 Next Rep shows top 3–5 candidates from the queue, sorted
+  correctly, with "See full queue →" link.
+* [x] `v_daily_reps` extension columns populate correctly.
+* [x] Pre-commit drift check confirms `reply_intent` enum matches
+  across spec / `tools.py` / system prompt template.
+* [x] All commits compile clean — `uv run pytest -q` reports **240
+  passed**; `uv run ruff check app/ tests/ scripts/` reports
+  "All checks passed!"; AppTest smoke-boots all ten pages with zero
+  exceptions.
+* [x] `docs/IMPLEMENTATION_STATUS.md` updated (this section).
+
+## Known limitations carried into Phase 5.7+
+
+* `velocity_score` and `timing_score` columns exist with CHECK
+  constraints but stay NULL until V1.1 metrics-refresh lands.
+* Thread-classifier lint pass (§29.10) is V1.1+; `lint_blocked` is
+  always 0 at MVP and the "Force-draft" affordance isn't built (no
+  lint to override yet).
+* X API enrichment of `target_author_follower_count` is V1.1+.
+* `grok_semantic` discovered_via enum value is V1.2-deferred and not
+  in the CHECK constraint.
+
+## Spec ambiguities flagged
+
+* **Engagement-surface 2→3 boundary.** §29.3 names the band ("above
+  high, comment thread still navigable") but doesn't give a numeric
+  anchor. This phase uses `3 * high_threshold` as the working
+  interpretation. If Daniel wants a different boundary, amend §29.3
+  and adjust `engagement_surface_score()` in `app/agent/reply_targets
+  .py`. The threshold tests will catch any inconsistency.
+
+## Next phase
+
+Run `phase-7-qa.md`.
