@@ -8,6 +8,7 @@ canonical queue per §29.2, never a parallel list.
 
 from __future__ import annotations
 
+import html
 import sys
 from datetime import date as _date_t
 from datetime import timedelta
@@ -380,9 +381,10 @@ if _pending:
             f"{PALETTE['hairline']};'>"
             f"<span class='numeric' style='font-size: 0.78rem; color: "
             f"{PALETTE['bone_dim']};'>draft #{_d['id']} · "
-            f"{_d['draft_kind']} · {_d['pillar'] or '—'}</span>"
+            f"{html.escape(str(_d['draft_kind']))} · "
+            f"{html.escape(str(_d['pillar'] or '—'))}</span>"
             f"<div style='margin-top: 0.25rem; color: {PALETTE['bone']};'>"
-            f"{_text}</div></div>",
+            f"{html.escape(_text)}</div></div>",
             unsafe_allow_html=True,
         )
         _next_rep_repetition_banner(_d["similarity_warning_json"])

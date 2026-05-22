@@ -16,6 +16,7 @@ each rerun from a fresh DB read — no syncing flags between widgets.
 
 from __future__ import annotations
 
+import html
 import sys
 from datetime import date as _date_t
 from pathlib import Path
@@ -290,9 +291,9 @@ if _pending_drafts:
             f"{PALETTE['hairline']};'>"
             f"<div class='numeric' style='font-size: 0.78rem; color: "
             f"{PALETTE['bone_dim']};'>draft #{_d['id']} · "
-            f"{_d['draft_kind']}</div>"
+            f"{html.escape(str(_d['draft_kind']))}</div>"
             f"<div style='margin-top: 0.25rem; color: {PALETTE['bone']};'>"
-            f"{_preview}</div></div>",
+            f"{html.escape(_preview)}</div></div>",
             unsafe_allow_html=True,
         )
         _today_repetition_banner(_d["similarity_warning_json"])
