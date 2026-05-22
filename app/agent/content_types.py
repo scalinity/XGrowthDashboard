@@ -10,6 +10,16 @@ which one applies, and ``v_content_type_performance`` slices outcomes
 by this axis. The orchestrator refuses any draft with
 ``content_type='unspecified'`` even though the CHECK constraint permits
 it (the CHECK exists so the migration can backfill legacy rows).
+
+Performance note (P59A-S17): ``v_content_type_performance.stir_signal_
+count`` is a correlated per-row subquery — one scan of
+``stir_conversion_events × posts`` per content_type bucket (4 buckets
+total). This mirrors the ``v_lane_performance`` precedent and is
+acceptable at MVP volume. At scale (V1.1+, 500+ shipped posts) it
+becomes the dominant cost of any ``4_Content_Performance`` rerun; the
+upgrade path is a join-driven rewrite. Documented here rather than
+in the migration because the migration is immutable once landed and
+the comment belongs next to the production-time perf consideration.
 """
 
 from __future__ import annotations
