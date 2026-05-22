@@ -30,6 +30,7 @@ from typing import Any, Callable
 from app.db import transaction
 from app.agent import account_research as _account_research
 from app.agent import brain_dump as _brain_dump
+from app.agent import profile_audit as _profile_audit
 from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
 from app.agent import prepublish_scorer as _prepublish_scorer
@@ -1209,6 +1210,52 @@ def _record_reply_target(
 
 
 # ===========================================================================
+# Profile Audit tool wrapper — runs audit() + save() inside one tool
+# invocation so chat-driven calls get the persisted audit id back (§28.25).
+# Failures surface as {"status": "failed"} so the smoke test holds.
+# ===========================================================================
+def _audit_profile_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    bio_text: str,
+    pinned_post_text: str,
+    recent_post_window_days: int | None,
+    pinned_post_id: int | None,
+) -> dict[str, Any]:
+    try:
+        analysis, snapshot = _profile_audit.audit(
+            conn,
+            bio_text=bio_text,
+            pinned_post_text=pinned_post_text,
+            recent_post_window_days=recent_post_window_days,
+        )
+    except _profile_audit.ProfileAuditError as exc:
+        return {"status": "failed", "error": str(exc)}
+
+    audit_id = _profile_audit.save(
+        conn,
+        analysis=analysis,
+        bio_snapshot=bio_text,
+        pinned_post_id=pinned_post_id,
+        pinned_post_text=pinned_post_text,
+        snapshot=snapshot,
+    )
+    return {
+        "status": "saved",
+        "audit_id": audit_id,
+        "overall_consistency_score": analysis.overall_consistency_score,
+        "top_three_actions": list(analysis.top_three_actions),
+        "tokens_used": analysis.tokens_used,
+        "audit": analysis.to_dict(),
+        "note": (
+            "Audit is append-only history (§28.25). Cadence reminder "
+            "fires at profile_audit_cadence_reminder_days (default 90); "
+            "audits NEVER auto-run."
+        ),
+    }
+
+
+# ===========================================================================
 # Account Researcher tool wrapper — runs analyze() + save() inside one tool
 # invocation so chat-driven calls get the persisted report id back (§28.24).
 # Failures surface as a `status='failed'` dict so the handler contract
@@ -1289,7 +1336,7 @@ def _brain_dump_process_to_dict(
     }
 
 
-# AGENT_TOOLS — the registered tool catalog (20 entries after Phase 5.10).
+# AGENT_TOOLS — the registered tool catalog (21 entries after Phase 5.10).
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -1774,6 +1821,42 @@ AGENT_TOOLS: list[ToolDef] = [
                 target_recent_posts_text=target_recent_posts_text,
                 target_url=target_url,
                 target_display_name=target_display_name,
+            )
+        ),
+    ),
+    ToolDef(
+        name="audit_profile",
+        description=(
+            "Run a comprehensive Profile Audit (§28.25) on Daniel's "
+            "X surface: bio + pinned post + recent posts + active "
+            "voice profile + niche definition. Reads them together "
+            "and returns scored consistency analysis with a load-"
+            "bearing top_three_actions field. Daniel pastes bio + "
+            "pinned-post text; recent posts are loaded automatically "
+            "from the posts table (default 30-day window). Persists "
+            "to profile_audits as append-only history."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "bio_text": {"type": "string"},
+                "pinned_post_text": {"type": "string"},
+                "recent_post_window_days": {
+                    "type": "integer",
+                    "default": 30,
+                },
+                "pinned_post_id": {"type": "integer"},
+            },
+            "required": ["bio_text", "pinned_post_text"],
+        },
+        handler=lambda conn, *, bio_text, pinned_post_text,
+        recent_post_window_days=None, pinned_post_id=None: (
+            _audit_profile_to_dict(
+                conn,
+                bio_text=bio_text,
+                pinned_post_text=pinned_post_text,
+                recent_post_window_days=recent_post_window_days,
+                pinned_post_id=pinned_post_id,
             )
         ),
     ),

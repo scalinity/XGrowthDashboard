@@ -198,6 +198,13 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "target_handle": "@smoke_target",
             "target_recent_posts_text": "smoke post\n---\nsmoke post 2",
         },
+        # Phase 5.10 / §28.25 — Profile Audit. Handler surfaces
+        # ProfileAuditError as {"status": "failed"} so the smoke test
+        # passes without ANTHROPIC_API_KEY.
+        "audit_profile": {
+            "bio_text": "smoke bio",
+            "pinned_post_text": "smoke pinned post",
+        },
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
