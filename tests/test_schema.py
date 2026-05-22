@@ -73,6 +73,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "009_reply_targets.sql",
     "010_reply_targets_idx.sql",
     "011_drafting_intelligence.sql",
+    "012_niche_content_type.sql",
 )
 
 
@@ -375,3 +376,141 @@ def test_phase58_settings_rows_present(db_conn: sqlite3.Connection) -> None:
     keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
     missing = set(PHASE_58_SETTINGS) - keys
     assert not missing, f"missing Phase 5.8 settings rows: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.9 — Niche & Content-Type Calibration Pack (migration 012).
+# ---------------------------------------------------------------------------
+PHASE_59_TABLES: tuple[str, ...] = ("personality_lore",)
+
+PHASE_59_VIEWS: tuple[str, ...] = (
+    "v_content_type_performance",
+    "v_follower_velocity",
+)
+
+PHASE_59_SETTINGS: tuple[str, ...] = (
+    "niche_problem",
+    "niche_person",
+    "reply_quality_lint_enabled",
+    "personality_lore_overuse_threshold",
+    "content_type_recommendation_window_days",
+    "velocity_projection_noise_floor_followers",
+    "personality_lore_splice_count",
+)
+
+
+def test_phase59_tables_exist(db_conn: sqlite3.Connection) -> None:
+    rows = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    names = {row["name"] for row in rows}
+    missing = set(PHASE_59_TABLES) - names
+    assert not missing, f"Phase 5.9 tables missing: {missing}"
+
+
+def test_phase59_views_compile(db_conn: sqlite3.Connection) -> None:
+    for view in PHASE_59_VIEWS:
+        db_conn.execute(f"SELECT * FROM {view} LIMIT 0")
+
+
+def test_phase59_posts_content_type_column_and_default(db_conn: sqlite3.Connection) -> None:
+    cols = {row[1]: row for row in db_conn.execute("PRAGMA table_info(posts)")}
+    assert "content_type" in cols
+    # New rows default to 'unspecified' per §28.17 — never retro-classify.
+    post_id = db_conn.execute(
+        """
+        INSERT INTO posts (created_date, text, type, posted_via, manual_confirmation_status)
+        VALUES ('2026-05-22', 'hi', 'standalone', 'manual', 'confirmed')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    ct = db_conn.execute("SELECT content_type FROM posts WHERE id = ?", (post_id,)).fetchone()[0]
+    assert ct == "unspecified"
+
+
+def test_phase59_posts_content_type_check_constraint(db_conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO posts (created_date, text, type, posted_via, manual_confirmation_status,
+                               content_type)
+            VALUES ('2026-05-22', 'hi', 'standalone', 'manual', 'confirmed', 'thought-leadership')
+            """
+        )
+
+
+def test_phase59_agent_drafts_content_type_check(db_conn: sqlite3.Connection) -> None:
+    # NULL is permitted (legacy rows pre-Phase 5.9 stay NULL).
+    db_conn.execute(
+        """
+        INSERT INTO agent_drafts (draft_kind, text, content_type)
+        VALUES ('standalone', 'x', NULL)
+        """
+    )
+    # 'unspecified' is permitted at the CHECK level (orchestrator does the
+    # runtime refusal). Invalid value still rejected.
+    db_conn.execute(
+        """
+        INSERT INTO agent_drafts (draft_kind, text, content_type)
+        VALUES ('standalone', 'y', 'unspecified')
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO agent_drafts (draft_kind, text, content_type)
+            VALUES ('standalone', 'z', 'thought-leadership')
+            """
+        )
+
+
+def test_phase59_agent_drafts_reply_quality_lint_passed_check(db_conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO agent_drafts (draft_kind, text, reply_quality_lint_passed)
+            VALUES ('reply', 'x', 2)
+            """
+        )
+
+
+def test_phase59_personality_lore_defaults(db_conn: sqlite3.Connection) -> None:
+    row_id = db_conn.execute(
+        """
+        INSERT INTO personality_lore (theme, description)
+        VALUES ('water bottle in frame', 'self-deprecating bit about my water bottle')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    row = db_conn.execute(
+        "SELECT invocation_count, is_active, priority FROM personality_lore WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    assert row["invocation_count"] == 0
+    assert row["is_active"] == 1
+    assert row["priority"] == 100
+
+
+def test_phase59_reply_targets_source_check(db_conn: sqlite3.Connection) -> None:
+    # The §28.20 third path adds `replier_under_thread`. CHECK rejects unknown.
+    db_conn.execute(
+        """
+        INSERT INTO reply_targets
+          (discovered_via, target_post_url, target_author_handle, source)
+        VALUES ('manual', 'https://x.com/foo/status/1', 'foo', 'replier_under_thread')
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO reply_targets
+              (discovered_via, target_post_url, target_author_handle, source)
+            VALUES ('manual', 'https://x.com/foo/status/2', 'foo', 'firehose_scan')
+            """
+        )
+
+
+def test_phase59_settings_rows_present(db_conn: sqlite3.Connection) -> None:
+    keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
+    missing = set(PHASE_59_SETTINGS) - keys
+    assert not missing, f"missing Phase 5.9 settings rows: {missing}"

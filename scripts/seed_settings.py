@@ -131,6 +131,45 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         60,
         "TTL for single-use publish_confirmation_tokens (§28.10)",
     ),
+    # Phase 5.9 — Niche & Content-Type Calibration Pack (§28.16-§28.21).
+    # Values mirror migration 012_niche_content_type.sql so a fresh DB
+    # initialized via init_db agrees with one initialized via raw
+    # migrations only; INSERT OR IGNORE on both sides keeps re-runs safe.
+    (
+        "niche_problem",
+        "",
+        "One-sentence: the problem you solve. Empty BLOCKS agent drafting (§28.2 rule #15).",
+    ),
+    (
+        "niche_person",
+        "",
+        "One-sentence: the person you solve it for. Empty BLOCKS agent drafting (§28.2 rule #15).",
+    ),
+    (
+        "reply_quality_lint_enabled",
+        True,
+        "Toggle the §28.18 reply-quality lint pass. False → short-circuits to passed=true.",
+    ),
+    (
+        "personality_lore_overuse_threshold",
+        8,
+        "invocation_count > this AND last_invoked_at_utc > now()-30d → over-relied banner (§28.21).",
+    ),
+    (
+        "content_type_recommendation_window_days",
+        7,
+        "Days of posts inspected for the §14.1 Today content-type recommendation (§28.17).",
+    ),
+    (
+        "velocity_projection_noise_floor_followers",
+        10,
+        "Hard floor: |delta_7d| < this → v_follower_velocity returns NULL projections. Explicit copy of §13 velocity_7d_display_threshold so suppression is auditable in one place (§28.19).",
+    ),
+    (
+        "personality_lore_splice_count",
+        5,
+        "Top-N active personality_lore rows spliced into system prompt Section 5 (§28.21).",
+    ),
 ]
 
 
