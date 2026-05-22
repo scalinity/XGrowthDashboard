@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +35,13 @@ from app.backup import (
     DEFAULT_BACKUPS_DIR,
     DEFAULT_RETENTION_DAYS,
     backup_database,
+)
+from app.exports import (
+    ALLOWLISTS,
+    CounterfactualMissingError,
+    export_database_to_json,
+    export_table_to_csv,
+    export_weekly_report,
 )
 
 # ---------------------------------------------------------------------------
@@ -441,6 +448,299 @@ with st.expander(
                                                   text-align:right;'>
                         {when}
                     </span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+hairline()
+
+# ---------------------------------------------------------------------------
+# Exports — Phase 5 instrument-panel sub-readout (§16, §14.6, §18).
+#
+# Aesthetic discipline mirrors the Backups section above:
+#   - `kicker()` brands with the spec anchor.
+#   - per-export-kind cards with paired button + parameter where applicable.
+#   - a console-log manifest for the audit table.
+# No new PALETTE keys or fonts; reuse the locked instrument-panel tokens.
+# ---------------------------------------------------------------------------
+
+
+def _exports_dir_from_settings() -> Path:
+    """Resolve the export folder against PROJECT_ROOT — same pattern as backups."""
+    from app.db import PROJECT_ROOT
+
+    seeded = get_setting(conn, "export_dir", default="data/exports")
+    path = Path(seeded) if seeded else Path("data/exports")
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _current_iso_week() -> str:
+    today = date.today()
+    year, week, _day = today.isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def _counterfactual_filled_for_week(week_iso: str) -> tuple[bool, str | None]:
+    """Return (ready, week_start_date) — `ready` is True when a saved
+    weekly_reviews row for the week has a non-blank counterfactual_note.
+
+    Used to enable/disable the export button BEFORE the user clicks it.
+    """
+    try:
+        from app.exports.markdown_weekly import _iso_week_to_dates
+
+        monday, _sunday = _iso_week_to_dates(week_iso)
+    except ValueError:
+        return (False, None)
+    week_start = monday.isoformat()
+    row = conn.execute(
+        "SELECT counterfactual_note FROM weekly_reviews WHERE week_start_date = ?",
+        (week_start,),
+    ).fetchone()
+    if row is None:
+        return (False, week_start)
+    note = row["counterfactual_note"]
+    if note is None or not str(note).strip():
+        return (False, week_start)
+    return (True, week_start)
+
+
+kicker("DATA EXPORTS · §16")
+st.markdown("## Exports")
+st.caption(
+    "Three formats: per-table CSV (column allowlist), Markdown weekly review "
+    "(gated by the counterfactual note — §14.6), and a raw JSON archive with "
+    "secret redaction (§18). Output files land under `export_dir`; the "
+    "Markdown weekly report uses `weekly_report_export_path`."
+)
+
+readout_card(
+    label="Export folder",
+    value=str(_exports_dir_from_settings()),
+    caption="Configure via the `export_dir` setting above.",
+    accent="phosphor",
+)
+
+# --- CSV section -----------------------------------------------------------
+st.markdown("### Per-table CSV")
+st.caption(
+    "Adding a new column to a table does NOT auto-include it — the allowlist "
+    "in `app/exports/allowlists.py` is the canonical surface."
+)
+_csv_table_col, _csv_optin_col = st.columns([2, 1], gap="large")
+with _csv_table_col:
+    _csv_table = st.selectbox(
+        "Table",
+        options=sorted(ALLOWLISTS.keys()),
+        index=sorted(ALLOWLISTS.keys()).index("posts"),
+        key="export_csv_table",
+        help="Each table has its own column allowlist in app/exports/allowlists.py.",
+    )
+with _csv_optin_col:
+    _csv_opt_in = st.checkbox(
+        "Include opt-in columns",
+        value=False,
+        key="export_csv_opt_in",
+        help=(
+            "Opt-in columns are documented sensitive fields that ride along "
+            "only when explicitly requested. Empty in MVP; Phase 5.5 populates "
+            "them for posts."
+        ),
+    )
+
+if st.button("Export CSV", key="run_export_csv", type="primary"):
+    output = _exports_dir_from_settings() / f"{_csv_table}.csv"
+    with st.spinner("Writing CSV…"):
+        try:
+            result = export_table_to_csv(
+                _csv_table, output, include_opt_in=_csv_opt_in, conn=conn,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface to UI
+            st.error(f"CSV export failed: {exc}")
+        else:
+            st.toast(
+                f"CSV · {result.table_name} · {result.row_count} rows → "
+                f"{result.path.name}",
+                icon="✅",
+            )
+            st.rerun()
+
+hairline()
+
+# --- Markdown weekly section ----------------------------------------------
+st.markdown("### Markdown weekly review")
+_default_week = _current_iso_week()
+_md_col_a, _md_col_b = st.columns([2, 1], gap="large")
+with _md_col_a:
+    _week_iso = st.text_input(
+        "ISO week",
+        value=_default_week,
+        key="export_weekly_iso",
+        help="Format `YYYY-Www` (e.g. 2026-W21). Defaults to the current ISO week.",
+    )
+with _md_col_b:
+    st.caption(
+        "The report is BLOCKED until the counterfactual_note for the week is "
+        "filled in via the Weekly Review form. This is intentional (§14.6)."
+    )
+
+_ready, _week_start = _counterfactual_filled_for_week(_week_iso)
+_disabled_help = (
+    "Counterfactual note for that week is empty. Open Weekly Review and fill it in first."
+    if not _ready
+    else None
+)
+if st.button(
+    "Export Markdown weekly",
+    key="run_export_weekly",
+    type="primary",
+    disabled=not _ready,
+    help=_disabled_help,
+):
+    with st.spinner("Rendering Markdown report…"):
+        try:
+            result = export_weekly_report(_week_iso, conn=conn)
+        except CounterfactualMissingError as exc:
+            st.error(str(exc))
+        except ValueError as exc:
+            st.error(f"Invalid week: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Markdown export failed: {exc}")
+        else:
+            st.toast(
+                f"Markdown · {result.week_iso} → {result.path.name} "
+                f"({result.byte_count:,} bytes)",
+                icon="✅",
+            )
+            st.rerun()
+
+if not _ready and _week_start is not None:
+    st.markdown(
+        f"<span class='faint' style='color:{PALETTE['bone_faint']};'>"
+        f"No saved counterfactual note for week of <code>{_week_start}</code>."
+        f"</span>",
+        unsafe_allow_html=True,
+    )
+
+hairline()
+
+# --- Raw JSON section -----------------------------------------------------
+st.markdown("### Raw JSON archive")
+st.caption(
+    "Dumps every table to a single JSON document. Redacts column names "
+    "matching `*_token`, `*_key`, `*_secret`, plus Authorization-style headers "
+    "inside `raw_api_responses` blobs. Tester PII is excluded by default."
+)
+_json_confirm_col, _json_pii_col = st.columns([1, 1], gap="large")
+with _json_confirm_col:
+    _json_confirm = st.checkbox(
+        "I understand this dumps everything",
+        value=False,
+        key="export_json_confirm",
+    )
+with _json_pii_col:
+    _json_pii = st.checkbox(
+        "Include stir_testers PII",
+        value=False,
+        key="export_json_pii",
+        help=(
+            "Off by default per §18 rules 4-6. Use only when archiving locally "
+            "and never sharing the resulting file."
+        ),
+    )
+
+_json_disabled_help = (
+    None if _json_confirm else "Check the confirmation box above to enable the JSON dump."
+)
+if st.button(
+    "Export raw JSON",
+    key="run_export_json",
+    type="primary",
+    disabled=not _json_confirm,
+    help=_json_disabled_help,
+):
+    output = _exports_dir_from_settings() / f"x_growth_dump_{_current_iso_week()}.json"
+    with st.spinner("Writing JSON dump…"):
+        try:
+            result = export_database_to_json(
+                output, conn=conn, include_stir_pii=_json_pii,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"JSON export failed: {exc}")
+        else:
+            total = sum(result.table_row_counts.values())
+            st.toast(
+                f"JSON · {result.path.name} · {total:,} rows across "
+                f"{len(result.table_row_counts)} tables · "
+                f"{len(result.redactions)} redactions",
+                icon="✅",
+            )
+            st.rerun()
+
+# --- Recent exports manifest ----------------------------------------------
+if "exports_manifest_open" not in st.session_state:
+    st.session_state.exports_manifest_open = False
+
+_recent = conn.execute(
+    """
+    SELECT exported_at_utc, kind, table_name, output_path, row_count, include_opt_in, notes
+      FROM data_exports
+     ORDER BY id DESC
+     LIMIT 20
+    """
+).fetchall()
+
+with st.expander(
+    f"Recent exports · {len(_recent)} on record",
+    expanded=st.session_state.exports_manifest_open,
+):
+    st.checkbox(
+        "Keep open across reruns",
+        key="exports_manifest_open",
+        help="Pin the manifest open after the next rerun.",
+    )
+    if not _recent:
+        st.markdown(
+            f"<span class='faint' style='color:{PALETTE['bone_dim']};'>"
+            f"No exports recorded yet. Run one of the actions above."
+            f"</span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""<div style='display:grid; grid-template-columns:1.2fr 0.7fr 1fr 1.5fr auto auto;
+                            gap:1rem; padding:0.3rem 0;
+                            border-bottom:1px solid {PALETTE['hairline']};'>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};'>when</span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};'>kind</span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};'>table</span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};'>file</span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']}; text-align:right;'>rows</span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']}; text-align:right;'>opt-in</span>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        for r in _recent:
+            opt_in_flag = "—" if r["include_opt_in"] is None else ("yes" if r["include_opt_in"] else "no")
+            file_name = Path(r["output_path"]).name if r["output_path"] else "—"
+            st.markdown(
+                f"""<div style='display:grid; grid-template-columns:1.2fr 0.7fr 1fr 1.5fr auto auto;
+                                gap:1rem; padding:0.28rem 0;
+                                border-bottom:1px solid {PALETTE['hairline']};'>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};'>{r['exported_at_utc']}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone']};'>{r['kind']}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};'>{r['table_name'] or '—'}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone']}; overflow:hidden; text-overflow:ellipsis;'>{file_name}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']}; text-align:right;'>{r['row_count'] if r['row_count'] is not None else '—'}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']}; text-align:right;'>{opt_in_flag}</span>
                 </div>""",
                 unsafe_allow_html=True,
             )
