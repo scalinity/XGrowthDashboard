@@ -132,6 +132,8 @@ clarity and substance:
 
 <!-- {{ VOICE_SAMPLES_PLACEHOLDER }} -->
 
+<!-- {{ PERSONALITY_LORE_PLACEHOLDER }} -->
+
 # Section 6 — Current taxonomy
 
 Pillars: stir, build, self

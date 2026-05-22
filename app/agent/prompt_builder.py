@@ -22,7 +22,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from app.agent import niche, tools, voice, voice_profile
+from app.agent import niche, personality_lore, tools, voice, voice_profile
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 PROMPT_TEMPLATE_PATH: Path = PROJECT_ROOT / "config" / "agent_system_prompt.md"
@@ -40,6 +40,8 @@ VOICE_PROFILE_STRUCTURAL_PLACEHOLDER = (
 )
 # Phase 5.9 / §28.16 — structured niche definition splice point.
 NICHE_DEFINITION_PLACEHOLDER = "<!-- {{ NICHE_DEFINITION_PLACEHOLDER }} -->"
+# Phase 5.9 / §28.21 — personality lore splice point (after voice samples).
+PERSONALITY_LORE_PLACEHOLDER = "<!-- {{ PERSONALITY_LORE_PLACEHOLDER }} -->"
 
 
 def _read_template() -> str:
@@ -239,12 +241,19 @@ def build_system_prompt(conn: sqlite3.Connection) -> str:
     nd = niche.get_niche(conn)
     niche_block = render_niche_definition(nd)
 
+    # Phase 5.9 / §28.21 — top-N active personality lore rows. Silent
+    # splice (empty string) when there are zero active rows; no banner.
+    splice_n = personality_lore.get_splice_count(conn)
+    active_lore = personality_lore.list_active(conn, limit=splice_n)
+    lore_block = personality_lore.render_splice_block(active_lore)
+
     out = template.replace(NON_NEGOTIABLE_PLACEHOLDER, rules_block)
     out = out.replace(VOICE_SAMPLES_PLACEHOLDER, voice_block)
     out = out.replace(TOOL_CATALOG_PLACEHOLDER, tool_block)
     out = out.replace(VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER, profile_self_desc)
     out = out.replace(VOICE_PROFILE_STRUCTURAL_PLACEHOLDER, profile_structural)
     out = out.replace(NICHE_DEFINITION_PLACEHOLDER, niche_block)
+    out = out.replace(PERSONALITY_LORE_PLACEHOLDER, lore_block)
     return out
 
 

@@ -1156,6 +1156,137 @@ if _result is not None:
         st.error(_result["message"])
 
 # ---------------------------------------------------------------------------
+# Personality lore (§28.21, Phase 5.9) — Daniel-curated registry of
+# recurring jokes, running bits, personal motifs spliced into Section 5
+# of the system prompt after voice samples. Agent has NO write access.
+# ---------------------------------------------------------------------------
+from app.agent import personality_lore as _personality_lore  # noqa: E402 — page-local
+st.markdown("### Personality lore")
+st.caption(
+    "Recurring jokes, running bits, and motifs the agent should draw "
+    "on when drafting `content_type = personality` posts (§28.21). "
+    "Spliced into Section 5 of the system prompt AFTER voice samples. "
+    "The agent has no write access — this is Daniel-only curation. "
+    "Auto-extracted lore would warp drafts; the 5-minute hand-curation "
+    "task once a quarter is the correct trade."
+)
+
+_lore_rows = _personality_lore.list_all(conn)
+_lore_overuse = _personality_lore.get_overuse_threshold(conn)
+_lore_splice_n = _personality_lore.get_splice_count(conn)
+st.markdown(
+    f"<div class='numeric' style='color:{PALETTE['bone_dim']}; font-size:0.85rem;'>"
+    f"{sum(1 for r in _lore_rows if r.is_active)} active · "
+    f"{len(_lore_rows)} total · top {_lore_splice_n} spliced into prompt"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+with st.expander("+ add lore", expanded=False):
+    with st.form("add_personality_lore", clear_on_submit=True):
+        _lore_theme = st.text_input(
+            "theme (short name)",
+            help="e.g. 'water bottle in frame', 'kitchen-scanner fail'",
+            max_chars=80,
+        )
+        _lore_desc = st.text_area(
+            "description (one paragraph)",
+            help="What the bit is, why it's recurring, when it shows up.",
+            height=110,
+            max_chars=600,
+        )
+        _lore_examples = st.text_input(
+            "example_posts_json (optional — comma-separated post IDs)",
+            help="JSON array Daniel can paste from Content Performance. "
+                 "Leave blank if you don't have examples yet.",
+        )
+        _lore_priority = st.number_input(
+            "priority (lower = earlier in prompt)",
+            value=100, step=1,
+        )
+        if st.form_submit_button("add lore"):
+            try:
+                _examples_json = None
+                if _lore_examples.strip():
+                    _parts = [p.strip() for p in _lore_examples.split(",") if p.strip()]
+                    _examples_json = json.dumps(_parts)
+                _personality_lore.add(
+                    conn,
+                    theme=_lore_theme,
+                    description=_lore_desc,
+                    example_posts_json=_examples_json,
+                    priority=int(_lore_priority),
+                )
+                st.toast("lore added.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+for _r in _lore_rows:
+    _border = PALETTE["phosphor"] if _r.is_active else PALETTE["hairline"]
+    _over_relied = _personality_lore.is_over_relied_on(
+        _r, overuse_threshold=_lore_overuse
+    )
+    _meta = (
+        f"#{_r.id} · priority {_r.priority} · "
+        f"{'active' if _r.is_active else 'inactive'} · "
+        f"invoked {_r.invocation_count}× · "
+        f"last={html.escape(_r.last_invoked_at_utc or '—')}"
+    )
+    st.markdown(
+        f"<div style='border-left: 2px solid {_border}; "
+        f"padding: 0.45rem 0.85rem; margin: 0.4rem 0; "
+        f"background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['bone_faint']};'>"
+        f"{_meta}"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; "
+        f"color: {PALETTE['bone']}; margin-top: 0.3rem;'>"
+        f"<strong>{html.escape(_r.theme)}</strong>"
+        f"</div>"
+        f"<div style='font-size: 0.9rem; color: {PALETTE['bone_dim']}; "
+        f"margin-top: 0.2rem;'>"
+        f"{html.escape(_r.description)}"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if _over_relied:
+        st.markdown(
+            f"<div style='border-left: 2px solid {PALETTE['warn_amber']}; "
+            f"padding: 0.35rem 0.85rem; margin: 0.15rem 0 0.4rem 0; "
+            f"background: {PALETTE['surface']};'>"
+            f"<span class='numeric' style='color:{PALETTE['warn_amber']}; "
+            f"font-size:0.75rem; letter-spacing:0.08em; text-transform:uppercase;'>"
+            f"LEANING HARD ON THIS BIT"
+            f"</span> — "
+            f"<span style='color:{PALETTE['bone']};'>"
+            f"invoked {_r.invocation_count}× and last seen recently. "
+            f"Doesn't disable lore; just informs."
+            f"</span></div>",
+            unsafe_allow_html=True,
+        )
+    _col_a, _col_b = st.columns(2)
+    if _r.is_active:
+        if _col_a.button("deactivate", key=f"lore_off_{_r.id}"):
+            _personality_lore.set_active(conn, lore_id=_r.id, is_active=False)
+            st.rerun()
+    else:
+        if _col_a.button("activate", key=f"lore_on_{_r.id}"):
+            _personality_lore.set_active(conn, lore_id=_r.id, is_active=True)
+            st.rerun()
+    _new_priority = _col_b.number_input(
+        "priority",
+        value=int(_r.priority),
+        step=1,
+        key=f"lore_prio_{_r.id}",
+        label_visibility="collapsed",
+    )
+    if _new_priority != _r.priority:
+        _personality_lore.set_priority(conn, lore_id=_r.id, priority=int(_new_priority))
+        st.rerun()
+
+# ---------------------------------------------------------------------------
 # Repetition guard (§28.13) — embedding-similarity status panel + backfill.
 # ---------------------------------------------------------------------------
 st.markdown("### Repetition guard")

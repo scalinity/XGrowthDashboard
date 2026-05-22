@@ -54,12 +54,43 @@ def _assert_publish_tools_unreachable() -> None:
     )
 
 
+def _assert_personality_lore_unreachable() -> None:
+    """Startup invariant (§28.21 Phase 5.9 access-control rule).
+
+    No tool in AGENT_TOOLS may grant the agent write access to the
+    ``personality_lore`` table. Lore is Daniel-curated; auto-extracted
+    lore would warp drafts in unbounded ways.
+
+    Same pattern as ``_assert_publish_tools_unreachable``. We scan each
+    tool's name + description + JSON schema text for the bare table
+    name. A read-only listing tool would still trip this assertion —
+    the spec is explicit that NO tool entry references the table, even
+    a hypothetical read-only one.
+    """
+    import json as _json
+    from app.agent.tools import AGENT_TOOLS
+
+    needle = "personality_lore"
+    offenders: list[str] = []
+    for tool in AGENT_TOOLS:
+        haystack = tool.name + " " + tool.description + " " + _json.dumps(tool.input_schema)
+        if needle in haystack:
+            offenders.append(tool.name)
+    assert not offenders, (
+        "INVARIANT VIOLATION (§28.21): personality_lore must NOT be "
+        f"referenced by any AGENT_TOOLS entry. Offending tools: "
+        f"{sorted(offenders)}. Daniel is the only writer; "
+        "auto-extracted lore would warp drafts."
+    )
+
+
 def _bootstrap_session_state() -> None:
     if "db_initialized" not in st.session_state:
         conn = connect(DEFAULT_DB_PATH)
         apply_migrations(conn)
         conn.close()
         _assert_publish_tools_unreachable()
+        _assert_personality_lore_unreachable()
         st.session_state.db_initialized = True
     st.session_state.setdefault("preselected_classify_post_id", None)
     st.session_state.setdefault("manual_entry_active_tab", None)

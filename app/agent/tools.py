@@ -29,6 +29,7 @@ from typing import Any, Callable
 
 from app.db import transaction
 from app.agent import content_types as _content_types
+from app.agent import personality_lore as _personality_lore
 from app.agent import prepublish_scorer as _prepublish_scorer
 from app.agent import repetition_guard as _repetition_guard
 from app.agent import voice_profile as _voice_profile
@@ -818,6 +819,14 @@ def _save_draft_post(
                 (json.dumps(similarity_warning), draft_id),
             )
 
+        # Phase 5.9 / §28.21 — personality lore invocation scan. Only
+        # runs for personality drafts; over-counting acceptable per spec.
+        invoked_lore_ids: list[int] = []
+        if ct == "personality":
+            invoked_lore_ids = _personality_lore.scan_and_increment_invocations(
+                conn, draft_text=text
+            )
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
@@ -825,6 +834,7 @@ def _save_draft_post(
         "draft_url": f"/?draft_id={draft_id}",
         "prepublish_label": score_row.composite_label,
         "similarity_warning": similarity_warning,
+        "invoked_lore_ids": invoked_lore_ids,
     }
 
 
