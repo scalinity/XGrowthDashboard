@@ -484,11 +484,17 @@ def _current_iso_week() -> str:
     return f"{year:04d}-W{week:02d}"
 
 
-def _counterfactual_filled_for_week(week_iso: str) -> tuple[bool, str | None]:
+@st.cache_data(ttl=2)
+def _counterfactual_filled_for_week(_conn, week_iso: str) -> tuple[bool, str | None]:
     """Return (ready, week_start_date) — `ready` is True when a saved
     weekly_reviews row for the week has a non-blank counterfactual_note.
 
     Used to enable/disable the export button BEFORE the user clicks it.
+    Cached with a 2s TTL keyed by ``week_iso`` so per-keystroke reruns in
+    the ISO-week ``st.text_input`` don't hammer the DB. The leading-
+    underscore ``_conn`` arg is excluded from the cache key per Streamlit
+    convention — Connection objects aren't hashable and the connection
+    is single-user-single-DB anyway. (/review-2 🔵 S7.)
     """
     try:
         from app.exports.markdown_weekly import _iso_week_to_dates
@@ -497,7 +503,7 @@ def _counterfactual_filled_for_week(week_iso: str) -> tuple[bool, str | None]:
     except ValueError:
         return (False, None)
     week_start = monday.isoformat()
-    row = conn.execute(
+    row = _conn.execute(
         "SELECT counterfactual_note FROM weekly_reviews WHERE week_start_date = ?",
         (week_start,),
     ).fetchone()
@@ -588,7 +594,7 @@ with _md_col_b:
         "filled in via the Weekly Review form. This is intentional (§14.6)."
     )
 
-_ready, _week_start = _counterfactual_filled_for_week(_week_iso)
+_ready, _week_start = _counterfactual_filled_for_week(conn, _week_iso)
 _disabled_help = (
     "Counterfactual note for that week is empty. Open Weekly Review and fill it in first."
     if not _ready
