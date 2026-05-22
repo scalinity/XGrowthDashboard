@@ -269,7 +269,13 @@ def main(argv: list[str] | None = None) -> int:
             target_path=args.target,
             dry_run=not args.confirm,
         )
-    except (FileNotFoundError, ValueError, RestoreIntegrityError) as exc:
+    except (
+        FileNotFoundError,
+        ValueError,
+        RestoreIntegrityError,
+        OSError,
+        shutil.Error,
+    ) as exc:
         print(f"Restore failed: {exc}", file=sys.stderr)
         return 1
 

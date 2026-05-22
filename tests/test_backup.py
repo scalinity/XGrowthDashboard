@@ -316,6 +316,48 @@ def test_pick_target_path_falls_back_to_monotonic_suffix(
     assert not target.exists(), "Picker must return a not-yet-existing path."
 
 
+def test_restore_main_translates_oserror_to_structured_failure(
+    db_conn: sqlite3.Connection,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """W7 regression — restore_db's main() must catch OSError (disk full,
+    permission denied, cross-FS rename) and surface the structured
+    "Restore failed: …" message + exit 1, rather than letting a bare
+    Python stack trace escape to the CLI user.
+    """
+    db_conn.close()
+    backup = backup_database(
+        source_path=db_path,
+        backups_dir=tmp_path / "backups",
+        retention_days=30,
+    )
+
+    def _raise(*_args, **_kwargs):
+        raise OSError(28, "Synthetic ENOSPC for the test")
+
+    monkeypatch.setattr("scripts.restore_db.shutil.copy2", _raise)
+
+    from scripts.restore_db import main
+
+    rc = main([
+        "--backup", str(backup.path),
+        "--target", str(db_path),
+        "--confirm",
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 1, f"main() should return 1 on OSError; got {rc}"
+    assert "Restore failed" in captured.err, (
+        f"Expected structured 'Restore failed' on stderr; got: {captured.err!r}"
+    )
+    # The previous behaviour was a raw traceback — those don't start
+    # with our prefix. This guards the failure shape.
+    assert "Traceback" not in captured.err
+
+
 def test_retention_zero_keeps_the_freshly_created_backup(
     db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
 ) -> None:
