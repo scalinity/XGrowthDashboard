@@ -210,6 +210,15 @@ def backup_database(
         backups_path = backups_path.resolve()
         backups_path.mkdir(parents=True, exist_ok=True)
 
+        # Shrink the WAL before snapshotting so the resulting backup
+        # carries no historical replay frames and the source -wal file
+        # itself is truncated. Failure here is benign — VACUUM INTO is
+        # still transactionally consistent without the pre-checkpoint.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            pass
+
         target = _pick_target_path(backups_path)
 
         started = time.perf_counter()
