@@ -120,11 +120,12 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         3,
         "Refuse save on attempt N+1 (§28.2 rule #13)",
     ),
-    (
-        "agent_dark_pattern_lint_enabled",
-        True,
-        "Run app/agent/lint.py preflight before save_draft_* (§28.2 rule #12)",
-    ),
+    # Note: there is intentionally NO `agent_dark_pattern_lint_enabled`
+    # setting. Per spec §28.2 rule #12 the lint pass is non-bypassable —
+    # exposing a toggle would contradict the rule. A toggle existed in a
+    # prior phase but was removed in /address W2 because the wiring was
+    # also missing on the read side (decide_save_or_revise never consulted
+    # the setting), so it was a UX promise the code never kept.
     (
         "x_posting_confirmation_token_ttl_seconds",
         60,

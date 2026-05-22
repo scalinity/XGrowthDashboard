@@ -853,10 +853,16 @@ st.markdown("### IWH revision policy")
 for key, editable, helptext in [
     ("iwh_self_score_minimum", True, "Minimum per-axis score required (§28.2 rule #13)."),
     ("iwh_max_revision_attempts", True, "Refuse save on attempt N+1 (§28.2 rule #13)."),
-    ("agent_dark_pattern_lint_enabled", True, "Run app/agent/lint.py preflight (§28.2 rule #12)."),
     ("agent_voice_sample_count", True, "Top-N voice samples spliced into prompt (§28.5)."),
 ]:
     _render_setting(conn, key, editable, helptext)
+
+st.caption(
+    "Dark-pattern lint always runs (§28.2 rule #12 — non-bypassable). "
+    "Lint behavior is owned by `app/agent/lint.py` and the offline "
+    "pattern matcher; the lint pass cannot be disabled from this panel "
+    "by design."
+)
 
 # Voice samples CRUD.
 st.markdown("### Voice samples")
