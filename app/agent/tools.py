@@ -298,8 +298,12 @@ def _summarize_winners(
     sql = "SELECT * FROM v_lane_performance WHERE 1=1"
     params: list[Any] = []
     if lane_filter:
-        # lane_filter form: "stir×icp×ask"
-        parts = lane_filter.split("×")
+        # Accept any of the common separators models emit. Unicode `×` is
+        # the canonical form but Sonnet/Haiku frequently emit `x`, `*`,
+        # or `:` even when prompted. Split on the first separator found.
+        import re as _re
+        parts = [p.strip() for p in _re.split(r"\s*[×x*:]\s*", lane_filter)]
+        parts = [p for p in parts if p]  # drop empties
         if len(parts) == 3:
             sql += " AND pillar = ? AND audience = ? AND cta = ?"
             params.extend(parts)
@@ -446,6 +450,7 @@ def _save_draft_post(
     audience: str,
     cta: str,
     hypothesis: str | None = None,
+    hypothesis_id: int | None = None,
     why_posted: str | None = None,  # noqa: ARG001 — stored on post_classifications later
     expected_signal: str | None = None,  # noqa: ARG001 — same
     voice_self_score: dict[str, int] | None = None,
@@ -459,9 +464,9 @@ def _save_draft_post(
             """
             INSERT INTO agent_drafts
                 (session_id, conversation_id, draft_kind, text, pillar,
-                 audience, cta, agent_reasoning, voice_self_score,
-                 iwh_attempt_index, status)
-            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, 'proposed')
+                 audience, cta, hypothesis_id, agent_reasoning,
+                 voice_self_score, iwh_attempt_index, status)
+            VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, 'proposed')
             """,
             (
                 session_id,
@@ -470,6 +475,7 @@ def _save_draft_post(
                 pillar,
                 audience,
                 cta,
+                hypothesis_id,
                 agent_reasoning,
                 json.dumps(voice_self_score) if voice_self_score else None,
                 int(iwh_attempt_index),
@@ -902,7 +908,10 @@ AGENT_TOOLS: list[ToolDef] = [
         description=(
             "Persist a final draft post. The orchestrator runs IWH score + "
             "dark-pattern lint preflight BEFORE calling this; failed drafts "
-            "bounce as revisions. Do NOT call until the user has approved."
+            "bounce as revisions. Do NOT call until the user has approved. "
+            "Pass `hypothesis_id` (integer) when the draft tests an experiment "
+            "from get_open_hypotheses; pass free-text `hypothesis` for "
+            "post_classifications context. Both can coexist."
         ),
         input_schema={
             "type": "object",
@@ -911,7 +920,20 @@ AGENT_TOOLS: list[ToolDef] = [
                 "pillar": {"type": "string"},
                 "audience": {"type": "string"},
                 "cta": {"type": "string"},
-                "hypothesis": {"type": "string"},
+                "hypothesis": {
+                    "type": "string",
+                    "description": (
+                        "Free-text hypothesis context stored on "
+                        "post_classifications.hypothesis."
+                    ),
+                },
+                "hypothesis_id": {
+                    "type": "integer",
+                    "description": (
+                        "FK to experiments.id — set when the draft tests a "
+                        "specific open hypothesis from get_open_hypotheses."
+                    ),
+                },
                 "why_posted": {"type": "string"},
                 "expected_signal": {"type": "string"},
                 "agent_reasoning": {"type": "string"},

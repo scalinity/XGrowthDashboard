@@ -61,23 +61,41 @@ class IwhScore:
 
 
 def parse_iwh_self_score(assistant_text: str) -> IwhScore | None:
-    """Extract the first ``<iwh_self_score>`` JSON object from assistant text.
+    """Extract the IWH self-score from assistant text.
 
-    Returns ``None`` if no tag is present or it can't be parsed — the
+    The system prompt encourages the agent to propose 2-3 variants with
+    one ``<iwh_self_score>`` tag per variant. When multiple tags are
+    present we take the per-axis MINIMUM across all parsed tags — this
+    is defensive: the orchestrator gates on the chosen draft_text, but
+    can't reliably match a tag to a variant from text alone, so the
+    conservative-floor reading prevents an unrelated 3/3/3 tag from
+    rescuing a 1/1/1 score elsewhere in the message.
+
+    Returns ``None`` if no tag is present or none can be parsed — the
     caller treats this as a failed IWH check (defensive default).
     """
-    match = _IWH_TAG_RE.search(assistant_text)
-    if not match:
+    parsed: list[IwhScore] = []
+    for match in _IWH_TAG_RE.finditer(assistant_text):
+        try:
+            data = json.loads(match.group(1))
+            parsed.append(
+                IwhScore(
+                    intelligence=int(data["intelligence"]),
+                    wisdom=int(data["wisdom"]),
+                    humility=int(data["humility"]),
+                )
+            )
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            continue
+    if not parsed:
         return None
-    try:
-        data = json.loads(match.group(1))
-        return IwhScore(
-            intelligence=int(data["intelligence"]),
-            wisdom=int(data["wisdom"]),
-            humility=int(data["humility"]),
-        )
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return None
+    if len(parsed) == 1:
+        return parsed[0]
+    return IwhScore(
+        intelligence=min(s.intelligence for s in parsed),
+        wisdom=min(s.wisdom for s in parsed),
+        humility=min(s.humility for s in parsed),
+    )
 
 
 # ---------------------------------------------------------------------------

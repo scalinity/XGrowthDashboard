@@ -47,6 +47,10 @@ class LintResult:
     voice_match_score: float | None = None  # 0.0-1.0; None if not computed
     specific_issues: list[str] = field(default_factory=list)
     model_used: str | None = None  # haiku model id, or 'offline' for pattern match
+    # W14: explicit field so audit reviewers can detect intermittent API
+    # outages instead of inferring from prose. Set to True when the live
+    # Haiku call failed and we fell back to the offline pattern matcher.
+    api_call_failed: bool = False
 
 
 def _offline_lint(text: str) -> LintResult:
@@ -143,13 +147,24 @@ def lint_draft(
             specific_issues=[str(s) for s in data.get("specific_issues", [])],
             model_used=model,
         )
-    except (anthropic.APIError, json.JSONDecodeError, ValueError, KeyError) as exc:  # type: ignore[attr-defined]
-        # On any failure, fall back to the offline matcher. The lint pass
-        # is a safety net; falling silent would be worse than a coarser check.
+    except Exception as exc:
+        # W13: broaden the catch — httpx.ConnectError / httpx.TimeoutException
+        # / unforeseen SDK errors were escaping the narrow tuple and
+        # crashing decide_save_or_revise. The lint pass is a safety net;
+        # falling silent to the offline matcher is strictly better than
+        # surfacing a Streamlit traceback for a transient network blip.
+        #
+        # W14: api_call_failed=True + a Plain rationale ("offline fallback
+        # — Haiku unreachable") so audit reviewers can grep / filter for
+        # intermittent outages instead of inferring from a prose prefix.
         result = _offline_lint(text)
         return LintResult(
             dark_pattern_detected=result.dark_pattern_detected,
-            rationale=f"haiku lint failed ({type(exc).__name__}); fallback offline result: {result.rationale}",
+            rationale=(
+                f"offline-fallback (haiku unreachable: {type(exc).__name__}). "
+                f"offline result: {result.rationale}"
+            ),
             specific_issues=result.specific_issues,
             model_used="offline-fallback",
+            api_call_failed=True,
         )
