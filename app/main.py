@@ -33,11 +33,33 @@ from app.db import DEFAULT_DB_PATH, apply_migrations, connect
 st.set_page_config(page_title="X Growth Dashboard", layout="wide")
 
 
+def _assert_publish_tools_unreachable() -> None:
+    """Startup invariant (§28.2 rule #10, §28.4 internal-only tool surface).
+
+    The publish tools must not leak into the agent's tool registry. If a
+    future refactor accidentally adds 'publish_post_to_x' / 'publish_reply_to_x'
+    to AGENT_TOOLS, this assertion stops the app before the model can be
+    given a tool catalog that contains them.
+    """
+    from app.agent._internal_tools import INTERNAL_TOOLS
+    from app.agent.tools import AGENT_TOOLS
+
+    agent_names = {t.name for t in AGENT_TOOLS}
+    internal_names = {t.name for t in INTERNAL_TOOLS}
+    leaked = agent_names & internal_names
+    assert not leaked, (
+        "INVARIANT VIOLATION (§28.2 rule #10): publish tools leaked into "
+        f"the agent's tool registry: {sorted(leaked)}. The publish path is "
+        "click-handler-only by construction; see app/agent/_internal_tools.py."
+    )
+
+
 def _bootstrap_session_state() -> None:
     if "db_initialized" not in st.session_state:
         conn = connect(DEFAULT_DB_PATH)
         apply_migrations(conn)
         conn.close()
+        _assert_publish_tools_unreachable()
         st.session_state.db_initialized = True
     st.session_state.setdefault("preselected_classify_post_id", None)
     st.session_state.setdefault("manual_entry_active_tab", None)
