@@ -27,6 +27,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.db import transaction
+from app.agent.reply_targets import (
+    ACTION_TO_SCORE,
+    REPLY_INTENT_ENUM,
+    engagement_surface_score,
+    engagement_surface_thresholds,
+    resolve_recommended_action,
+    saturation_score as _saturation_score_helper,
+)
 
 
 @dataclass(frozen=True)
@@ -354,23 +362,225 @@ def _find_reply_targets(
 
 
 # ---------------------------------------------------------------------------
-# 9. score_reply_candidates (§28.4 #6 — Phase 5.6 will fully wire)
+# 9. score_reply_candidates (§28.4 #6) — Phase 5.6 wires §29.3 resolver.
+#
+# Two input shapes per the prompt:
+#   * candidates: list[dict]    — fresh candidate(s); upserts the
+#     ``reply_targets`` row (creates if URL not present, otherwise re-scores
+#     the existing row), then computes scores + recommended_action.
+#   * reply_target_id: int      — re-scores an existing row in place.
+#
+# Per §29.3:
+#   * engagement_surface_score is computed deterministically from
+#     ``like_count`` and ``target_author_follower_count`` via §29.4 thresholds.
+#   * saturation_score is computed deterministically from ``reply_count``.
+#   * relevance_score and reply_opportunity_score are judgments — the agent
+#     supplies them as part of the call (§29.3 dimension table). If absent
+#     they default to NULL, which means recommended_action_label is left NULL
+#     (the row is recorded but unresolved). The Queue surfaces the gap.
 # ---------------------------------------------------------------------------
+def _load_engagement_surface_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Pull the four §29.4 settings rows; fall back to documented defaults."""
+    defaults = {
+        "engagement_surface_floor_likes": 15,
+        "engagement_surface_pct_of_author": 0.001,
+        "engagement_surface_high_floor_likes": 50,
+        "engagement_surface_high_pct": 0.005,
+    }
+    rows = conn.execute(
+        "SELECT key, value_json FROM settings WHERE key IN "
+        "('engagement_surface_floor_likes', 'engagement_surface_pct_of_author', "
+        " 'engagement_surface_high_floor_likes', 'engagement_surface_high_pct')"
+    ).fetchall()
+    settings = dict(defaults)
+    for r in rows:
+        try:
+            settings[r["key"]] = json.loads(r["value_json"])
+        except Exception:
+            pass
+    return settings
+
+
+def _compute_and_persist_scores(
+    conn: sqlite3.Connection,
+    *,
+    reply_target_id: int,
+    relevance: int | None,
+    reply_opportunity: int | None,
+    rationale: str | None,
+    reply_intent: str | None = None,
+    pillar: str | None = None,
+    audience: str | None = None,
+) -> dict[str, Any]:
+    """Re-score an existing reply_targets row in place and return the result.
+
+    Shared by both input shapes of score_reply_candidates.
+    """
+    row = conn.execute(
+        "SELECT * FROM reply_targets WHERE id = ?", (int(reply_target_id),)
+    ).fetchone()
+    if row is None:
+        return {"error": f"reply_target_id {reply_target_id} not found"}
+
+    settings = _load_engagement_surface_settings(conn)
+    med, hi = engagement_surface_thresholds(row["target_author_follower_count"], settings)
+    eng = engagement_surface_score(int(row["like_count"] or 0), med, hi)
+    sat = _saturation_score_helper(int(row["reply_count"] or 0))
+
+    # Resolver only runs when all four MVP scores are present. Without
+    # relevance + reply_opportunity from the agent, persist what we have
+    # and leave recommended_action_* NULL.
+    if relevance is not None and reply_opportunity is not None:
+        label = resolve_recommended_action(
+            int(relevance), eng, sat, int(reply_opportunity)
+        )
+        action_score = ACTION_TO_SCORE[label]
+    else:
+        label = None
+        action_score = None
+
+    with transaction(conn):
+        conn.execute(
+            """
+            UPDATE reply_targets
+            SET relevance_score          = COALESCE(?, relevance_score),
+                engagement_surface_score = ?,
+                saturation_score         = ?,
+                reply_opportunity_score  = COALESCE(?, reply_opportunity_score),
+                recommended_action_label = ?,
+                recommended_action_score = ?,
+                score_rationale          = COALESCE(?, score_rationale),
+                reply_intent             = COALESCE(?, reply_intent),
+                pillar                   = COALESCE(?, pillar),
+                audience                 = COALESCE(?, audience),
+                last_checked_at_utc      = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                relevance, eng, sat, reply_opportunity,
+                label, action_score, rationale,
+                reply_intent, pillar, audience,
+                int(reply_target_id),
+            ),
+        )
+
+    return {
+        "reply_target_id": int(reply_target_id),
+        "relevance_score": relevance if relevance is not None else row["relevance_score"],
+        "engagement_surface_score": eng,
+        "saturation_score": sat,
+        "reply_opportunity_score": reply_opportunity if reply_opportunity is not None else row["reply_opportunity_score"],
+        "recommended_action_label": label,
+        "recommended_action_score": action_score,
+        "score_rationale": rationale or row["score_rationale"],
+    }
+
+
 def _score_reply_candidates(
-    conn: sqlite3.Connection,  # noqa: ARG001
+    conn: sqlite3.Connection,
     *,
     candidates: list[dict[str, Any]] | None = None,
-    reply_target_id: int | None = None,  # noqa: ARG001
+    reply_target_id: int | None = None,
 ) -> dict[str, Any]:
-    return {
-        "scored": [],
-        "note": (
-            "score_reply_candidates is a Phase-5.5 stub. Full scoring "
-            "(four dimensions × deterministic recommended_action) lands "
-            "in Phase 5.6 per spec §29.3."
-        ),
-        "input_candidate_count": len(candidates or []),
-    }
+    if reply_target_id is not None and not candidates:
+        result = _compute_and_persist_scores(
+            conn,
+            reply_target_id=int(reply_target_id),
+            relevance=None,
+            reply_opportunity=None,
+            rationale=None,
+        )
+        return {"scored": [result] if "error" not in result else [], "errors": [result["error"]] if "error" in result else []}
+
+    if not candidates:
+        return {"scored": [], "errors": ["no candidates and no reply_target_id provided"]}
+
+    scored: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for c in candidates:
+        url = (c.get("url") or c.get("target_post_url") or "").strip()
+        if not url:
+            errors.append("candidate missing url")
+            continue
+        # Upsert by target_post_url — duplicate URL is a re-score, not a new row.
+        existing = conn.execute(
+            "SELECT id FROM reply_targets WHERE target_post_url = ?", (url,)
+        ).fetchone()
+        if existing is None:
+            new_cur = conn.execute(
+                """
+                INSERT INTO reply_targets
+                    (discovered_via, target_post_url, target_x_post_id,
+                     target_author_handle, target_author_display_name,
+                     target_author_follower_count, target_text, post_age_minutes,
+                     like_count, reply_count, repost_count, quote_count,
+                     pillar, audience, reply_intent)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    c.get("discovered_via", "agent_score"),
+                    url,
+                    c.get("target_x_post_id") or _parse_x_post_id(url),
+                    c.get("author_handle") or c.get("target_author_handle") or "unknown",
+                    c.get("target_author_display_name"),
+                    c.get("target_author_follower_count"),
+                    c.get("text") or c.get("target_text"),
+                    c.get("post_age_minutes"),
+                    c.get("like_count"),
+                    c.get("reply_count"),
+                    c.get("repost_count"),
+                    c.get("quote_count"),
+                    c.get("pillar"),
+                    c.get("audience"),
+                    c.get("reply_intent"),
+                ),
+            )
+            rt_id = int(new_cur.lastrowid)
+        else:
+            rt_id = int(existing["id"])
+            # Refresh metrics if the agent provided fresh ones.
+            updates: list[tuple[str, Any]] = []
+            for k_in, k_db in (
+                ("like_count", "like_count"),
+                ("reply_count", "reply_count"),
+                ("repost_count", "repost_count"),
+                ("quote_count", "quote_count"),
+                ("target_author_follower_count", "target_author_follower_count"),
+                ("post_age_minutes", "post_age_minutes"),
+            ):
+                if c.get(k_in) is not None:
+                    updates.append((k_db, c[k_in]))
+            if updates:
+                set_clause = ", ".join(f"{col} = ?" for col, _ in updates)
+                conn.execute(
+                    f"UPDATE reply_targets SET {set_clause} WHERE id = ?",
+                    [v for _, v in updates] + [rt_id],
+                )
+
+        result = _compute_and_persist_scores(
+            conn,
+            reply_target_id=rt_id,
+            relevance=c.get("relevance_score"),
+            reply_opportunity=c.get("reply_opportunity_score"),
+            rationale=c.get("score_rationale"),
+            reply_intent=c.get("reply_intent"),
+            pillar=c.get("pillar"),
+            audience=c.get("audience"),
+        )
+        scored.append(result)
+
+    return {"scored": scored, "errors": errors}
+
+
+def _parse_x_post_id(url: str) -> str | None:
+    """Pull the numeric post id from an X URL.
+
+    Accepts the canonical ``https://x.com/{handle}/status/{id}`` form (and
+    twitter.com aliases). Returns None on no match.
+    """
+    import re as _re
+    m = _re.search(r"(?:x|twitter)\.com/[^/]+/status/(\d+)", url)
+    return m.group(1) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -691,27 +901,118 @@ def _revise_draft(
 
 
 # ---------------------------------------------------------------------------
-# 15. record_reply_target (§28.4 #7 — Phase 5.6 fully wires)
+# 15. record_reply_target (§28.4 #7) — writes to the §29.6 reply_targets row.
+#
+# Idempotent on target_post_url (the §29.6 unique index): if Daniel or the
+# agent re-records the same URL, the existing row is returned. Optional
+# enrichment fields are layered on as a partial update so re-recording with
+# more context (likes / replies / author follower count discovered later)
+# refreshes the row without re-scoring it — scoring lives on
+# score_reply_candidates per §29.8.
 # ---------------------------------------------------------------------------
 def _record_reply_target(
-    conn: sqlite3.Connection,  # noqa: ARG001
+    conn: sqlite3.Connection,
     *,
     target_post_url: str,
-    target_post_text: str | None = None,  # noqa: ARG001
-    target_user: str | None = None,  # noqa: ARG001
-    pillar: str | None = None,  # noqa: ARG001
-    audience: str | None = None,  # noqa: ARG001
-    agent_reasoning: str | None = None,  # noqa: ARG001
-    agent_priority_score: int | None = None,  # noqa: ARG001
+    target_post_text: str | None = None,
+    target_user: str | None = None,
+    target_author_follower_count: int | None = None,
+    like_count: int | None = None,
+    reply_count: int | None = None,
+    repost_count: int | None = None,
+    quote_count: int | None = None,
+    post_age_minutes: int | None = None,
+    pillar: str | None = None,
+    audience: str | None = None,
+    reply_intent: str | None = None,
+    agent_reasoning: str | None = None,
+    agent_priority_score: int | None = None,  # noqa: ARG001 — V1.1+; kept for API compat
+    discovered_via: str = "agent_score",
+    created_via_agent_message_id: int | None = None,
 ) -> dict[str, Any]:
-    return {
-        "reply_target_id": None,
-        "target_post_url": target_post_url,
-        "note": (
-            "Session-1 stub: reply_targets table lands in Phase 5.6 "
-            "(spec §29.6). This call records the intent but does not "
-            "yet persist to a dedicated row."
+    target_post_url = target_post_url.strip()
+    if not target_post_url:
+        return {"error": "target_post_url is required"}
+
+    if reply_intent is not None and reply_intent not in REPLY_INTENT_ENUM:
+        return {
+            "error": (
+                f"reply_intent={reply_intent!r} not in §29.5 enum "
+                f"{REPLY_INTENT_ENUM}"
+            )
+        }
+
+    existing = conn.execute(
+        "SELECT id FROM reply_targets WHERE target_post_url = ?", (target_post_url,)
+    ).fetchone()
+    if existing is not None:
+        rt_id = int(existing["id"])
+        # Best-effort enrichment — leave existing values intact when caller
+        # didn't supply a new one.
+        conn.execute(
+            """
+            UPDATE reply_targets SET
+                target_text                   = COALESCE(?, target_text),
+                target_author_handle          = COALESCE(?, target_author_handle),
+                target_author_follower_count  = COALESCE(?, target_author_follower_count),
+                like_count                    = COALESCE(?, like_count),
+                reply_count                   = COALESCE(?, reply_count),
+                repost_count                  = COALESCE(?, repost_count),
+                quote_count                   = COALESCE(?, quote_count),
+                post_age_minutes              = COALESCE(?, post_age_minutes),
+                pillar                        = COALESCE(?, pillar),
+                audience                      = COALESCE(?, audience),
+                reply_intent                  = COALESCE(?, reply_intent),
+                notes                         = COALESCE(?, notes),
+                last_checked_at_utc           = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                target_post_text, target_user, target_author_follower_count,
+                like_count, reply_count, repost_count, quote_count,
+                post_age_minutes, pillar, audience, reply_intent,
+                agent_reasoning, rt_id,
+            ),
+        )
+        return {
+            "reply_target_id": rt_id,
+            "target_post_url": target_post_url,
+            "created": False,
+            "note": "candidate already in queue — enrichment applied.",
+        }
+
+    cur = conn.execute(
+        """
+        INSERT INTO reply_targets
+            (discovered_via, target_post_url, target_x_post_id,
+             target_author_handle, target_text,
+             target_author_follower_count,
+             like_count, reply_count, repost_count, quote_count,
+             post_age_minutes, pillar, audience, reply_intent,
+             notes, created_via_agent_message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            discovered_via,
+            target_post_url,
+            _parse_x_post_id(target_post_url),
+            target_user or "unknown",
+            target_post_text,
+            target_author_follower_count,
+            like_count, reply_count, repost_count, quote_count,
+            post_age_minutes,
+            pillar, audience, reply_intent,
+            agent_reasoning,
+            created_via_agent_message_id,
         ),
+    )
+    rt_id = int(cur.lastrowid)
+    # Expiry-clock anchor + 24h auto-skip default per §29.11.
+    return {
+        "reply_target_id": rt_id,
+        "target_post_url": target_post_url,
+        "created": True,
+        "expires_at_utc": None,  # computed lazily by the maintenance job
     }
 
 
@@ -847,8 +1148,14 @@ AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
         name="score_reply_candidates",
         description=(
-            "Score a batch of candidate posts to reply under. Phase 5.5 "
-            "stub; Phase 5.6 wires the four-dimension scoring per §29.3."
+            "Score reply candidates against the four MVP dimensions from "
+            "§29.3 (relevance, engagement_surface, saturation, reply_opportunity). "
+            "Accepts either a list of candidate dicts (creates/refreshes "
+            "reply_targets rows) or a reply_target_id (re-scores in place). "
+            "engagement_surface and saturation are computed from metrics; "
+            "relevance and reply_opportunity are your judgments — supply "
+            "them on each candidate. Without both judgments the row is "
+            "recorded but recommended_action_label is left NULL."
         ),
         input_schema={
             "type": "object",
@@ -859,8 +1166,34 @@ AGENT_TOOLS: list[ToolDef] = [
                         "type": "object",
                         "properties": {
                             "url": {"type": "string"},
+                            "target_post_url": {"type": "string"},
                             "text": {"type": "string"},
-                            "user": {"type": "string"},
+                            "author_handle": {"type": "string"},
+                            "target_author_follower_count": {"type": "integer"},
+                            "like_count": {"type": "integer"},
+                            "reply_count": {"type": "integer"},
+                            "repost_count": {"type": "integer"},
+                            "quote_count": {"type": "integer"},
+                            "post_age_minutes": {"type": "integer"},
+                            "relevance_score": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 3,
+                                "description": "Your judgment of §29.3 relevance dimension.",
+                            },
+                            "reply_opportunity_score": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 3,
+                                "description": "Your judgment of §29.3 reply opportunity dimension.",
+                            },
+                            "pillar": {"type": "string"},
+                            "audience": {"type": "string"},
+                            "reply_intent": {
+                                "type": "string",
+                                "enum": list(REPLY_INTENT_ENUM),
+                            },
+                            "score_rationale": {"type": "string"},
                         },
                     },
                 },
@@ -987,8 +1320,11 @@ AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
         name="record_reply_target",
         description=(
-            "Add a candidate target to the reply queue. Phase 5.5 stub; "
-            "Phase 5.6 lands the dedicated reply_targets table."
+            "Add (or enrich) a candidate target in the reply queue. "
+            "Idempotent on target_post_url per §29.6 unique index; "
+            "re-recording the same URL refreshes the existing row's "
+            "metadata without changing scores. After recording, call "
+            "score_reply_candidates with reply_target_id to score it."
         ),
         input_schema={
             "type": "object",
@@ -996,8 +1332,18 @@ AGENT_TOOLS: list[ToolDef] = [
                 "target_post_url": {"type": "string"},
                 "target_post_text": {"type": "string"},
                 "target_user": {"type": "string"},
+                "target_author_follower_count": {"type": "integer"},
+                "like_count": {"type": "integer"},
+                "reply_count": {"type": "integer"},
+                "repost_count": {"type": "integer"},
+                "quote_count": {"type": "integer"},
+                "post_age_minutes": {"type": "integer"},
                 "pillar": {"type": "string"},
                 "audience": {"type": "string"},
+                "reply_intent": {
+                    "type": "string",
+                    "enum": list(REPLY_INTENT_ENUM),
+                },
                 "agent_reasoning": {"type": "string"},
                 "agent_priority_score": {"type": "integer"},
             },
