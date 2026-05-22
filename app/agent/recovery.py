@@ -34,8 +34,24 @@ class OrphanPost:
     publish_method: str | None
 
 
-def detect_orphans(conn: sqlite3.Connection) -> list[OrphanPost]:
-    """Return posts that started publishing but never landed."""
+# Manual-clipboard publishes legitimately sit with `published_to_x_at NOT
+# NULL AND x_post_id NULL` until Daniel finishes the manual paste via the
+# existing "Mark posted" form. Treating those as orphans the moment they
+# stage would surface a chat-banner + Settings entry on every successful
+# publish — false positives that desensitize the user. Give the manual
+# flow a 30-minute grace window before classifying as orphan.
+MANUAL_CLIPBOARD_GRACE_MINUTES: int = 30
+
+
+def detect_orphans(
+    conn: sqlite3.Connection, *, limit: int = 50
+) -> list[OrphanPost]:
+    """Return posts that started publishing but never landed.
+
+    Excludes manual_clipboard posts younger than the grace window —
+    those are legitimately "pending paste" and Daniel hasn't had time
+    to reconcile them via the existing Phase-2 "Mark posted" form yet.
+    """
     rows = conn.execute(
         """
         SELECT id, text, published_to_x_at, publish_attempt_count,
@@ -45,8 +61,14 @@ def detect_orphans(conn: sqlite3.Connection) -> list[OrphanPost]:
           AND published_to_x_at IS NOT NULL
           AND x_post_id IS NULL
           AND (publish_method IS NULL OR publish_method != 'failed')
+          AND NOT (
+              publish_method = 'manual_clipboard'
+              AND published_to_x_at > datetime('now', ?)
+          )
         ORDER BY published_to_x_at DESC
+        LIMIT ?
         """,
+        (f"-{MANUAL_CLIPBOARD_GRACE_MINUTES} minutes", int(limit)),
     ).fetchall()
     return [
         OrphanPost(

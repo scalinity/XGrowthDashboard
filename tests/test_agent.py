@@ -623,3 +623,25 @@ def test_detect_orphan_posts(db_conn):
         db_conn, post_id=orphan_id, x_post_id="live-id-2", x_post_url="https://x.com/x"
     )
     assert recovery.detect_orphans(db_conn) == []
+
+
+def test_detect_orphans_excludes_fresh_manual_clipboard_publishes(db_conn):
+    """W1 regression: a manual_clipboard publish within the grace window
+    is NOT an orphan — Daniel just hasn't pasted the URL yet via the
+    existing Mark-posted form."""
+    fresh_id = _make_draft_post(db_conn, text="just published")
+    # Mark as freshly published — datetime('now') falls inside the
+    # MANUAL_CLIPBOARD_GRACE_MINUTES window.
+    db_conn.execute(
+        """
+        UPDATE posts SET publish_attempt_count = 1,
+                         published_to_x_at = datetime('now'),
+                         publish_method = 'manual_clipboard'
+        WHERE id = ?
+        """,
+        (fresh_id,),
+    )
+    orphans = recovery.detect_orphans(db_conn)
+    assert fresh_id not in {o.post_id for o in orphans}, (
+        "fresh manual_clipboard publish must NOT show as orphan within the grace window"
+    )
