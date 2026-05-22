@@ -1230,6 +1230,10 @@ def _audit_profile_to_dict(
             recent_post_window_days=recent_post_window_days,
         )
     except _profile_audit.ProfileAuditError as exc:
+        # P510R-20: log before returning the failure dict so the
+        # operator grepping `data/logs/` has the full stack, not just
+        # the truncated error string the model sees in its tool result.
+        _LOG.warning("audit_profile tool failed: %s", exc, exc_info=True)
         return {"status": "failed", "error": str(exc)}
 
     audit_id = _profile_audit.save(
@@ -1287,6 +1291,9 @@ def _analyze_account_to_dict(
             target_display_name=target_display_name,
         )
     except _account_research.AccountResearchError as exc:
+        # P510R-20: log full stack for operator diagnosis; tool result
+        # gets just the message.
+        _LOG.warning("analyze_account tool failed: %s", exc, exc_info=True)
         return {"status": "failed", "error": str(exc)}
 
     report_id = _account_research.save(
@@ -1321,6 +1328,13 @@ def _brain_dump_process_to_dict(
     try:
         result = _brain_dump.process(conn, brain_dump_id)
     except _brain_dump.BrainDumpError as exc:
+        # P510R-20: log full stack for operator diagnosis; tool result
+        # gets just the message + the row id so the model can suggest
+        # a retry.
+        _LOG.warning(
+            "process_brain_dump tool failed (brain_dump_id=%s): %s",
+            brain_dump_id, exc, exc_info=True,
+        )
         return {"status": "failed", "brain_dump_id": brain_dump_id, "error": str(exc)}
     return {
         "status": "processed",
