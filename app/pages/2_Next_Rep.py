@@ -70,15 +70,25 @@ def _hypothesis_progress(conn, exp) -> tuple[int, int | None]:
     minimum = exp["minimum_sample_size"]
     if not exp["content_lane"]:
         return 0, minimum
-    n = conn.execute(
-        """
-        SELECT COUNT(*) FROM v_post_latest_metrics plm
-        JOIN posts p ON p.id = plm.post_id
-        WHERE plm.pillar = ?
-          AND p.created_date >= ?
-        """,
-        (exp["content_lane"], exp["start_date"]),
-    ).fetchone()[0]
+    # `experiments.content_lane` is interpreted as the pillar. When
+    # `target_audience` is also set, narrow to posts matching BOTH pillar
+    # AND audience — otherwise a "stir × icp" experiment would silently
+    # count every "stir × other" post toward its sample.
+    if exp["target_audience"]:
+        sql = (
+            "SELECT COUNT(*) FROM v_post_latest_metrics plm "
+            "JOIN posts p ON p.id = plm.post_id "
+            "WHERE plm.pillar = ? AND plm.audience = ? AND p.created_date >= ?"
+        )
+        params = (exp["content_lane"], exp["target_audience"], exp["start_date"])
+    else:
+        sql = (
+            "SELECT COUNT(*) FROM v_post_latest_metrics plm "
+            "JOIN posts p ON p.id = plm.post_id "
+            "WHERE plm.pillar = ? AND p.created_date >= ?"
+        )
+        params = (exp["content_lane"], exp["start_date"])
+    n = conn.execute(sql, params).fetchone()[0]
     return int(n or 0), minimum
 
 

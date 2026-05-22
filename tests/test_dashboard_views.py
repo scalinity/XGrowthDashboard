@@ -42,6 +42,7 @@ from app.components.charts.lane_grid import (  # noqa: E402
     LaneRow,
     count_rankable_lanes,
 )
+from app.components.theme import LANE_SCATTER_COLORS, PALETTE  # noqa: E402
 
 
 # ===========================================================================
@@ -124,6 +125,63 @@ def test_count_rankable_lanes_zero_when_only_insufficient_and_directional() -> N
         _lane_row_with("low — show scatter, do not rank"),
     ]
     assert count_rankable_lanes(rows) == 0
+
+
+# ===========================================================================
+# Palette discipline — the "no red anywhere" rule is one of the project's
+# load-bearing visual invariants (spec §13 framing + CLAUDE.md UI work).
+# Catching a red tone in any palette token is the whole point of this guard.
+# ===========================================================================
+
+def _hex_to_rgb(s: str) -> tuple[int, int, int]:
+    s = s.lstrip("#")
+    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+
+def _is_red_dominant(hex_color: str) -> bool:
+    """A colour is 'alarm red' iff R is bright, exceeds G and B by a wide
+    margin, AND G ≈ B (so the colour reads as red rather than amber/coral).
+
+    Amber (#c98b16): R=201, G=139, B=22 → |G-B|=117 → NOT alarm red.
+    Pinkish red (#d96e6e): R=217, G=110, B=110 → |G-B|=0 → alarm red ✓.
+    Pure red (#ff0000): |G-B|=0 → alarm red ✓.
+    Coral (#ff7f50): |G-B|=47 → borderline; we let it through (cool half
+    of warm-toned coral is OK on a dark background)."""
+    if not hex_color.startswith("#") or len(hex_color) != 7:
+        return False
+    r, g, b = _hex_to_rgb(hex_color)
+    if r < 160:
+        return False  # too dark to read as red
+    if r - g < 50 or r - b < 50:
+        return False  # red doesn't dominate
+    # `abs(g - b) < 50` separates true reds (G≈B) from warm-but-acceptable
+    # ambers/corals (G >> B). This is the line the project's "no red" rule
+    # actually cares about.
+    return abs(g - b) < 50
+
+
+def test_palette_contains_no_red_dominant_tones() -> None:
+    """No PALETTE value reads as red on the dark background — alarm
+    colours are forbidden because the dashboard's epistemic framing
+    treats sample-size labels as questions about evidence, not failure."""
+    offenders = sorted(
+        (k, v) for k, v in PALETTE.items()
+        if isinstance(v, str) and _is_red_dominant(v)
+    )
+    assert not offenders, (
+        f"Red-dominant tones detected in PALETTE — violates project "
+        f"'no red anywhere, ever' rule: {offenders}"
+    )
+
+
+def test_lane_scatter_palette_contains_no_red() -> None:
+    """The scatter palette is the one place red-coloured dots could slip
+    in (Content Performance assigns lanes a color by index). Block it
+    here so the v2 taxonomy expansion can't silently introduce one."""
+    offenders = [c for c in LANE_SCATTER_COLORS if _is_red_dominant(c)]
+    assert not offenders, (
+        f"Red-dominant tones detected in LANE_SCATTER_COLORS: {offenders}"
+    )
 
 
 # ===========================================================================
@@ -291,7 +349,6 @@ def _insert_lane(conn: sqlite3.Connection, lane: tuple[str, str, str], post_coun
             """,
             (post_id, f"x{next_id}_{i}", f"{d}T13:00:00Z", 100 * (i + 1)),
         )
-    next_id += post_count
 
 
 @pytest.mark.parametrize(

@@ -61,6 +61,23 @@ PALETTE = {
 }
 
 # ---------------------------------------------------------------------------
+# Lane-scatter palette. One enforcement point for the "no red" rule.
+# Used by Content Performance and (if added later) other multi-lane charts.
+# Adding a colour? Pick from the colorblind-friendly cool half of the
+# wheel — teals, blues, ambers, greens, plums, never red.
+# ---------------------------------------------------------------------------
+LANE_SCATTER_COLORS: list[str] = [
+    "#5fb3a1",   # phosphor (primary)
+    "#3a73e0",   # tentative-blue
+    "#c98b16",   # directional-amber
+    "#2da564",   # confident-green
+    "#a8a39a",   # bone_dim
+    "#a87fce",   # muted plum
+    "#3b8a8a",   # deep teal (replaces the rejected reddish tone)
+    "#7ecfd9",   # pale cyan
+]
+
+# ---------------------------------------------------------------------------
 # Fonts. We import Fraunces + IBM Plex Sans + JetBrains Mono from Google
 # Fonts via @import inside a <style> tag. One network round-trip, cached.
 # ---------------------------------------------------------------------------
@@ -256,19 +273,17 @@ h3 {{
 
 
 def apply_theme() -> None:
-    """Inject fonts + global CSS overrides. Idempotent within a Streamlit run.
+    """Inject fonts + global CSS overrides at the top of every page.
 
-    Streamlit re-runs the entire script on every interaction; injecting the
-    <style> block each rerun is fine (Streamlit dedupes identical markdown
-    blocks). We do gate behind a session_state flag anyway so the import
-    only runs once per browser session — keeps the network round-trip out
-    of the hot path for the rest of the app.
+    Streamlit re-runs the whole script on every interaction, so the
+    <style> tag is re-emitted each rerun. That's fine — Streamlit
+    dedupes identical markdown blocks before sending them to the
+    browser. No need to gate this behind session_state.
     """
-    if st.session_state.get("_theme_applied"):
-        st.markdown(_CSS_TEMPLATE.format(font_import=_FONT_IMPORT, **PALETTE), unsafe_allow_html=True)
-        return
-    st.markdown(_CSS_TEMPLATE.format(font_import=_FONT_IMPORT, **PALETTE), unsafe_allow_html=True)
-    st.session_state._theme_applied = True
+    st.markdown(
+        _CSS_TEMPLATE.format(font_import=_FONT_IMPORT, **PALETTE),
+        unsafe_allow_html=True,
+    )
 
 
 def kicker(text: str) -> None:

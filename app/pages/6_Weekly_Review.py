@@ -31,20 +31,41 @@ def _previous_monday(d: _date_t) -> _date_t:
 
 
 def _summary_for_week(conn, week_start: _date_t, week_end: _date_t) -> dict:
-    """Compute the auto-fillable numbers for the week per §14.6."""
+    """Compute the auto-fillable numbers for the week per §14.6.
+
+    Both followers_start and followers_end use a tolerant lookup: start
+    is the first snapshot at-or-after Monday; end is the last snapshot
+    at-or-before Sunday. This handles the common case of a missed Monday
+    snapshot without silently blanking the "Δ followers" card.
+    """
     out: dict = {}
     row = conn.execute(
         """
         SELECT
             (SELECT followers_count FROM v_account_daily
-              WHERE snapshot_date = ? LIMIT 1) AS followers_start,
+              WHERE snapshot_date >= ? AND snapshot_date <= ?
+              ORDER BY snapshot_date ASC LIMIT 1) AS followers_start,
             (SELECT followers_count FROM v_account_daily
-              WHERE snapshot_date <= ? ORDER BY snapshot_date DESC LIMIT 1) AS followers_end
+              WHERE snapshot_date <= ? AND snapshot_date >= ?
+              ORDER BY snapshot_date DESC LIMIT 1) AS followers_end,
+            (SELECT snapshot_date FROM v_account_daily
+              WHERE snapshot_date >= ? AND snapshot_date <= ?
+              ORDER BY snapshot_date ASC LIMIT 1) AS followers_start_date,
+            (SELECT snapshot_date FROM v_account_daily
+              WHERE snapshot_date <= ? AND snapshot_date >= ?
+              ORDER BY snapshot_date DESC LIMIT 1) AS followers_end_date
         """,
-        (week_start.isoformat(), week_end.isoformat()),
+        (
+            week_start.isoformat(), week_end.isoformat(),
+            week_end.isoformat(),   week_start.isoformat(),
+            week_start.isoformat(), week_end.isoformat(),
+            week_end.isoformat(),   week_start.isoformat(),
+        ),
     ).fetchone()
     out["followers_start"] = row["followers_start"]
     out["followers_end"] = row["followers_end"]
+    out["followers_start_date"] = row["followers_start_date"]
+    out["followers_end_date"] = row["followers_end_date"]
     out["follower_delta"] = (
         (out["followers_end"] or 0) - (out["followers_start"] or 0)
         if out["followers_start"] is not None and out["followers_end"] is not None
@@ -150,7 +171,8 @@ c1.metric(
     "Followers Δ",
     f"{summary['follower_delta']:+d}" if summary["follower_delta"] is not None else "—",
     delta=(
-        f"start {summary['followers_start']:,} → end {summary['followers_end']:,}"
+        f"{summary['followers_start']:,} ({summary['followers_start_date']}) "
+        f"→ {summary['followers_end']:,} ({summary['followers_end_date']})"
         if summary["followers_start"] is not None and summary["followers_end"] is not None
         else "no snapshot range"
     ),

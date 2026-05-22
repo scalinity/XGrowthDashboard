@@ -260,36 +260,26 @@ else:
 
 hairline()
 
-# 5. Quick links — context-aware buttons into Manual Entry.
+# 5. Quick links — buttons set the active-tab hint and switch to Manual Entry.
 st.markdown("## Quick actions")
 b1, b2, b3 = st.columns(3)
 
-
-def _go_to_manual_entry(tab_name: str) -> None:
-    st.session_state.manual_entry_active_tab = tab_name
-
-
-b1.button(
-    "Log a post",
-    width="stretch",
-    on_click=_go_to_manual_entry,
-    args=("Post / Reply",),
-)
-b2.button(
-    "Classify untagged",
-    width="stretch",
-    on_click=_go_to_manual_entry,
-    args=("Needs tagging",),
-)
-b3.button(
-    "Log Stir tester",
-    width="stretch",
-    on_click=_go_to_manual_entry,
-    args=("Tester",),
-)
+# Each button: clicking sets the active-tab session-state hint and
+# navigates to the Manual Entry page in one click. `st.switch_page`
+# (Streamlit 1.30+) handles the navigation; the hint primes the right
+# tab once Manual Entry boots.
+if b1.button("Log a post", width="stretch"):
+    st.session_state.manual_entry_active_tab = "Post / Reply"
+    st.switch_page("pages/8_Manual_Entry.py")
+if b2.button("Classify untagged", width="stretch"):
+    st.session_state.manual_entry_active_tab = "Needs tagging"
+    st.switch_page("pages/8_Manual_Entry.py")
+if b3.button("Log Stir tester", width="stretch"):
+    st.session_state.manual_entry_active_tab = "Tester"
+    st.switch_page("pages/8_Manual_Entry.py")
 
 st.markdown(
-    "<p class='faint'>Buttons set the active-tab hint on the Manual Entry page. "
-    "Open <strong>Manual entry</strong> from the sidebar to land in the right tab.</p>",
+    "<p class='faint'>Each button jumps straight to the Manual Entry page "
+    "with the right tab pre-flagged.</p>",
     unsafe_allow_html=True,
 )

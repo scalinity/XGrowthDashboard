@@ -100,9 +100,13 @@ def confidence_badge(db_label: str | None, *, post_count: int | None = None) -> 
             f"Based on n={post_count} posts. {pres.description}\n\n"
             f"{SAMPLE_SIZE_TOOLTIP}"
         )
+    # HTML title attribute can't render newlines (they flatten to spaces),
+    # so strip them for the browser-native tooltip. Streamlit's `help=`
+    # tooltip preserves the multi-line version.
+    title_text = help_text.replace("\n\n", " ").replace("\n", " ")
 
     st.markdown(
-        f"""<span title="{help_text}" style="
+        f"""<span title="{title_text}" style="
             display: inline-block;
             padding: 2px 10px;
             border-radius: 2px;

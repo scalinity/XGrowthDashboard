@@ -36,7 +36,14 @@ from app.components.charts.lane_grid import (
     lane_performance_grid,
     lane_rows_from_sql,
 )
-from app.components.theme import PALETTE, apply_theme, callout, hairline, kicker
+from app.components.theme import (
+    LANE_SCATTER_COLORS,
+    PALETTE,
+    apply_theme,
+    callout,
+    hairline,
+    kicker,
+)
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.pages import open_connection
 
@@ -105,17 +112,8 @@ def _build_scatter(rows) -> go.Figure:
         key = (r["pillar"], r["audience"], r["cta"])
         by_lane.setdefault(key, []).append((r["created_date"], int(r["impressions"])))
 
-    # Choose a small palette of phosphor + complementary tones for lanes.
-    lane_palette = [
-        PALETTE["phosphor"],
-        PALETTE["confidence_tentative_bg"],
-        PALETTE["confidence_directional_bg"],
-        PALETTE["confidence_confident_bg"],
-        PALETTE["bone_dim"],
-        "#a87fce",  # extra muted purple for 6th lane if needed
-        "#d96e6e",  # NOT used as alarm — only if many lanes exist
-        "#7ecfd9",
-    ]
+    # Lane palette is centrally enforced in theme.py to keep the
+    # "no red anywhere, ever" rule in one place.
     for i, (lane, posts) in enumerate(by_lane.items()):
         dates_ = [p[0] for p in posts]
         imps = [p[1] for p in posts]
@@ -126,7 +124,7 @@ def _build_scatter(rows) -> go.Figure:
                 mode="markers",
                 marker={
                     "size": 10,
-                    "color": lane_palette[i % len(lane_palette)],
+                    "color": LANE_SCATTER_COLORS[i % len(LANE_SCATTER_COLORS)],
                     "line": {"color": PALETTE["bone"], "width": 0.5},
                     "opacity": 0.85,
                 },

@@ -53,25 +53,44 @@ def _follower_history(conn) -> list[FollowerPoint]:
 
 
 def _weekly_post_counts(conn, weeks: int = 8) -> list[tuple[str, int, int]]:
-    """Returns [(iso_week_start, posts, replies)] for the last `weeks` ISO weeks."""
+    """Returns [(iso_week_start, posts, replies)] for the last `weeks` ISO weeks.
+
+    Single grouped query bucketing posts by Monday-anchored ISO week, then a
+    Python-side fill for weeks with zero posts so the chart shows the full
+    timeline (not just the weeks that happen to have data).
+    """
     today = _date_t.today()
     monday = today - timedelta(days=today.weekday())
+    earliest = (monday - timedelta(weeks=weeks - 1)).isoformat()
+    latest = (monday + timedelta(days=6)).isoformat()
+
+    # SQLite's strftime('%w', d) returns weekday with Sunday=0, so to anchor
+    # on Monday we subtract `(strftime('%w', d) + 6) % 7` days from each row.
+    rows = conn.execute(
+        """
+        SELECT
+            DATE(created_date,
+                 '-' || (CAST(strftime('%w', created_date) AS INTEGER) + 6) % 7
+                 || ' days') AS week_start,
+            SUM(CASE WHEN type IN ('standalone', 'thread_root', 'thread_child', 'quote')
+                      THEN 1 ELSE 0 END) AS posts,
+            SUM(CASE WHEN type = 'reply' THEN 1 ELSE 0 END) AS replies
+        FROM posts
+        WHERE created_date BETWEEN ? AND ?
+        GROUP BY week_start
+        ORDER BY week_start ASC
+        """,
+        (earliest, latest),
+    ).fetchall()
+    by_week = {
+        r["week_start"]: (int(r["posts"] or 0), int(r["replies"] or 0))
+        for r in rows
+    }
     out: list[tuple[str, int, int]] = []
     for w in range(weeks - 1, -1, -1):
-        week_start = monday - timedelta(weeks=w)
-        week_end = week_start + timedelta(days=6)
-        row = conn.execute(
-            """
-            SELECT
-                SUM(CASE WHEN type IN ('standalone', 'thread_root', 'thread_child', 'quote')
-                          THEN 1 ELSE 0 END) AS posts,
-                SUM(CASE WHEN type = 'reply' THEN 1 ELSE 0 END) AS replies
-            FROM posts
-            WHERE created_date BETWEEN ? AND ?
-            """,
-            (week_start.isoformat(), week_end.isoformat()),
-        ).fetchone()
-        out.append((week_start.isoformat(), int(row["posts"] or 0), int(row["replies"] or 0)))
+        ws = (monday - timedelta(weeks=w)).isoformat()
+        posts, replies = by_week.get(ws, (0, 0))
+        out.append((ws, posts, replies))
     return out
 
 
