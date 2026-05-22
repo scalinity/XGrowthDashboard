@@ -106,7 +106,10 @@ _SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset({
 })
 
 # Top-level JSON keys (case-insensitive) inside raw_api_responses payloads
-# that may contain a flat secret string rather than a header object.
+# that may contain a flat secret string rather than a header object. Only
+# matched at depth 0 of the response_json / request_params_json blob, since
+# at deeper nesting a key like "password" is plausibly user-content (e.g. a
+# tester quoting a UI element) rather than an actual secret.
 _SENSITIVE_TOP_KEYS: frozenset[str] = frozenset({
     "access_token",
     "refresh_token",
@@ -121,6 +124,17 @@ _SENSITIVE_TOP_KEYS: frozenset[str] = frozenset({
     "api_secret",
     "private_key",
     "password",
+})
+
+# Parent-key names that signal "the dict I'm about to walk is an HTTP
+# headers map; redact Authorization-style keys within it". Case-insensitive
+# match. Restricting header-name redaction to these contexts avoids
+# false-positives where a user-content field happens to be called e.g.
+# "cookie" or "authorization" outside an HTTP-request shape.
+_HEADER_PARENT_KEYS: frozenset[str] = frozenset({
+    "headers",
+    "request_headers",
+    "response_headers",
 })
 
 _REDACTED_SENTINEL: str = "[REDACTED]"
@@ -150,18 +164,30 @@ def _is_secret_column(column_name: str) -> bool:
     return bool(_SECRET_COLUMN_PATTERN.search(column_name))
 
 
-def _redact_json_blob(payload: object) -> tuple[object, bool]:
+def _redact_json_blob(
+    payload: object,
+    *,
+    depth: int = 0,
+    inside_headers: bool = False,
+) -> tuple[object, bool]:
     """Walk a JSON-decoded blob and redact secret-looking pieces.
 
     Returns ``(redacted_payload, was_redacted)``. The boolean lets the caller
     record which (table, column) chains had to be redacted at all, so the
     output document is self-describing.
 
-    The walker is intentionally conservative:
-    - dict values whose keys (case-insensitive) match :data:`_SENSITIVE_HEADER_NAMES`
-      or :data:`_SENSITIVE_TOP_KEYS` are replaced with :data:`_REDACTED_SENTINEL`.
-    - lists are walked recursively.
-    - scalars pass through unchanged.
+    Two scopes — both narrower than the previous "match in either set at
+    any depth" rule (/review-2 🔵 S6):
+
+    1. :data:`_SENSITIVE_TOP_KEYS` fires ONLY at ``depth == 0`` of the
+       captured response/request blob (the raw_api_responses payload's
+       top level). A deeper "password" key is plausibly user-content
+       and is left alone.
+    2. :data:`_SENSITIVE_HEADER_NAMES` fires ONLY when we are inside a
+       dict whose parent key matched :data:`_HEADER_PARENT_KEYS`
+       (``headers`` / ``request_headers`` / ``response_headers``). An
+       Authorization-named key sitting outside an HTTP headers context
+       is also plausibly user-content.
 
     No regex match on the value text — header values can be high-entropy
     arbitrary strings, and matching by *key* is the safer rule.
@@ -171,11 +197,19 @@ def _redact_json_blob(payload: object) -> tuple[object, bool]:
         was = False
         for k, v in payload.items():
             k_lower = k.lower() if isinstance(k, str) else ""
-            if k_lower in _SENSITIVE_HEADER_NAMES or k_lower in _SENSITIVE_TOP_KEYS:
+            if depth == 0 and k_lower in _SENSITIVE_TOP_KEYS:
                 out[k] = _REDACTED_SENTINEL
                 was = True
                 continue
-            child, child_was = _redact_json_blob(v)
+            if inside_headers and k_lower in _SENSITIVE_HEADER_NAMES:
+                out[k] = _REDACTED_SENTINEL
+                was = True
+                continue
+            child, child_was = _redact_json_blob(
+                v,
+                depth=depth + 1,
+                inside_headers=k_lower in _HEADER_PARENT_KEYS,
+            )
             out[k] = child
             was = was or child_was
         return out, was
@@ -183,7 +217,11 @@ def _redact_json_blob(payload: object) -> tuple[object, bool]:
         new_list: list[object] = []
         was = False
         for item in payload:
-            child, child_was = _redact_json_blob(item)
+            child, child_was = _redact_json_blob(
+                item,
+                depth=depth + 1,
+                inside_headers=inside_headers,
+            )
             new_list.append(child)
             was = was or child_was
         return new_list, was
