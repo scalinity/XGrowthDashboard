@@ -210,9 +210,17 @@ def lint_draft(
 # Haiku failure-mode labels: forced / AI-tasting / selfishly self-
 # promoting. Conservative — false positives bounce as IWH revisions;
 # false negatives are caught by §28.13 repetition guard + Daniel's eye.
+#
+# P59A-W14+S6: emoji character class is range-only with explicit
+# outliers (U+2700–U+27BF dingbats covers ❤️ ✨ etc; U+2764 is the
+# bare heart used by ❤️ before variation selector). Prior literal-
+# emoji-in-class form was a no-op for most codepoints already inside
+# the range and added U+FE0F (variation selector) as a class member
+# by accident.
+_EMOJI_CLASS = "[\\U0001F300-\\U0001FAFF\\u2700-\\u27BF\\u2764]"
 _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str], ...] = (
     (
-        r"\bgreat\s+(post|thread|take)!?\s*[\U0001F300-\U0001FAFF🔥👏🙌💯❤️🎉✨].*\b(check|stop\s+by|visit|see)\b",
+        r"\bgreat\s+(post|thread|take)!?\s*" + _EMOJI_CLASS + r".*\b(check|stop\s+by|visit|see)\b",
         "selfishly self-promoting: 'great post! check out my…'",
     ),
     (
@@ -220,7 +228,7 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str], ...] = (
         "selfishly self-promoting: explicit self-link CTA in a reply",
     ),
     (
-        r"\b(amazing|incredible|love\s+this|fire|absolute\s+banger)!?\s*[\U0001F300-\U0001FAFF🔥👏🙌💯❤️🎉✨]+\s*$",
+        r"\b(amazing|incredible|love\s+this|fire|absolute\s+banger)!?\s*" + _EMOJI_CLASS + r"+\s*$",
         "forced: emoji-led affirmation with no substantive content",
     ),
     (
