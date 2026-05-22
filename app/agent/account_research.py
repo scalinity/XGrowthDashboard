@@ -140,13 +140,17 @@ ModelCaller = Callable[[str, str, str], tuple[str, int, int]]
 # Handle normalization.
 # ---------------------------------------------------------------------------
 def normalize_handle(handle: str) -> str:
-    """Strip @ + whitespace; re-prepend @ for storage consistency.
+    """Strip @ + whitespace; lowercase; re-prepend @ for storage consistency.
 
     The DB column accepts either form per §10, but normalizing on
     write keeps queries simple and prevents duplicate reports under
-    'foo' vs '@foo'.
+    'foo' vs '@foo'. P510R-9: also lowercase — X handles are case-
+    insensitive, so '@User' and '@user' refer to the same account and
+    should canonicalize to one ``account_research_reports`` row family.
+    Without this, mixed-case promotions also fan out to two
+    ``reply_targets`` rows since ``target_post_url`` is case-preserving.
     """
-    cleaned = handle.strip().lstrip("@").strip()
+    cleaned = handle.strip().lstrip("@").strip().lower()
     if not cleaned:
         raise AccountResearchError("target_handle is empty")
     return f"@{cleaned}"

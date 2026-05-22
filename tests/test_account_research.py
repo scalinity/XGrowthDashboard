@@ -71,6 +71,13 @@ def test_normalize_handle_strips_whitespace() -> None:
     assert _ar.normalize_handle("  @foo  ") == "@foo"
 
 
+def test_normalize_handle_lowercases() -> None:
+    """P510R-9: X is case-insensitive — canonicalize so @User and @user
+    don't end up as distinct rows that would later collide on URLs."""
+    assert _ar.normalize_handle("@User") == "@user"
+    assert _ar.normalize_handle("BAR") == "@bar"
+
+
 def test_normalize_handle_rejects_empty() -> None:
     with pytest.raises(_ar.AccountResearchError):
         _ar.normalize_handle("   ")
