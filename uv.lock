@@ -1534,6 +1534,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "numpy" },
     { name = "plotly" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -1551,6 +1552,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
+    { name = "numpy", specifier = ">=2.4.6" },
     { name = "plotly", specifier = ">=6.7.0" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "python-dotenv", specifier = ">=1.0" },

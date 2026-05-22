@@ -352,6 +352,7 @@ if _agent_target_accounts_available(conn):
 _pending = conn.execute(
     """
     SELECT ad.id, ad.text, ad.draft_kind, ad.pillar,
+           ad.similarity_warning_json,
            ps.composite_label
     FROM agent_drafts ad
     LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
@@ -362,6 +363,7 @@ _pending = conn.execute(
 ).fetchall()
 if _pending:
     from app.components.badges import prepublish_chip as _next_rep_prepublish_chip
+    from app.components.badges import repetition_banner as _next_rep_repetition_banner
     hairline()
     st.markdown("### Pending agent drafts")
     st.caption(
@@ -383,6 +385,7 @@ if _pending:
             f"{_text}</div></div>",
             unsafe_allow_html=True,
         )
+        _next_rep_repetition_banner(_d["similarity_warning_json"])
         _next_rep_prepublish_chip(_d["composite_label"])
 
 # Agent integration (§14.2 + §28.7).

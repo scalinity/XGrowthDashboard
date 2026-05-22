@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.6",
     "sqlite-utils>=3.36",
     "plotly>=6.7.0",
+    "numpy>=2.4.6",
 ]
 
 [dependency-groups]

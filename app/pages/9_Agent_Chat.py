@@ -45,7 +45,7 @@ from app.agent.client import (
     AgentClient,
     start_conversation,
 )
-from app.components.badges import prepublish_chip, render_score_panel
+from app.components.badges import prepublish_chip, render_score_panel, repetition_banner
 from app.components.theme import (
     PALETTE,
     apply_theme,
@@ -322,6 +322,11 @@ def _render_draft_actions(conn, draft_row, message_id: int) -> None:
         f"{draft_row['text']}</div></div>",
         unsafe_allow_html=True,
     )
+
+    # Phase 5.8 / §28.13 — repetition guard banner. Renders above the
+    # score chip when the cosine scan flagged a near_duplicate / close_echo.
+    # Silent on `distinct` and on NULL (guard offline at save time).
+    repetition_banner(draft_row["similarity_warning_json"])
 
     # Phase 5.8 / §28.11 — pre-publish chip + click-to-reveal score panel.
     # The chip is informational; publish path is unchanged.

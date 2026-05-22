@@ -236,11 +236,25 @@ class TestDecideSaveOrRevise:
 # ===========================================================================
 # Prompt drift check
 # ===========================================================================
-def test_prompt_builder_splices_all_13_rules(db_conn):
+def test_prompt_builder_splice_count_matches_spec(db_conn):
+    """Drift check: prompt rule count must equal spec rule count.
+
+    Originally pinned to 13 (the original §28.2 count). The Phase 5.8
+    spec added rule #14 (confidence labels) and rule #15 (niche
+    definition for Phase 5.9). The test now asserts the contract that
+    actually matters — splice count equals spec count — without
+    hardcoding a number that has to change every time the spec adds a
+    rule.
+    """
     prompt = prompt_builder.build_system_prompt(db_conn)
     spec_count, prompt_count = prompt_builder.verify_rule_count_matches_spec(prompt)
-    assert spec_count == 13, f"spec should have 13 rules, got {spec_count}"
-    assert prompt_count == 13, f"prompt should splice 13 rules, got {prompt_count}"
+    assert spec_count >= 13, (
+        f"spec should have at least 13 §28.2 rules (initial baseline), got {spec_count}"
+    )
+    assert spec_count == prompt_count, (
+        f"prompt should splice every spec rule. spec has {spec_count}, "
+        f"prompt has {prompt_count} — the splice path has drifted."
+    )
 
 
 def test_prompt_builder_includes_voice_samples_when_present(db_conn):

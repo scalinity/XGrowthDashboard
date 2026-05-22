@@ -29,6 +29,7 @@ from typing import Any, Callable
 
 from app.db import transaction
 from app.agent import prepublish_scorer as _prepublish_scorer
+from app.agent import repetition_guard as _repetition_guard
 from app.agent import voice_profile as _voice_profile
 from app.agent.reply_targets import (
     ACTION_TO_SCORE,
@@ -796,12 +797,24 @@ def _save_draft_post(
             conn, agent_draft_id=draft_id, row=score_row
         )
 
+        # Phase 5.8 / §28.13 — repetition guard. Returns None when the
+        # embedding provider is unavailable; persist NULL and proceed.
+        similarity_warning = _repetition_guard.check(
+            conn, draft_text=text, draft_kind="standalone"
+        )
+        if similarity_warning is not None:
+            conn.execute(
+                "UPDATE agent_drafts SET similarity_warning_json = ? WHERE id = ?",
+                (json.dumps(similarity_warning), draft_id),
+            )
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
         "iwh_attempt_index": int(iwh_attempt_index),
         "draft_url": f"/?draft_id={draft_id}",
         "prepublish_label": score_row.composite_label,
+        "similarity_warning": similarity_warning,
     }
 
 
@@ -877,12 +890,23 @@ def _save_draft_reply(
             conn, agent_draft_id=draft_id, row=score_row
         )
 
+        # Phase 5.8 / §28.13 — repetition guard, same degradation contract.
+        similarity_warning = _repetition_guard.check(
+            conn, draft_text=text, draft_kind="reply"
+        )
+        if similarity_warning is not None:
+            conn.execute(
+                "UPDATE agent_drafts SET similarity_warning_json = ? WHERE id = ?",
+                (json.dumps(similarity_warning), draft_id),
+            )
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
         "iwh_attempt_index": int(iwh_attempt_index),
         "target_post_url": target_post_url,
         "prepublish_label": score_row.composite_label,
+        "similarity_warning": similarity_warning,
     }
 
 

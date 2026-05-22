@@ -262,6 +262,7 @@ hairline()
 _pending_drafts = conn.execute(
     """
     SELECT ad.id, ad.text, ad.draft_kind, ad.created_at,
+           ad.similarity_warning_json,
            ps.composite_label
     FROM agent_drafts ad
     LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
@@ -273,6 +274,7 @@ _pending_drafts = conn.execute(
 ).fetchall()
 if _pending_drafts:
     from app.components.badges import prepublish_chip as _today_prepublish_chip
+    from app.components.badges import repetition_banner as _today_repetition_banner
     st.markdown("## Pending agent drafts")
     st.caption(
         "Agent-generated drafts from today's sessions that haven't been "
@@ -293,6 +295,7 @@ if _pending_drafts:
             f"{_preview}</div></div>",
             unsafe_allow_html=True,
         )
+        _today_repetition_banner(_d["similarity_warning_json"])
         _today_prepublish_chip(_d["composite_label"])
     hairline()
 

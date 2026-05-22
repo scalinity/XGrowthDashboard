@@ -28,6 +28,7 @@ import streamlit as st
 
 from app.agent import cost as _agent_cost
 from app.agent import recovery as _agent_recovery
+from app.agent import repetition_guard as _repetition_guard
 from app.agent import voice as _agent_voice
 from app.agent import voice_profile as _voice_profile
 from app.backup import (
@@ -1037,6 +1038,46 @@ if _result is not None:
         )
     else:
         st.error(_result["message"])
+
+# ---------------------------------------------------------------------------
+# Repetition guard (§28.13) — embedding-similarity status panel + backfill.
+# ---------------------------------------------------------------------------
+st.markdown("### Repetition guard")
+st.caption(
+    "Embedding cosine scan that flags `near_duplicate` and `close_echo` "
+    "drafts at save time (§28.13). Soft check — never blocks Publish. "
+    "Provider is an adapter, not a setting: swap by editing "
+    "`app/agent/embeddings.py` and re-running the backfill."
+)
+_guard_status = _repetition_guard.status(conn)
+st.markdown(
+    f"<div style='border-left: 2px solid {PALETTE['phosphor']}; "
+    f"padding: 0.5rem 0.8rem; margin: 0.3rem 0; background: {PALETTE['surface']};'>"
+    f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['bone_faint']}; "
+    f"letter-spacing: 0.06em; text-transform: uppercase;'>"
+    f"PROVIDER · {html.escape(str(_guard_status['provider']))} · "
+    f"DIM {_guard_status['embedding_dim']}"
+    f"</div>"
+    f"<div style='font-family: JetBrains Mono, monospace; font-size: 0.85rem; "
+    f"color: {PALETTE['bone']}; margin-top: 0.4rem;'>"
+    f"{_guard_status['embedded_count']} / {_guard_status['shipped_post_count']} "
+    f"shipped posts embedded · "
+    f"lookback {_guard_status['lookback_days']}d · "
+    f"near_dup ≥ {_guard_status['near_duplicate_threshold']} · "
+    f"echo ≥ {_guard_status['close_echo_threshold']}"
+    f"</div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+if _guard_status["embedded_count"] < _guard_status["shipped_post_count"]:
+    st.markdown(
+        f"<div class='faint' style='font-size: 0.85rem; color: {PALETTE['bone_dim']}; "
+        f"padding: 0.2rem 0;'>"
+        f"Backfill is incomplete. Run "
+        f"<code>uv run python scripts/embed_posts.py</code> from a terminal."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 # Curated agent_target_accounts.
 st.markdown("### Curated reply-target accounts")

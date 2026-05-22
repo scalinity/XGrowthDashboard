@@ -12,6 +12,7 @@ from app.components.badges.prepublish_label import (
     prepublish_chip,
     render_score_panel,
 )
+from app.components.badges.repetition_warning import repetition_banner
 from app.components.badges.sample_size import sample_size_badge
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "confidence_badge",
     "prepublish_chip",
     "render_score_panel",
+    "repetition_banner",
     "sample_size_badge",
     "ui_label_for_db_label",
 ]
