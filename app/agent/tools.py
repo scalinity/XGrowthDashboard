@@ -31,6 +31,7 @@ from app.db import transaction
 from app.agent import account_research as _account_research
 from app.agent import brain_dump as _brain_dump
 from app.agent import campaigns as _campaigns
+from app.agent import monthly_review as _monthly_review
 from app.agent import profile_audit as _profile_audit
 from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
@@ -696,6 +697,51 @@ def _draft_weekly_review_section(
     }
 
 
+# Phase 5.11 §28.27 — mirror of the weekly draft tool for monthly
+# reviews. Same stub status as the weekly version; the Anthropic call
+# wiring lands when Session 2 of the agent draft pipeline ships.
+def _draft_monthly_review_section(
+    conn: sqlite3.Connection,
+    *,
+    section_name: str,
+    iso_month: str,
+) -> dict[str, Any]:
+    allowed = {
+        "interpretation",
+        "lesson",
+        "counterfactual",
+        "next_month_experiment",
+        "campaigns_retro",
+    }
+    if section_name not in allowed:
+        return {"error": f"unknown section_name {section_name!r}"}
+    try:
+        _monthly_review.parse_iso_month(iso_month)
+    except _monthly_review.InvalidIsoMonthError as exc:
+        return {"error": str(exc)}
+    # Surface auto-filled context so the (future) Session-2 prompt has
+    # everything it needs to draft. Pure read; safe to call here.
+    auto_filled = _monthly_review.compute_auto_filled_fields(conn, iso_month)
+    return {
+        "section_name": section_name,
+        "iso_month": iso_month,
+        "draft_text": None,
+        "auto_filled": {
+            "follower_delta": auto_filled.follower_delta,
+            "posts_shipped": auto_filled.posts_shipped,
+            "downloads": auto_filled.downloads,
+            "strongest_pillar_candidate": auto_filled.strongest_pillar_candidate,
+            "strongest_content_type": auto_filled.strongest_content_type,
+            "weakest_content_type": auto_filled.weakest_content_type,
+            "campaigns_completed_json": auto_filled.campaigns_completed_json,
+        },
+        "note": (
+            "Session-1 stub: section name validated, auto-fill payload "
+            "surfaced for Session-2 prompt wiring per §28.27."
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 12. save_draft_post (§28.4 #4) — REAL implementation; IWH counter LIVE.
 #
@@ -1351,7 +1397,7 @@ def _brain_dump_process_to_dict(
     }
 
 
-# AGENT_TOOLS — the registered tool catalog (22 entries after Phase 5.11 — #21 analyze_campaign_progress).
+# AGENT_TOOLS — the registered tool catalog (23 entries after Phase 5.11 — #22 draft_monthly_review_section).
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -1872,6 +1918,49 @@ AGENT_TOOLS: list[ToolDef] = [
                 pinned_post_text=pinned_post_text,
                 recent_post_window_days=recent_post_window_days,
                 pinned_post_id=pinned_post_id,
+            )
+        ),
+    ),
+    # ----- #22 draft_monthly_review_section (Phase 5.11 §28.27) -----
+    # Mirror of #9 draft_weekly_review_section. Validates section_name
+    # (incl. the new `campaigns_retro` section that pulls from
+    # campaigns_completed_json) and returns a stub draft pending the
+    # Session-2 wiring of the Anthropic call — same shape as the
+    # weekly tool, which is itself still a Session-1 stub.
+    ToolDef(
+        name="draft_monthly_review_section",
+        description=(
+            "Draft one section of a Monthly AI review (§28.27): "
+            "'interpretation', 'lesson', 'counterfactual', "
+            "'next_month_experiment', or 'campaigns_retro' (the new "
+            "section that pulls from campaigns_completed_json). "
+            "Returns a structured payload with the section name + a "
+            "draft_text field. Emits <confidence>fact|inference|"
+            "speculation|mixed</confidence> tags per §28.14."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "section_name": {
+                    "type": "string",
+                    "enum": [
+                        "interpretation",
+                        "lesson",
+                        "counterfactual",
+                        "next_month_experiment",
+                        "campaigns_retro",
+                    ],
+                },
+                "iso_month": {
+                    "type": "string",
+                    "description": "YYYY-MM (e.g. '2026-05').",
+                },
+            },
+            "required": ["section_name", "iso_month"],
+        },
+        handler=lambda conn, *, section_name, iso_month: (
+            _draft_monthly_review_section(
+                conn, section_name=section_name, iso_month=iso_month
             )
         ),
     ),

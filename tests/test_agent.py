@@ -208,6 +208,12 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         # Phase 5.11 / §28.26 — Campaigns analyzer. campaign_id filled
         # in below after a dual-stream campaign is seeded. Read-only.
         "analyze_campaign_progress": {"campaign_id": None},
+        # Phase 5.11 / §28.27 — Monthly review draft tool. Returns a
+        # Session-1 stub dict; no API call needed.
+        "draft_monthly_review_section": {
+            "section_name": "interpretation",
+            "iso_month": "2026-05",
+        },
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump

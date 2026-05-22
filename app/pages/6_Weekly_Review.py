@@ -1,10 +1,12 @@
-"""Weekly review — spec.md §14.6 + §15.5.
+"""Weekly review — spec.md §14.6 + §15.5 (+ Monthly tab, Phase 5.11 §28.27).
 
-Phase 2 wired the form; Phase 3 adds the auto-filled quantitative summary
-above it, the counterfactual-gated export button, and the history list
-below. The "Export weekly report" button is intentionally **disabled**
-until the most-recent matching `weekly_reviews` row carries a non-empty
-``counterfactual_note`` — actual export logic lands in Phase 5.
+Phase 2 wired the form; Phase 3 added the auto-filled quantitative
+summary above it, the counterfactual-gated export button, and the
+history list below. Phase 5.11 adds a Weekly / Monthly cadence toggle
+at the top; switching toggles the underlying table
+(weekly_reviews / monthly_reviews) while sharing the page shell.
+Both cadences share the same export-blocker rules (counterfactual
+required, speculation blocks export).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
+from app.agent import monthly_review as _monthly_review
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.components.theme import apply_theme, callout, hairline, kicker
 from app.forms import get_setting, weekly_review
@@ -153,6 +156,176 @@ today = _date_t.today()
 week_start = _previous_monday(today)
 week_end = week_start + timedelta(days=6)
 counterfactual_required = bool(get_setting(conn, "counterfactual_required", True))
+
+# Phase 5.11 §28.27: cadence toggle at the top. Persisted in session
+# state so navigating away and back keeps the chosen cadence. Defaults
+# to weekly — Daniel's primary cadence per §14.6.
+if "review_cadence" not in st.session_state:
+    st.session_state["review_cadence"] = "Weekly"
+cadence = st.radio(
+    "Cadence",
+    options=("Weekly", "Monthly"),
+    horizontal=True,
+    key="review_cadence",
+)
+
+if cadence == "Monthly":
+    iso_month = _monthly_review.iso_month_of(today)
+    kicker(f"MONTH OF {iso_month}")
+    st.title("Monthly review")
+    st.caption(
+        "Cadence companion to weekly (§28.27). Same export-blocker rules: "
+        "counterfactual_note required, speculation blocks export. Adds the "
+        "content-type axis + a campaigns retrospective from "
+        "campaigns_completed_json."
+    )
+
+    auto = _monthly_review.compute_auto_filled_fields(conn, iso_month)
+
+    st.markdown("## This month — at a glance")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Followers Δ",
+        f"{auto.follower_delta:+d}" if auto.follower_delta is not None else "—",
+    )
+    c2.metric("Posts shipped", str(auto.posts_shipped))
+    c3.metric("Replies shipped", str(auto.replies_shipped))
+    c4.metric("Stir downloads", str(auto.downloads))
+
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Reply sessions", str(auto.reply_sessions_completed))
+    c6.metric(
+        "Rep-complete days",
+        f"{auto.daily_reps_days_completed} / 30",
+    )
+    c7.metric("Qualified ICP testers", str(auto.qualified_icp_testers))
+
+    if auto.strongest_pillar_candidate:
+        callout(
+            f"<em>Strongest-pillar candidate:</em> "
+            f"{auto.strongest_pillar_candidate}"
+        )
+    if auto.strongest_content_type:
+        callout(
+            f"<em>Strongest content-type (§28.17):</em> "
+            f"{auto.strongest_content_type}"
+        )
+    if auto.weakest_content_type:
+        callout(
+            f"<em>Weakest content-type (§28.17):</em> "
+            f"{auto.weakest_content_type}"
+        )
+
+    import json as _json
+    campaigns_completed = _json.loads(auto.campaigns_completed_json or "[]")
+    if campaigns_completed:
+        kicker("Campaigns completed this month")
+        for entry in campaigns_completed:
+            line = f"- **{entry['name']}** (id {entry['campaign_id']})"
+            if entry.get("lesson"):
+                line += f" — _{entry['lesson']}_"
+            st.markdown(line)
+    else:
+        st.markdown(
+            "<p class='faint'>No campaigns completed this month.</p>",
+            unsafe_allow_html=True,
+        )
+
+    hairline()
+    st.markdown("## Write the monthly review")
+    existing = _monthly_review.get_monthly_review(conn, iso_month=iso_month) or {}
+
+    if "monthly_review_form_init" not in st.session_state:
+        st.session_state["monthly_review_form_init"] = {}
+    # Initialize widget keys from the existing row exactly once.
+    for field in (
+        "summary",
+        "key_movements",
+        "what_got_stuck",
+        "stir_validation_summary",
+        "lesson",
+        "next_month_experiment",
+        "counterfactual_note",
+        "daniel_notes",
+    ):
+        widget_key = f"mr_{field}"
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = existing.get(field) or ""
+    confidence_key = "mr_confidence_label"
+    if confidence_key not in st.session_state:
+        st.session_state[confidence_key] = (
+            existing.get("confidence_label") or "inference"
+        )
+
+    def _save_monthly_cb() -> None:
+        payload = {
+            "summary": st.session_state["mr_summary"],
+            "key_movements": st.session_state["mr_key_movements"],
+            "what_got_stuck": st.session_state["mr_what_got_stuck"],
+            "stir_validation_summary": st.session_state["mr_stir_validation_summary"],
+            "lesson": st.session_state["mr_lesson"],
+            "next_month_experiment": st.session_state["mr_next_month_experiment"],
+            "counterfactual_note": st.session_state["mr_counterfactual_note"],
+            "daniel_notes": st.session_state["mr_daniel_notes"],
+            "confidence_label": st.session_state["mr_confidence_label"],
+            # Auto-filled side-cars Daniel doesn't edit through this form.
+            "follower_delta": auto.follower_delta,
+            "strongest_content_type": auto.strongest_content_type,
+            "weakest_content_type": auto.weakest_content_type,
+            "campaigns_completed_json": auto.campaigns_completed_json,
+        }
+        with open_connection() as save_conn:
+            _monthly_review.upsert_monthly_review(
+                save_conn, iso_month=iso_month, fields=payload
+            )
+        st.toast("monthly review saved.")
+
+    with st.form(key="monthly_review_form"):
+        st.text_area("summary", key="mr_summary", height=80)
+        st.text_area("key_movements", key="mr_key_movements", height=80)
+        st.text_area("what got stuck", key="mr_what_got_stuck", height=80)
+        st.text_area(
+            "stir validation summary", key="mr_stir_validation_summary", height=80
+        )
+        st.text_area("lesson", key="mr_lesson", height=80)
+        st.text_area(
+            "next month experiment", key="mr_next_month_experiment", height=80
+        )
+        st.text_area(
+            "counterfactual note (REQUIRED for export)",
+            key="mr_counterfactual_note",
+            height=100,
+        )
+        st.selectbox(
+            "confidence label",
+            options=("fact", "inference", "speculation", "mixed"),
+            key="mr_confidence_label",
+        )
+        st.text_area("daniel's notes", key="mr_daniel_notes", height=60)
+        st.form_submit_button("save monthly review", on_click=_save_monthly_cb)
+
+    hairline()
+    st.markdown("## Export")
+    refreshed = _monthly_review.get_monthly_review(conn, iso_month=iso_month)
+    blocked = _monthly_review.export_blocked_reason(refreshed)
+    if blocked:
+        st.button(
+            "Export monthly report (Markdown)",
+            disabled=True,
+            help=blocked,
+            width="content",
+        )
+        st.markdown(
+            f"<p class='faint'>{blocked}</p>", unsafe_allow_html=True
+        )
+    else:
+        st.button(
+            "Export monthly report (Markdown)",
+            help="Export logic lands when scripts/export_monthly_review.py ships.",
+            width="content",
+        )
+    # Monthly cadence path stops here — the rest of the page is weekly-specific.
+    st.stop()
 
 kicker(f"WEEK OF {week_start.strftime('%b %-d').upper()} – {week_end.strftime('%b %-d, %Y').upper()}")
 st.title("Weekly review")
