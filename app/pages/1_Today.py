@@ -213,6 +213,40 @@ else:
     r3.metric("Sessions", f"{sessions} / {session_target}", delta="✓ target met" if reps_row["session_target_met"] else "")
     r4.metric("Minimum reps", "Complete" if minimum_met else "Incomplete")
 
+    # §29.9 — sub-counters under "Replies today: X / 12". Renders as a
+    # dim-mono caption block so the row breathes; matches the rest of the
+    # cockpit's "numbers, not narratives" rule.
+    high_eng       = int(reps_row["high_engagement_replies_shipped"] or 0)
+    icp_intent     = int(reps_row["icp_intent_replies_shipped"]      or 0)
+    candidates_rev = int(reps_row["candidates_reviewed_today"]       or 0)
+    high_eng_target_pct = float(get_setting(conn, "reply_high_engagement_mix_pct", 0.5))
+    cand_target         = int(get_setting(conn, "reply_candidate_review_daily_target", 15))
+
+    high_eng_target = max(1, int(round(high_eng_target_pct * max(1, replies_shipped))))
+    high_eng_met = replies_shipped > 0 and high_eng >= high_eng_target
+
+    st.markdown(
+        f"""<div style='margin:-0.4rem 0 0.5rem 0;
+                       padding:0.5rem 0.85rem;
+                       background:{PALETTE['surface']};
+                       border-left:2px solid {PALETTE['hairline']};
+                       border-radius:2px;'>
+            <div class='kicker' style='margin-bottom:0.25rem;'>§29.9 · REPLY-TARGET MIX</div>
+            <div class='numeric' style='font-size:0.85rem; color:{PALETTE['bone']};
+                                          line-height:1.55;'>
+                · <strong>{high_eng}</strong> high-engagement
+                  <span class='faint'>(engagement_surface_score ≥ 2)</span>
+                  <span class='faint'>· target {int(high_eng_target_pct*100)}% of shipped
+                  → {high_eng_target}</span>{' ✓' if high_eng_met else ''}<br/>
+                · <strong>{icp_intent}</strong> icp_discovery<br/>
+                · <strong>{candidates_rev}</strong> candidates reviewed
+                  <span class='faint'>· target {cand_target}</span>
+                  {' ✓' if candidates_rev >= cand_target else ''}
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
     if not minimum_met:
         callout(
             "<em>Minimum reps not yet complete.</em> Logging behavior is "
