@@ -79,6 +79,14 @@ def test_tagged_claim_with_adjacent_confidence_is_excused() -> None:
     assert session.detect_untagged_claims(text) == 0
 
 
+def test_leading_tag_excuses_following_claim() -> None:
+    """P58R-10: a leading <confidence> tag (within 80 chars of the claim)
+    should also credit the claim. Prior behavior only credited trailing
+    tags, mis-counting leading-tag patterns as untagged."""
+    text = "<confidence>inference</confidence>: the build lane is the winner."
+    assert session.detect_untagged_claims(text) == 0
+
+
 def test_untagged_when_tag_too_far_away() -> None:
     # Tag exists, but >80 chars after the claim.
     filler = "x" * 200

@@ -180,9 +180,12 @@ def detect_untagged_claims(message_text: str) -> int:
     """Count analytical-claim regex matches that are NOT inside any
     `<confidence>...</confidence>` tag span.
 
-    A claim is "tagged" if either:
+    A claim is "tagged" if any of these hold:
       * the claim sits immediately before a `<confidence>` tag (within
         80 chars — agents typically write `claim <confidence>fact</confidence>`),
+      * the claim sits immediately after a `<confidence>` tag (within
+        80 chars — leading-tag pattern `<confidence>fact</confidence>: claim`
+        is plausible even if not dominant),
       * OR the claim is inside a `<confidence>...</confidence>` span.
 
     The 80-char proximity heuristic forgives natural punctuation/spacing
@@ -199,12 +202,15 @@ def detect_untagged_claims(message_text: str) -> int:
     for start, end, _name in spans:
         tagged = False
         for tag_start, tag_end in tag_spans:
-            # Tag immediately follows the claim (or wraps it). 80-char
-            # window catches "claim ... <confidence>fact</confidence>"
-            # but rejects unrelated tags far away in the message.
+            # Trailing tag: claim ... <confidence>fact</confidence>
             if tag_start >= end and tag_start - end <= 80:
                 tagged = True
                 break
+            # Leading tag: <confidence>fact</confidence> ... claim
+            if tag_end <= start and start - tag_end <= 80:
+                tagged = True
+                break
+            # Wrap-around: claim sits inside the tag span itself
             if start >= tag_start and end <= tag_end:
                 tagged = True
                 break
