@@ -28,6 +28,13 @@ BACKUP_FILENAME_PREFIX: str = "x_growth_"
 BACKUP_FILENAME_SUFFIX: str = ".db"
 BACKUP_FILENAME_GLOB: str = f"{BACKUP_FILENAME_PREFIX}*{BACKUP_FILENAME_SUFFIX}"
 
+# Bounded retry budget when generating a fresh second-precision filename
+# encounters an existing file. After this many time-based retries we fall
+# back to a monotonic ``-N`` suffix so a sub-second double-click can never
+# cause VACUUM INTO to refuse to overwrite.
+FILENAME_TIME_RETRY_LIMIT: int = 3
+FILENAME_SUFFIX_RETRY_LIMIT: int = 1_000
+
 
 class BackupIntegrityError(RuntimeError):
     """Raised when ``PRAGMA integrity_check`` on a fresh backup is not ``ok``."""
@@ -130,6 +137,35 @@ def _resolve_backups_dir(conn, override: Path | None) -> Path:
     return _anchor_on_project_root(Path(seeded) if seeded else DEFAULT_BACKUPS_DIR)
 
 
+def _pick_target_path(backups_path: Path) -> Path:
+    """Pick a free filename under ``backups_path`` with bounded retry.
+
+    Second-precision filenames can collide if the caller mashes "Back up
+    now" twice or a cron run overlaps a manual run. The previous
+    implementation was a single ``sleep(1)`` then one regeneration —
+    a sub-second second double-click could still produce identical paths
+    after the sleep, and VACUUM INTO would refuse to overwrite. This
+    function tries up to ``FILENAME_TIME_RETRY_LIMIT`` fresh timestamps,
+    then falls back to monotonic ``-1``, ``-2``, … suffixes so we always
+    find a free name in bounded time.
+    """
+    for _ in range(FILENAME_TIME_RETRY_LIMIT):
+        target = backups_path / _backup_filename()
+        if not target.exists():
+            return target
+        time.sleep(1)
+    base = backups_path / _backup_filename()
+    for suffix in range(1, FILENAME_SUFFIX_RETRY_LIMIT + 1):
+        candidate = base.with_name(base.stem + f"-{suffix}" + base.suffix)
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(
+        f"Could not generate a unique backup filename in {backups_path} "
+        f"after {FILENAME_TIME_RETRY_LIMIT} time-retries and "
+        f"{FILENAME_SUFFIX_RETRY_LIMIT} suffix attempts."
+    )
+
+
 def _resolve_retention_days(conn, override: int | None) -> int:
     if override is not None:
         return int(override)
@@ -158,10 +194,7 @@ def backup_database(
         backups_path = backups_path.resolve()
         backups_path.mkdir(parents=True, exist_ok=True)
 
-        target = backups_path / _backup_filename()
-        if target.exists():
-            time.sleep(1)
-            target = backups_path / _backup_filename()
+        target = _pick_target_path(backups_path)
 
         started = time.perf_counter()
         conn.execute(f"VACUUM INTO {_quote_sqlite_path(target)}")

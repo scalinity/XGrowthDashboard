@@ -31,7 +31,7 @@ def _chdir(path: Path):
     finally:
         os.chdir(prev)
 
-from app.backup import BACKUP_FILENAME_GLOB, backup_database
+from app.backup import BACKUP_FILENAME_GLOB, _pick_target_path, backup_database
 from app.forms import get_setting
 from scripts.restore_db import restore_database
 
@@ -274,6 +274,40 @@ def test_relative_backups_dir_anchored_on_project_root(
     assert not (elsewhere / "rel_backups").exists(), (
         "Backup must not appear under CWD-relative path."
     )
+
+
+def test_pick_target_path_falls_back_to_monotonic_suffix(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """W5 regression — when every fresh second-precision filename is taken
+    (e.g. clock pinned via monkeypatch), the picker must fall back to
+    `-1`, `-2`, … suffixes within bounded retries instead of returning
+    a colliding path or raising into VACUUM INTO.
+    """
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Pin the filename generator so every time-retry produces the same
+    # name and we exercise the suffix fallback deterministically.
+    monkeypatch.setattr(
+        "app.backup._backup_filename",
+        lambda now=None: "x_growth_2026-05-21_210000.db",
+    )
+    # Make sleep() a no-op so the test doesn't spend FILENAME_TIME_RETRY_LIMIT
+    # seconds in real wall time.
+    monkeypatch.setattr("app.backup.time.sleep", lambda _s: None)
+
+    # Pre-create the base filename and two suffix attempts.
+    (backups_dir / "x_growth_2026-05-21_210000.db").write_bytes(b"")
+    (backups_dir / "x_growth_2026-05-21_210000-1.db").write_bytes(b"")
+    (backups_dir / "x_growth_2026-05-21_210000-2.db").write_bytes(b"")
+
+    target = _pick_target_path(backups_dir)
+
+    assert target.name == "x_growth_2026-05-21_210000-3.db", (
+        f"Expected suffix fallback to -3; got {target.name}"
+    )
+    assert not target.exists(), "Picker must return a not-yet-existing path."
 
 
 def test_retention_zero_keeps_the_freshly_created_backup(
