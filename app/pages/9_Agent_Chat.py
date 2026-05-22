@@ -421,21 +421,19 @@ def _render_publish_modal(conn) -> None:
 
     # Phase 5.8 / §28.15 — snapshot the at-open hash so the rerun loop
     # can detect "Daniel edited after open" and surface the banner.
-    # Snapshot lives in st.session_state, keyed per post_id, so the
-    # rerun cycle is idempotent (snapshot only on first render after
-    # _open_publish_modal flipped the session_state field).
+    # P58R-8: do NOT pre-populate the widget's session_state key —
+    # Streamlit warns when the same key is set externally before the
+    # widget is instantiated, and the pre-fill shadowed newer
+    # modal["text"] on re-open. Use `value=` on first render instead.
     post_id = modal["post_id"]
     hash_key = f"modal_hash_{post_id}"
     text_key = f"modal_text_{post_id}"
     if hash_key not in st.session_state:
         st.session_state[hash_key] = confirmation.hash_draft_text(modal["text"])
-    # Pre-fill the bound text area with the prior modal text on first open,
-    # or with whatever the user has typed on subsequent reruns.
-    if text_key not in st.session_state:
-        st.session_state[text_key] = modal["text"]
 
     edited_text = st.text_area(
         "draft (editable — changes are applied to posts.text on publish)",
+        value=modal["text"] if text_key not in st.session_state else None,
         key=text_key,
         max_chars=280,
         height=140,
