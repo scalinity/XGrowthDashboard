@@ -186,28 +186,26 @@ POSTS_ALLOWLIST: TableAllowlist = {
         "utm_content",
         "utm_term",
         "created_in_app_at",
-        # PHASE 5.5 INSERT HERE — once the publish migration lands, append
-        # the non-sensitive publish-flow columns to default_columns in this
-        # exact order (matching §16 (7)):
-        #     "agent_draft_id",
-        #     "published_to_x_at",
-        #     "publish_method",
-        #     "publish_attempt_count",
+        # Phase 5.5 — non-sensitive publish-flow columns (§16 (7)).
+        "agent_draft_id",
+        "published_to_x_at",
+        "publish_method",
+        "publish_attempt_count",
         # PHASE 5.6 INSERT HERE — once Reply Target Discovery lands, append
         # the non-sensitive reply-target columns:
         #     "in_reply_to_reply_target_id",
         #     "reply_intent",
     ],
     "opt_in_columns": [
-        # PHASE 5.5 INSERT HERE — opt-in only because the join leaks chat
-        # content from agent_messages (§18 rule 18):
-        #     "published_via_agent_message_id",
+        # Phase 5.5 — opt-in because joining to agent_messages would leak
+        # chat content (§18 rule 18). FK only; no chat text exported here.
+        "published_via_agent_message_id",
     ],
     "excluded_columns": [
-        # PHASE 5.5 INSERT HERE — never exported under any flag because the
-        # column may contain X API diagnostic strings / credential-adjacent
-        # error text (§16 (7), §18 rule 18):
-        #     "publish_last_error",
+        # Phase 5.5 — NEVER exported under any flag. May contain X API
+        # diagnostic strings / credential-adjacent error text from
+        # publish_post_to_x failure paths (§16 (7), §18 rule 18).
+        "publish_last_error",
     ],
 }
 
@@ -465,6 +463,153 @@ EXPERIMENTS_ALLOWLIST: TableAllowlist = {
 
 
 # ---------------------------------------------------------------------------
+# Phase 5.5 — Growth Agent tables.
+#
+# Agent tables are NOT in the §16 default-export set because most rows
+# carry conversational content (`agent_messages.content`, `agent_drafts.
+# text`) that is high-volume + free-text. Daniel's audit-export action
+# in §16 (8) calls these allowlists explicitly when needed; the CSV
+# exporter rejects them otherwise.
+#
+# A recurring rule: `agent_tool_calls.arguments_json` and `.result_json`
+# are NEVER on default_columns or opt_in_columns. Those blobs may
+# contain quoted X API payloads, in-flight error stacks, and (pre-
+# redaction) confirmation tokens for publish tools. The JSON dump path
+# is the only way to export them, and it runs through the existing
+# secret-redaction in app/exports/json_exporter.py.
+# ---------------------------------------------------------------------------
+
+AGENT_CONVERSATIONS_ALLOWLIST: TableAllowlist = {
+    "default_columns": [
+        "id",
+        "started_at_utc",
+        "last_message_at_utc",
+        "title",
+        "context_seed",
+        "status",
+        "message_count",
+        "total_input_tokens",
+        "total_output_tokens",
+        "estimated_cost_usd",
+        "model_default",
+        "created_at",
+    ],
+    "opt_in_columns": [],
+    "excluded_columns": [],
+}
+
+AGENT_MESSAGES_ALLOWLIST: TableAllowlist = {
+    "default_columns": [
+        "id",
+        "conversation_id",
+        "role",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "resulted_in_published_post_id",
+        "created_at_utc",
+    ],
+    "opt_in_columns": [
+        # Free-text chat content. Opt-in only because Daniel may not want
+        # entire conversations leaving the local DB during a normal export.
+        "content",
+        "tool_calls_json",
+        "tool_call_id",
+        "rate_snapshot_json",
+    ],
+    "excluded_columns": [],
+}
+
+AGENT_TOOL_CALLS_ALLOWLIST: TableAllowlist = {
+    "default_columns": [
+        "id",
+        "message_id",
+        "tool_name",
+        "redacted_arguments",
+        "status",
+        "duration_ms",
+        "cost_input_tokens",
+        "cost_output_tokens",
+        "cost_usd",
+        "created_at_utc",
+    ],
+    "opt_in_columns": [
+        "notes",
+    ],
+    "excluded_columns": [
+        # arguments_json may carry pre-redaction confirmation_token strings
+        # for publish tools (the redaction is defense in depth, not the only
+        # gate — never export the raw JSON via CSV). result_json may
+        # contain X API responses with credential-adjacent metadata.
+        # error_message may include stack traces.
+        "arguments_json",
+        "result_json",
+        "error_message",
+    ],
+}
+
+AGENT_TARGET_ACCOUNTS_ALLOWLIST: TableAllowlist = {
+    "default_columns": [
+        "id",
+        "x_handle",
+        "display_name",
+        "notes",
+        "lane",
+        "priority",
+        "last_engaged_at",
+        "is_active",
+        "created_at",
+    ],
+    "opt_in_columns": [],
+    "excluded_columns": [],
+}
+
+VOICE_SAMPLES_ALLOWLIST: TableAllowlist = {
+    "default_columns": [
+        "id",
+        "post_id",
+        "text",
+        "context_note",
+        "pillar",
+        "is_active",
+        "priority",
+        "added_at_utc",
+        "last_used_at_utc",
+    ],
+    "opt_in_columns": [],
+    "excluded_columns": [],
+}
+
+AGENT_DRAFTS_ALLOWLIST: TableAllowlist = {
+    "default_columns": [
+        "id",
+        "created_at",
+        "session_id",
+        "conversation_id",
+        "draft_kind",
+        "pillar",
+        "audience",
+        "cta",
+        "hypothesis_id",
+        "target_post_url",
+        "iwh_attempt_index",
+        "status",
+        "final_post_id",
+        "revision_of",
+    ],
+    "opt_in_columns": [
+        # Free-text draft content. Same reasoning as agent_messages.content.
+        "text",
+        "target_post_text",
+        "agent_reasoning",
+        "voice_self_score",
+        "user_feedback",
+    ],
+    "excluded_columns": [],
+}
+
+
+# ---------------------------------------------------------------------------
 # Registry. Keys are the CSV-export table names accepted by
 # ``export_table_to_csv(table_name, ...)``. Adding a new table to MVP
 # scope requires adding it here AND extending tests/test_exports.py.
@@ -473,6 +618,10 @@ EXPERIMENTS_ALLOWLIST: TableAllowlist = {
 # ``schema_migrations`` are intentionally NOT in this registry — they are
 # either covered by the JSON dump (raw_api_responses) or operational
 # bookkeeping with no offline-analysis value.
+#
+# Phase 5.5 agent tables are registered so the audit-export action in
+# §16 (8) can call ``export_table_to_csv("agent_messages", ..., include_
+# opt_in=True)`` etc. when Daniel explicitly opts in.
 # ---------------------------------------------------------------------------
 ALLOWLISTS: dict[str, TableAllowlist] = {
     "account_snapshots": ACCOUNT_SNAPSHOTS_ALLOWLIST,
@@ -486,6 +635,12 @@ ALLOWLISTS: dict[str, TableAllowlist] = {
     "milestones": MILESTONES_ALLOWLIST,
     "weekly_reviews": WEEKLY_REVIEWS_ALLOWLIST,
     "experiments": EXPERIMENTS_ALLOWLIST,
+    "agent_conversations": AGENT_CONVERSATIONS_ALLOWLIST,
+    "agent_messages": AGENT_MESSAGES_ALLOWLIST,
+    "agent_tool_calls": AGENT_TOOL_CALLS_ALLOWLIST,
+    "agent_target_accounts": AGENT_TARGET_ACCOUNTS_ALLOWLIST,
+    "voice_samples": VOICE_SAMPLES_ALLOWLIST,
+    "agent_drafts": AGENT_DRAFTS_ALLOWLIST,
 }
 
 
