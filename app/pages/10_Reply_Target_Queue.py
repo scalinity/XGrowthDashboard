@@ -108,8 +108,16 @@ def _query_rows(
         sql += " AND recommended_action_label = ?"
         params.append(recommended_action)
     if author:
-        sql += " AND target_author_handle LIKE ?"
-        params.append(f"%{author.strip().lstrip('@')}%")
+        # /review-2 🟡 #6 — user-typed `%` and `_` would otherwise become LIKE
+        # wildcards (`100_users` matches `100Xusers`). Escape them. The value
+        # is already a bind parameter, so this is a UX surprise, not SQL
+        # injection.
+        raw = author.strip().lstrip("@")
+        escaped = (
+            raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        sql += r" AND target_author_handle LIKE ? ESCAPE '\'"
+        params.append(f"%{escaped}%")
     sql += " ORDER BY COALESCE(recommended_action_score, -1) DESC, last_checked_at_utc DESC"
     return conn.execute(sql, params).fetchall()
 
