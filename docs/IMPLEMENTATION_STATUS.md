@@ -669,6 +669,20 @@ the established §28.5 / §28.10 / §28.2 mechanisms.
   exists but the LLM second pass isn't implemented.** The
   spec marks the augmentation as opt-in; the schema slot is
   there for V1.X.
+* **`topic_fit_score` returns 2 (not None) when no pillar is
+  declared (P58R-21 deliberation).** The /review-2 reviewer
+  suggested mirroring the `cta_strength_score=None` pattern so
+  the composite-label derivation skips the dimension for
+  unpillared replies. Declining for Phase 5.8: §10
+  `prepublish_scores.topic_fit_score` is `INTEGER NOT NULL`,
+  so honoring the suggestion would require a §10 spec
+  amendment + a new migration to drop the NOT NULL +
+  `prepublish_scorer.py` return-type change + test updates.
+  The current behavior modestly inflates composite labels for
+  unpillared replies (one dimension out of nine), which the
+  scorer's calibration discipline (per-50-shipped recalibration
+  per §28.11) will catch if it materially distorts the labels.
+  Revisit when calibration data shows the conflation matters.
 
 ## Lessons (from this phase)
 
