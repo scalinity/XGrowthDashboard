@@ -492,8 +492,15 @@ def process(
 
     caller = model_caller or _default_caller
     tokens_used = 0
+    # P510R-26: track whether the API call itself was attempted. If a
+    # BrainDumpError fires BEFORE tokens are counted, the call never
+    # happened (missing API key, prompt-load failure, etc.) — persist
+    # model_used=None on the row so the audit trail distinguishes
+    # "never attempted" from "attempted, parse failed".
+    call_attempted = False
     try:
         response_text, in_tok, out_tok = caller(system_prompt, user_message, model)
+        call_attempted = True
         tokens_used = in_tok + out_tok
         questions, candidates = parse_response(
             response_text, max_candidates=max_candidates
@@ -508,7 +515,7 @@ def process(
                 conn,
                 brain_dump_id,
                 error_message=str(exc),
-                model_used=model,
+                model_used=model if call_attempted else None,
                 tokens_used=tokens_used,
             )
         except Exception:  # noqa: BLE001
@@ -520,7 +527,7 @@ def process(
                 conn,
                 brain_dump_id,
                 error_message=f"{type(exc).__name__}: {exc}",
-                model_used=model,
+                model_used=model if call_attempted else None,
                 tokens_used=tokens_used,
             )
         except Exception:  # noqa: BLE001

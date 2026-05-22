@@ -267,6 +267,26 @@ def test_process_unknown_id_raises(db_conn: sqlite3.Connection) -> None:
         _brain_dump.process(db_conn, 999999)
 
 
+def test_process_pre_call_failure_persists_model_used_null(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P510R-26: failure BEFORE the caller runs should persist model_used=NULL."""
+
+    def precall_failure(_sys: str, _user: str, _model: str) -> tuple[str, int, int]:
+        raise _brain_dump.BrainDumpError("ANTHROPIC_API_KEY is not set")
+
+    dump_id = _brain_dump.create_dump(db_conn, raw_text="pre-call test")
+    with pytest.raises(_brain_dump.BrainDumpError):
+        _brain_dump.process(db_conn, dump_id, model_caller=precall_failure)
+
+    model_used = db_conn.execute(
+        "SELECT model_used FROM brain_dumps WHERE id = ?", (dump_id,)
+    ).fetchone()[0]
+    # The call was never attempted, so model_used should be NULL,
+    # not the model name string.
+    assert model_used is None
+
+
 # ---------------------------------------------------------------------------
 # list_dumps + get_dump — UI reads.
 # ---------------------------------------------------------------------------
