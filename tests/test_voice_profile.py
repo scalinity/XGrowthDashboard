@@ -179,6 +179,59 @@ def test_generate_atomic_activation_supersedes_prior(db_conn: sqlite3.Connection
     assert prior_row["superseded_by_profile_id"] == second.id
 
 
+def test_generate_atomic_rollback_keeps_prior_active(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Regression for P58R-1: under the project's autocommit connections,
+    `with conn:` was a no-op so a mid-transaction INSERT failure left the
+    prior row flipped to is_active=0 with no new active row.
+
+    Simulate by installing a TEMP trigger that raises on the INSERT after
+    the deactivate has already been issued. With the transaction() helper,
+    the deactivate must roll back; without it, the bug reproduces.
+    """
+    _seed_posts(db_conn, count=12)
+    first = voice_profile.generate(
+        db_conn,
+        window_days=90,
+        model_caller=_make_caller(_ok_profile_json(self_description="Original.")),
+    )
+    assert first.is_active is True
+
+    # Magic-value trigger: fires on a specific source_post_count to keep
+    # the test deterministic. 12 source posts → trigger raises.
+    db_conn.execute(
+        """
+        CREATE TEMP TRIGGER simulate_voice_profile_insert_failure
+        BEFORE INSERT ON voice_profiles
+        WHEN NEW.source_post_count = 12 AND NEW.model_used = 'force-failure-marker'
+        BEGIN
+          SELECT RAISE(ABORT, 'simulated mid-tx failure');
+        END;
+        """
+    )
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            voice_profile.generate(
+                db_conn,
+                window_days=90,
+                model="force-failure-marker",
+                model_caller=_make_caller(
+                    _ok_profile_json(self_description="Second attempt.")
+                ),
+            )
+    finally:
+        db_conn.execute("DROP TRIGGER simulate_voice_profile_insert_failure")
+
+    # The prior row must still be active — the rollback restored it.
+    active_count = db_conn.execute(
+        "SELECT COUNT(*) FROM voice_profiles WHERE is_active = 1"
+    ).fetchone()[0]
+    assert active_count == 1, "rollback failed; at-most-one-active invariant violated"
+    active = voice_profile.get_active(db_conn)
+    assert active is not None and active.id == first.id
+
+
 def test_generate_leaves_prior_active_on_validation_failure(
     db_conn: sqlite3.Connection,
 ) -> None:

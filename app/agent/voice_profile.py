@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from app.db import transaction
+
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 VOICE_PROFILE_PROMPT_PATH: Path = PROJECT_ROOT / "config" / "voice_profile_prompt.md"
 
@@ -355,15 +357,18 @@ def generate(
         ) from exc
     validate_profile_json(payload)
 
-    # Atomic activation. Wrap in BEGIN/COMMIT so a failed insert leaves
-    # the prior active row alone.
+    # Atomic activation. Project connections run with isolation_level=None
+    # (autocommit), so `with conn:` does NOT begin a transaction — each
+    # statement would autocommit independently and a mid-flight INSERT
+    # failure would leave the prior row flipped to is_active=0 with no
+    # new active row, violating the at-most-one-active invariant. Use
+    # the project's transaction() helper which issues BEGIN IMMEDIATE.
     prior_id_row = conn.execute(
         "SELECT id FROM voice_profiles WHERE is_active = 1 LIMIT 1"
     ).fetchone()
     prior_id = int(prior_id_row["id"]) if prior_id_row is not None else None
 
-    # SQLite implicit-tx is fine; explicit savepoint is overkill for two writes.
-    with conn:
+    with transaction(conn):
         if prior_id is not None:
             conn.execute(
                 "UPDATE voice_profiles SET is_active = 0 WHERE id = ?",
