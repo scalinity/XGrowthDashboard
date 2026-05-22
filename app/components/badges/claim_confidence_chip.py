@@ -1,4 +1,4 @@
-"""Confidence-label chip (§28.14) — distinct from confidence_label.py.
+"""Claim-confidence chip (§28.14) — distinct from confidence_label.py.
 
 `confidence_label.py` renders the §11 lane-performance confidence badge
 (insufficient / directional / tentative / confident — sample-size

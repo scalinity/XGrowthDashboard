@@ -1,6 +1,6 @@
 """Confidence + sample-size badges used by the lane-performance grid (§14.4)."""
 
-from app.components.badges.confidence_chip import (
+from app.components.badges.claim_confidence_chip import (
     CONFIDENCE_CHIP_PRESENTATION,
     claim_confidence_chip,
 )
