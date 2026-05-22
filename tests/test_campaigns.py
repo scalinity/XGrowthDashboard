@@ -215,6 +215,68 @@ def test_complete_campaign_blocks_missing_actuals(
         )
 
 
+def test_p511r7_complete_falls_back_to_stored_actual(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P511R-7: when the kwarg doesn't carry an actual for a metric BUT
+    the stored success_criteria_json already has one, completion proceeds.
+    Forcing duplicate input every time would be a UX foot-gun."""
+    cid = _make_campaign(db_conn)
+    _c.activate_campaign(db_conn, campaign_id=cid)
+    # Manually pre-populate the stored actual for the distribution
+    # metric — simulates a partial save / earlier draft of the retro.
+    import json as _json
+    sc = _json.loads(
+        db_conn.execute(
+            "SELECT success_criteria_json FROM campaigns WHERE id = ?", (cid,)
+        ).fetchone()[0]
+    )
+    sc["distribution"][0]["actual"] = "12000"
+    db_conn.execute(
+        "UPDATE campaigns SET success_criteria_json = ? WHERE id = ?",
+        (_json.dumps(sc), cid),
+    )
+    # Now complete with kwarg actuals ONLY for the validation stream.
+    _c.complete_campaign(
+        db_conn,
+        campaign_id=cid,
+        success_criteria_actuals={
+            "distribution": [],  # empty — must fall back to stored
+            "validation": [{"metric": "downloads", "actual": "7"}],
+        },
+        lesson="L",
+        counterfactual_note="C",
+    )
+    camp = _c.get_campaign(db_conn, campaign_id=cid)
+    assert camp.status == "completed"
+    by_metric = {
+        e["metric"]: e["actual"]
+        for stream in ("distribution", "validation")
+        for e in camp.success_criteria[stream]
+    }
+    assert by_metric["impressions"] == "12000"  # stored value preserved
+    assert by_metric["downloads"] == "7"
+
+
+def test_p511r8_complete_handles_none_actuals_gracefully(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P511R-8: success_criteria_actuals=None must coerce to {} instead
+    of raising AttributeError on .get(). The function still raises
+    RetroIncompleteError because no actuals are present, but as a
+    typed error the caller can catch — not an AttributeError."""
+    cid = _make_campaign(db_conn)
+    _c.activate_campaign(db_conn, campaign_id=cid)
+    with pytest.raises(_c.RetroIncompleteError, match="missing actuals"):
+        _c.complete_campaign(
+            db_conn,
+            campaign_id=cid,
+            success_criteria_actuals=None,  # was AttributeError; now typed
+            lesson="L",
+            counterfactual_note="C",
+        )
+
+
 def test_planning_can_skip_active_to_abandoned(
     db_conn: sqlite3.Connection,
 ) -> None:

@@ -402,7 +402,7 @@ def complete_campaign(
     conn: sqlite3.Connection,
     *,
     campaign_id: int,
-    success_criteria_actuals: Mapping[str, Any],
+    success_criteria_actuals: Mapping[str, Any] | None,
     lesson: str,
     counterfactual_note: str,
     lesson_lands_in: str | None = None,
@@ -411,7 +411,14 @@ def complete_campaign(
     counterfactual_note are present (§28.26 retro discipline).
 
     ``success_criteria_actuals`` mirrors ``success_criteria`` shape but
-    populates each entry's ``actual`` field. Missing entries raise.
+    populates each entry's ``actual`` field. P511R-7: when an
+    ``actual`` is missing from the kwarg, fall back to whatever's
+    already stored on the campaign row before declaring it missing —
+    so a partially-filled retro form that re-submits without
+    re-entering already-saved values still completes. P511R-8:
+    ``success_criteria_actuals=None`` is coerced to ``{}`` at the
+    top rather than raising AttributeError on ``.get()``.
+
     ``lesson_lands_in`` is informational only (free-text label like
     "weekly review 2026-05-25" or "monthly review 2026-05") that gets
     audit-logged so Daniel can trace where each retro lesson landed —
@@ -430,6 +437,9 @@ def complete_campaign(
             "counterfactual_note is required to complete a campaign."
         )
 
+    # P511R-8: coerce None → {} so the .get() calls below don't raise.
+    actuals_payload: Mapping[str, Any] = success_criteria_actuals or {}
+
     # Merge actuals into the stored criteria — every metric must carry
     # a non-null actual or completion is blocked.
     sc = dict(camp.success_criteria)
@@ -437,8 +447,8 @@ def complete_campaign(
         raise RetroIncompleteError(
             "campaign has malformed success_criteria_json; cannot complete."
         )
-    actuals_dist = success_criteria_actuals.get("distribution") or []
-    actuals_val = success_criteria_actuals.get("validation") or []
+    actuals_dist = actuals_payload.get("distribution") or []
+    actuals_val = actuals_payload.get("validation") or []
     actuals_by_metric: dict[str, str] = {}
     for stream_actuals in (actuals_dist, actuals_val):
         for entry in stream_actuals:
@@ -447,14 +457,23 @@ def complete_campaign(
             if metric and actual is not None and str(actual).strip():
                 actuals_by_metric[str(metric)] = str(actual)
 
+    # P511R-7: missing-from-kwarg → fall back to whatever's stored on
+    # the row. Only raise when BOTH the kwarg AND the stored value are
+    # absent. The §28.26 invariant ("every criterion needs an actual
+    # to complete") still holds — just sourced more flexibly so partial
+    # form re-submits don't blow away previously-saved values.
     missing: list[str] = []
     for stream in ("distribution", "validation"):
         for entry in sc[stream]:
             metric_name = entry.get("metric")
-            if metric_name not in actuals_by_metric:
-                missing.append(f"{stream}:{metric_name}")
-            else:
+            if metric_name in actuals_by_metric:
                 entry["actual"] = actuals_by_metric[metric_name]
+                continue
+            stored = entry.get("actual")
+            if stored is not None and str(stored).strip():
+                # Re-affirm the stored value — leave entry["actual"] alone.
+                continue
+            missing.append(f"{stream}:{metric_name}")
     if missing:
         raise RetroIncompleteError(
             f"missing actuals for success criteria: {missing}"
