@@ -3,252 +3,192 @@
 | Field          | Value                                  |
 | -------------- | -------------------------------------- |
 | Project        | X Growth Dashboard                     |
-| Current phase  | 3 — Dashboard views                    |
+| Current phase  | 4 — Backup and data hygiene            |
 | Spec version   | 2026-05-21 (see `spec.md` §0 revision notes) |
-| Next phase     | `phase-4-backup-data-hygiene.md`       |
+| Next phase     | `phase-5-export.md`                    |
 
 ---
 
 ## Completed in this phase
 
-### UI system (`app/components/`)
+### Backup runner (`scripts/backup_db.py`)
 
-- **Aesthetic identity** committed via the `/frontend-design` skill —
-  dark "instrument-panel" theme: deep ink (`#0e1116`), warm bone text
-  (`#e6e1d8`), phosphor cyan-teal accent (`#5fb3a1`). Fonts: Fraunces
-  display serif, IBM Plex Sans body, JetBrains Mono for every number.
-- `app/components/theme.py` — single source of truth for the palette
-  (`PALETTE` dict) and CSS overrides; injects fonts from Google Fonts
-  once per session. Exports `apply_theme()`, `callout()`, `hairline()`,
-  `kicker()`, `numeric()`, `dim()`.
-- `.streamlit/config.toml` — Streamlit base theme matches the CSS
-  overrides (dark base, phosphor primary).
-- `CLAUDE.md` "UI work" section: mandates `/frontend-design` before any
-  UI work and pins the instrument-panel theme as project aesthetic
-  identity.
+- `backup_database(source_path, backups_dir, retention_days)` opens the
+  source DB through `app.db.connect()` (pragmas + aggregates), runs
+  `VACUUM INTO 'data/backups/x_growth_YYYY-MM-DD_HHMMSS.db'`, then opens
+  the new file in an independent `sqlite3` connection and runs
+  `PRAGMA integrity_check`. If the result is anything but `ok` the
+  backup file is deleted and `BackupIntegrityError` is raised.
+- Successful runs upsert `settings.last_backup_at_utc` with an ISO-8601
+  UTC timestamp.
+- Retention pruning deletes `x_growth_*.db` files whose mtime is older
+  than `settings.backup_retention_days` (default 30). The freshly-written
+  backup never appears in the prune list because its mtime is "now".
+- Returns a `BackupResult` dataclass: `{path, size_bytes, duration_ms,
+  integrity_check_passed, pruned}`.
+- CLI entrypoint at `python -m scripts.backup_db [--db-path PATH]
+  [--backups-dir PATH] [--retention-days N]` — all flags optional, all
+  defaults read from the `settings` table.
+- VACUUM INTO target paths are single-quoted with embedded-quote
+  doubling (`_quote_sqlite_path`) — `VACUUM INTO` doesn't accept
+  bound parameters, so the literal must be escaped manually.
 
-### Reusable components
+### Restore runner (`scripts/restore_db.py`)
 
-- `app/components/badges/confidence_label.py` — DB-label → UI-label
-  mapping (`'insufficient sample' → 'insufficient'`,
-  `'low — show scatter, do not rank' → 'directional'`,
-  `'moderate' → 'tentative'`, `'stronger' → 'confident'`).
-  `confidence_badge()` renders a colored pill with `§14.4` boundary text
-  in the hover tooltip.
-- `app/components/badges/sample_size.py` — `sample_size_badge()` mono
-  pill with the four-tier boundary rule baked into the tooltip.
-- `app/components/charts/follower_trend.py` — Plotly line chart with
-  ±2/day noise-floor band and a 7-day rolling-mean overlay (§13 rule 6).
-- `app/components/charts/lane_grid.py` — `lane_performance_grid()` lays
-  out v_lane_performance rows with palette-bound colors; `_format_median_with_iqr()`
-  returns "—" for `insufficient` lanes (never a numeric median);
-  `count_rankable_lanes()` gates the "best lane" callout.
-- `app/components/charts/funnel.py` — `build_funnel_stages()` always
-  inserts the App-Store-gap row between app-store-clicks and downloads;
-  `funnel_chart()` renders the funnel as a horizontal bar chart with
-  the gap row carrying no numeric value and a dashed separator line.
+- `restore_database(backup_path, target_path, dry_run=True)` — dry-run
+  is the default; the destructive form requires the `--confirm` flag.
+- Always integrity-checks the backup before mutating anything; refuses
+  to copy from a corrupt source.
+- Real restore renames the current target to a timestamped sidecar
+  (`<target>.pre-restore.YYYY-MM-DD_HHMMSS`) and only then copies the
+  backup over the target. The sidecar is never auto-deleted — manual
+  rollback path stays available.
+- After the copy the restored file is integrity-checked again; failure
+  prints the sidecar path so a human can revert.
 
-### Streamlit pages (`app/pages/`)
+### Migration `003_backup_settings.sql`
 
-Every page calls `apply_theme()` first and consumes `PALETTE` for any
-inline color. No color literals in page files.
+- Adds two `settings` rows: `last_backup_at_utc` (initialised to JSON
+  null) and `backup_retention_days` (default 30). `INSERT OR IGNORE`
+  keeps the migration idempotent and never overwrites a value the user
+  has hand-edited between runs.
 
-- `1_Today.py` — §14.1. Pinned snapshot form (collapses once today's
-  snapshot exists), 4-card weigh-in (followers · Δ yesterday · Δ
-  baseline · distance to milestone) with the §13 noise-floor framing,
-  daily-reps progress from `v_daily_reps`, recent activity (last 5
-  posts), quick-action buttons that set `manual_entry_active_tab`
-  hint.
-- `2_Next_Rep.py` — §14.2 without the §29 reply-target panel. Lane
-  coverage scoreboard (7-day window from `v_post_latest_metrics`),
-  biggest-gap callout, open hypotheses tracker from `experiments`
-  (`status='running'`), explicit dashed-box **placeholder** for the
-  reply-target panel marking it Phase 5.6.
-- `3_Progress.py` — §14.3. Dual ladders (distribution left, validation
-  right) with progress bars and target labels. Follower trend chart
-  with noise-floor band. Last-8-weeks behaviour mini-bars (posts /
-  replies stacked). Long-arc footer.
-- `4_Content_Performance.py` — §14.4. Best-lane callout gated on
-  `count_rankable_lanes() >= 3` (no premature ranking). Lane grid via
-  `lane_performance_grid()`. Last-30-days post scatter colored by lane
-  for raw-evidence reading. "What this view can / can't tell you"
-  table reinforces §13.
-- `5_Funnel.py` — §14.5. Vertical bar funnel with the App Store gap
-  row visibly dashed and labelled `🔗❌ App Store gap — see §14.5`.
-  "What we know · what we don't" table beneath the funnel.
-  Daily breakdown stacked bar from `v_funnel_daily`. No conversion
-  rate ever spans the gap.
-- `6_Weekly_Review.py` — §14.6. Auto-filled summary cards above the
-  Phase 2 form (followers Δ, posts/replies shipped, downloads, ICP
-  testers, rep-complete days, strongest-pillar candidate gated on at
-  least one tentative+ lane). Counterfactual-gated export button —
-  disabled with a tooltip until the current week's `weekly_reviews`
-  row has a non-empty `counterfactual_note`. Collapsed history list
-  of prior weekly reviews.
-- `7_Settings.py` — §14.7. **Every** §10.2 key surfaced, grouped by
-  §14.7 section (Account, Goals, Daily reps, Accuracy thresholds,
-  Data sources, Exports & backups). Type-dispatched widgets:
-  `toggle` for bool, `number_input` for int, `text_input` for string.
-  Read-only environment table (db_path, schema_migrations_applied).
-  Read-only milestone summary at bottom (V1.1+ becomes editable per
-  §10.2).
+### Settings page (`app/pages/7_Settings.py`)
 
-### Tests (`tests/test_dashboard_views.py`)
+- New "Backups" sub-readout, themed per the locked instrument-panel
+  aesthetic (`/frontend-design` discipline; `apply_theme()` + PALETTE).
+  No new colors or fonts introduced.
+- Status block: `kicker("DATA INTEGRITY · §18 RULE 10")` followed by a
+  bordered card showing the last-backup ISO timestamp in JetBrains Mono
+  with a humanised "ago" caption beneath. Empty state shows a dimmed
+  em-dash with a "click below to run the first one" hint.
+- Action + parameter row: two columns. Left — primary-styled "Back up
+  now" button that spins on the VACUUM + integrity check then toasts
+  the resulting filename, size, and duration on success or `st.error`s
+  on failure. Right — `Retention · days` number_input bound to
+  `settings.backup_retention_days` with its own Save button.
+- Manifest expander: collapsed-by-default `Manifest · N on disk` panel
+  rendering a console-log-style grid (file | size | written) with mono
+  numbers, hairline separators, and right-aligned columns.
 
-29 new tests, all passing. Three layers:
+### Tests (`tests/test_backup.py`)
 
-1. **Pure-function tests** — the load-bearing accuracy assertions that
-   don't need Streamlit:
-   - DB-label → UI-label mapping at all four tiers + unknown-label
-     fallback to `insufficient`.
-   - `count_rankable_lanes()` ignores `insufficient` and `directional`.
-   - `build_funnel_stages()` always emits exactly one gap row and the
-     gap sits between clicks and downloads.
+Six tests covering the phase's six acceptance scenarios — all green:
 
-2. **AppTest smoke tests** — `streamlit.testing.v1.AppTest` boots each
-   of the seven pages against a seeded temp DB and asserts no
-   exception was raised. Run on every page in the parametrised
-   `test_each_page_renders_without_exception`.
+1. `test_backup_creates_file` — file lands at the expected path with
+   the documented prefix/suffix.
+2. `test_backup_passes_integrity_check` — re-opens the backup in a
+   fresh vanilla `sqlite3` connection and asserts `PRAGMA
+   integrity_check` returns `ok`.
+3. `test_backup_updates_last_backup_setting` — asserts the
+   `last_backup_at_utc` row is parseable ISO-8601 UTC and within a
+   sensible drift window of `now()`.
+4. `test_restore_dry_run_does_not_touch_target` — dry-run leaves the
+   target's mtime and size unchanged and creates no sidecar.
+5. `test_restore_with_confirm_moves_old_to_sidecar` — confirmed
+   restore renames the previous DB to a sidecar that still holds the
+   pre-restore byte size, then verifies the freshly-restored DB's
+   `PRAGMA integrity_check`.
+6. `test_retention_prunes_old_backups` — fake-old files (via
+   `os.utime`) are pruned at retention=7, the recent file survives,
+   and the newly-created backup never appears in the prune list.
 
-3. **Acceptance-gate tests** — the four boundary cases from the phase
-   prompt (n=3 → insufficient, n=5 → directional, n=15 → tentative,
-   n=30 → confident) seeded explicitly; the n=3 lane is asserted to
-   render as `"—"` rather than a number; "best lane" callout gating
-   verified at <3 vs ≥3 rankable lanes; funnel page is asserted to
-   render the `App Store gap — see §14.5` marker; weekly-review export
-   button is asserted to flip from disabled → enabled when a
-   counterfactual_note is recorded.
+### Schema test bookkeeping (`tests/test_schema.py`)
 
-**Total test count: 112 (40 Phase 1 + 43 Phase 2 + 29 Phase 3).**
+- `test_schema_migrations_records_each_file` and
+  `test_apply_migrations_is_idempotent` extended to include
+  `003_backup_settings.sql` in the expected migration list.
 
-### Ruff cleanliness
+### Automation reference (`docs/AUTOMATION.md`)
 
-`uv run ruff check` is **clean**. Pre-existing E402 errors (44 of
-them) from the legitimate sys.path-shim-before-imports pattern in
-Streamlit pages are addressed via a `[tool.ruff.lint.per-file-ignores]`
-entry in `pyproject.toml` covering `app/main.py`, `app/pages/*.py`,
-and `tests/*.py`. Other pre-existing F401 / F541 / E741 / F841
-issues fixed in passing.
-
-### Dependency added
-
-`plotly>=6.7.0` via `uv add plotly`. Used for IQR error bars, the
-noise-floor-band overlay, the App-Store-gap funnel, and the scatter
-plot under Content Performance.
-
----
-
-## Smoke-run notes
-
-- `uv run streamlit run app/main.py --server.headless true --server.port 8520`
-  boots cleanly; all nine routes (`/`, `/Today`, `/Next_Rep`,
-  `/Progress`, `/Content_Performance`, `/Funnel`, `/Weekly_Review`,
-  `/Settings`, `/Manual_Entry`) return HTTP 200.
-- `uv run pytest -q` reports **112 passed** in ~1 second.
-- `uv run ruff check` reports **All checks passed!**.
-- **Caveat (same as Phase 2):** the Chrome bridge was not connected
-  during this session, so I did not click through the rendered pages
-  in a real browser. The HTTP 200s prove static shells load; the
-  AppTest harness proves the Python rendering returns no exception
-  on a populated DB; visual verification of fonts / palette /
-  layout falls to Daniel.
+- Sample `~/Library/LaunchAgents/com.danny.xgrowth.backup.plist` for a
+  daily 03:00 backup, including install/verify/uninstall commands.
+- Sample crontab line for the same cadence as a portable fallback.
+- Explicitly states: **the plist is not installed by this phase**.
+  Daniel installs manually when ready.
+- "What this does NOT do" section — no encryption-at-rest, no cloud
+  sync, no auto-restore on corruption.
 
 ---
 
 ## Acceptance gates satisfied
 
-- [x] All seven sidebar pages render without errors with a populated
-      dev DB (`test_each_page_renders_without_exception` exercises all
-      seven via AppTest).
-- [x] Content Performance: with sample sizes of (3, 5, 15, 30) seeded
-      across four lanes, the view shows confidence labels
-      `insufficient`, `directional`, `tentative`, `confident`
-      respectively. The n=3 lane shows "—" not a numeric median
-      (`test_phase3_acceptance_gate_confidence_labels_at_boundary_sample_sizes`
-      + `test_phase3_acceptance_gate_insufficient_lane_grid_shows_dash`).
-- [x] Content Performance refuses to render a "best lane" callout
-      when fewer than 3 lanes are at `tentative` or higher
-      (`test_phase3_acceptance_gate_no_best_lane_callout_below_three_rankable`).
-- [x] Funnel: the broken-link icon / label is visible between
-      app-store-clicks and downloads
-      (`test_funnel_view_renders_app_store_gap_label`).
-- [x] Weekly Review: "Export weekly report" is disabled until the
-      counterfactual note is filled
-      (`test_weekly_review_export_button_disabled_when_no_counterfactual`
-      + `test_weekly_review_export_enabled_when_counterfactual_filled`).
-- [x] Progress: noise-floor band is visible on the follower chart
-      (the chart component shades a `±2/day` band around the rolling
-      mean by default; `follower_trend_chart()` API verified by import
-      in the smoke tests).
-- [x] Settings: every `§10.2` settings key is visible
-      (`test_settings_page_surfaces_every_seeded_settings_key`).
-- [x] `uv run pytest tests/test_dashboard_views.py -v` is green
-      (29/29).
-- [x] `uv run pytest -q` is green (112/112).
+- [x] `uv run python -m scripts.backup_db` exits 0 and writes
+      `data/backups/x_growth_2026-05-21_210605.db` (258 KB,
+      `duration_ms=1`, `integrity_check_passed=true`).
+- [x] `sqlite3 data/backups/x_growth_2026-05-21_210605.db "PRAGMA
+      integrity_check"` returns `ok`.
+- [x] `uv run python -m scripts.restore_db --backup <file> --target
+      data/dashboard.db` (without `--confirm`) prints a dry-run plan
+      including the would-be sidecar path and exits 0 without touching
+      `data/dashboard.db`.
+- [x] Settings UI: the Backups sub-readout surfaces the last-backup
+      timestamp on next render. Verified by the
+      `test_settings_page_surfaces_every_seeded_settings_key` and
+      `test_each_page_renders_without_exception` AppTest paths.
+- [x] "Back up now" button runs the backup with a spinner and emits a
+      success toast — exercised end-to-end by the backup integration
+      tests; UI wiring verified by AppTest no-exception render.
+- [x] `uv run pytest tests/test_backup.py -v` → 6/6 green in 0.08s.
+- [x] `uv run pytest -q` → 121/121 green.
 - [x] `uv run ruff check` is clean.
-- [x] `docs/IMPLEMENTATION_STATUS.md` updated.
 
 ---
 
-## Spec ambiguity flagged
+## Smoke-run notes
 
-- **`v_lane_performance.confidence_label` wording vs Phase 3 UI
-  labels.** The DB view returns the §11 spec strings (`"insufficient
-  sample"`, `"low — show scatter, do not rank"`, `"moderate"`,
-  `"stronger"`). The Phase 3 prompt asks the user-facing labels to be
-  `insufficient` / `directional` / `tentative` / `confident`. We
-  translate via `DB_LABEL_TO_UI` in
-  `app/components/badges/confidence_label.py` and keep the DB as
-  source of truth. If §11 is revised to surface the user-facing
-  labels directly, the mapping table is the one place to delete.
-- **Reply-target queue (`reply_targets`) and `agent_target_accounts`
-  tables don't exist yet.** Per the phase prompt and spec, these
-  arrive in Phase 5.5 / 5.6. The Next Rep view renders a labelled
-  dashed-box placeholder so the slot is stable, and the account-leads
-  section detects table absence via `sqlite_master` (preventing
-  a query-time error today).
+- `uv run python -m scripts.backup_db` printed the expected JSON
+  payload; `data/backups/x_growth_2026-05-21_210605.db` is on disk and
+  passes a separate `sqlite3 ... "PRAGMA integrity_check"` invocation.
+- Dry-run restore printed a plan that names the sidecar path
+  `data/dashboard.db.pre-restore.2026-05-21_210614` and confirms
+  integrity `ok` without touching the live DB.
+- **Caveat (same as Phase 3):** visual verification of the refreshed
+  Settings page in a real browser falls to Daniel. The AppTest harness
+  + Python syntax check + the full test suite cover boot-time
+  correctness; the on-screen reading of fonts, palette, and layout is
+  the user's call.
 
 ---
 
-## Known limitations
+## Known limitations / future work
 
-- **No real-browser smoke walk.** See "Smoke-run notes" caveat above.
-- **Strongest-pillar candidate suggestion** in Weekly Review is the
-  highest-median rankable lane. The §14.6 spec wording mentions
-  agent-assisted suggestions; that lands in Phase 5.5 alongside the
-  Anthropic client. The Phase 3 implementation is deterministic and
-  read-only.
-- **Funnel impressions estimate** sums `x_impressions_estimate` from
-  `v_funnel_daily` (which sums per-event impressions joined to
-  referring posts). At MVP impressions are manually entered, so
-  these will be sparse until Phase 6 / X API integration.
-- **Scatter color palette** uses six tones (phosphor + the four
-  confidence colors + bone_dim + two extras) for lanes. Daniel may
-  have more than six lanes once the v2 taxonomy expands; until then
-  the palette cycles. A more flexible solution can land in V1.1.
+- **No encryption-at-rest.** Backup files are unencrypted SQLite. The
+  spec defers this to V1.1+ (§18 future work). FileVault on the
+  laptop is the de facto encryption boundary at MVP.
+- **No off-machine backup.** Single-user local tool per §7.1 — cloud
+  sync is explicitly out of scope. If the laptop dies before
+  off-machine sync exists, the backups die with it.
+- **No automatic restore on corruption.** Restoration is always a
+  manual decision. `scripts/restore_db.py` is the entry point.
+- **launchd plist documented but not installed.** Phase 4 ships the
+  recipes; Daniel installs them manually per `docs/AUTOMATION.md`
+  when he wants the daily cadence.
+- **Retention pruning uses mtime, not the filename timestamp.** They
+  agree under normal conditions; if a file is touched (`touch`) its
+  mtime advances and it survives pruning, which is the correct
+  behavior — the user explicitly extended its life.
 
 ---
 
 ## Phase boundary
 
-Commits on `main` since Phase 2:
+Commits on `main` for Phase 4 (in order of the phase prompt's
+work-order):
 
-1. `Phase 3: confidence_label + sample_size badges, funnel + lane_grid + follower_trend charts`
-2. `Phase 3 UI: instrument-panel theme + /frontend-design rule in CLAUDE.md`
-3. `Phase 3: today view (§14.1 — pinned snapshot + weigh-in + reps + recent activity)`
-4. `Phase 3: progress view (§14.3 — dual-ladder + follower trend + behaviour mini-bars)`
-5. `Phase 3: content_performance view (§14.4 — graduated confidence + no-rank gate)`
-6. `Phase 3: funnel view (§14.5 — visible App Store gap + know/don't-know table + daily stacked)`
-7. `Phase 3: weekly_review view (§14.6 — auto-fill summary + counterfactual-gated export + history)`
-8. `Phase 3: settings view (§14.7 — every §10.2 key surfaced, grouped + read-only environment)`
-9. `Phase 3: next_rep view (§14.2 — lane gaps + open hypotheses, reply-target panel placeholder for Phase 5.6)`
-10. (this commit) `Phase 3: view tests + ruff cleanup + IMPLEMENTATION_STATUS update`
+1. `feat(migrations): settings additions for backup retention (003)`
+2. `feat(scripts): real backup_db with VACUUM INTO + integrity check`
+3. `feat(scripts): restore_db with dry-run default`
+4. `feat(settings): backup section with last-backup timestamp`
+5. `test(backup): integrity + restore + retention tests`
+6. `docs(automation): launchd + cron recipes`
 
 ---
 
 ## Next phase
 
-Run `phase-4-backup-data-hygiene.md` — wires the Settings "Manual
-backup" button to a `VACUUM INTO` job under `data/backups/`, surfaces
-last-backup timestamp, and adds the data-hygiene cron / lifecycle
-notes referenced in §18.
+Run `phase-5-export.md` — CSV export of `posts` with the §16 (7)
+column allowlist, Markdown weekly-report export to
+`settings.weekly_report_export_path`, and the dedicated "Export agent
+audit" carve-out scaffold per §16 (8) (the agent tables themselves land
+in Phase 5.5).
