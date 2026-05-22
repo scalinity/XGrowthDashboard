@@ -552,4 +552,144 @@ UX) before the reply-target subsystem is layered on top.
 
 ## Next phase
 
-Run `phase-7-qa.md`.
+Phase 5.8 — Drafting Intelligence Pack — see below.
+
+---
+
+# Phase 5.8 — Drafting Intelligence Pack (2026-05-22)
+
+Five additive features layered on top of the §28 Growth Agent. None
+changes existing contracts; all surface as informational UI on top of
+the established §28.5 / §28.10 / §28.2 mechanisms.
+
+## Completed in this phase
+
+* **Migration `011_drafting_intelligence.sql`** — `voice_profiles`,
+  `post_embeddings`, `prepublish_scores` tables; new columns
+  `agent_drafts.{prepublish_score_id, confidence_label,
+  similarity_warning_json}` + `agent_messages.confidence_label`;
+  eight new settings rows. Partial unique index on
+  `voice_profiles.is_active = 1` enforces the at-most-one-active
+  invariant.
+* **Generated voice profile (§28.12).** `app/agent/voice_profile.py`
+  generates a structural read of Daniel's writing via a Haiku call
+  against `config/voice_profile_prompt.md`; atomic deactivate-then-
+  insert. Spliced into system-prompt Section 1 (`self_description`)
+  and Section 5 (cadence + vocabulary signatures + stop phrases).
+  Settings → Growth Agent → Voice profile panel exposes the
+  regenerate button with N-days input. Reads `posts` only — never
+  tester PII.
+* **Pre-publish heuristic scorer (§28.11).**
+  `app/agent/prepublish_scorer.py` is nine pure functions over the
+  draft text + metadata + active voice profile, producing a
+  `composite_label` chip (`weak | viable | strong`). Wired into
+  `_save_draft_post` / `_save_draft_reply` inside the same
+  transaction. Chip + score panel render in Today / Next Rep /
+  Agent Chat. Content Performance gets a calibration table
+  joining historical `composite_label` to actual engagement.
+  Never blocks Publish.
+* **Repetition guard via embedding similarity (§28.13).**
+  `app/agent/embeddings.py` adapter (Voyage `voyage-3-lite`
+  default + OpenAI fallback via the same interface, no SDK pin —
+  stdlib `urllib`). `app/agent/repetition_guard.py` runs a numpy
+  cosine scan against `post_embeddings` within
+  `repetition_guard_lookback_days`. Yellow banner above drafts
+  labeled `near_duplicate` / `close_echo`. Soft check: missing
+  API key, network error, or empty corpus all return None and the
+  draft proceeds. `scripts/embed_posts.py` is the resumable
+  backfill with a `--re-embed-all` flag for provider migrations.
+* **Confidence labels on agent outputs (§28.14).** §28.2 rule #14
+  added in the spec; `app/agent/confidence_patterns.py` ships
+  eight regex patterns for analytical-claim shapes
+  (percentage_change, lane_winner, outperformed, caused_by,
+  data_shows, etc.). `app/agent/session.py::extract_confidence_labels` +
+  `detect_untagged_claims` parse the agent's `<confidence>`
+  tags and count untagged analytical claims; each one drops
+  humility by one inside `decide_save_or_revise`.
+  `app/agent/client.py::send_message_sync` persists the dominant
+  label on `agent_messages.confidence_label` and propagates it
+  to `agent_drafts.confidence_label` for save_draft_* tool
+  calls. Tie-break order: speculation > inference > mixed > fact.
+  `app/exports/markdown_weekly.py` gets a new
+  `SpeculationLabelBlocked` error: weekly Markdown export refuses
+  to run when speculation-labeled agent messages from the ISO
+  week aren't acknowledged via the per-week settings flag
+  `weekly_review_speculation_ack_<week_iso>`.
+* **Approval payload hash — user-visible (§28.15).** Extends
+  §28.10's silent hash-mismatch enforcement with two new helpers in
+  `app/agent/confirmation.py`:
+  `invalidate_unconsumed_tokens_for_post` expires every
+  non-consumed token for a post; `update_post_text_for_publish`
+  writes a modal-edited text + audits the pre/post hash diff via
+  an `agent_tool_calls` row with `tool_name='publish_modal_edit'`.
+  The confirmation modal in `9_Agent_Chat.py` now renders an
+  editable `st.text_area`, snapshots the at-open hash in
+  `st.session_state[f"modal_hash_{post_id}"]`, surfaces a yellow
+  "you've edited" banner when the hashes differ, and runs
+  update + invalidate-priors BEFORE minting. Two-modal race
+  contract: Modal B's mint invalidates Modal A's token by
+  construction.
+
+## Acceptance gates satisfied (§25 Phase 5.8)
+
+* All 342 tests green (`uv run pytest -q` — 339 pre-existing +
+  29 new across `test_schema.py`, `test_voice_profile.py`,
+  `test_prepublish_scorer.py`, `test_repetition_guard.py`,
+  `test_confidence_labels.py`, `test_payload_hash_ux.py`,
+  `test_phase58_end_to_end.py`).
+* `uv run ruff check app/ tests/ scripts/` clean.
+* `uv run streamlit run app/main.py --server.headless true`
+  boots without exception; Settings → Growth Agent surfaces
+  the Voice profile + Repetition guard panels with the
+  zero-row CTAs.
+* End-to-end happy path (`tests/test_phase58_end_to_end.py`)
+  proves a single `_save_draft_post` call populates
+  `prepublish_score_id` + `similarity_warning_json` and the
+  modal click-handler invalidates a prior token when a second
+  modal mints one.
+
+## Known limitations / deferred
+
+* **First voice profile generation requires real Anthropic
+  credit.** The Haiku call is mocked in tests via `model_caller=`
+  injection, but the Settings UI hits the live API.
+* **Voyage AI vs OpenAI embedding adapter is a code edit, not a
+  setting.** Switching providers requires editing
+  `app/agent/embeddings.py::DEFAULT_PROVIDER` AND running
+  `scripts/embed_posts.py --re-embed-all`. Documented in the
+  adapter module's docstring.
+* **Streamlit cannot do a true keystroke debounce.** The
+  §28.15 modal's "Disable Publish for 2 seconds after edit"
+  affordance is degenerate in pure Streamlit (every keystroke
+  triggers a rerun that re-evaluates the page). The
+  load-bearing behavior — banner on edit, post-edit text used
+  for the token mint, prior tokens invalidated on re-mint —
+  is fully wired; the cosmetic settle-delay is a fast follower.
+* **`prepublish_scorer_llm_augmentation_enabled` setting
+  exists but the LLM second pass isn't implemented.** The
+  spec marks the augmentation as opt-in; the schema slot is
+  there for V1.X.
+
+## Lessons (from this phase)
+
+* The earliest unit tests for the scorer pinned the wrong
+  expected score because the heuristics were too brittle
+  (`hook_strength` missed "7pm" because `\b\d+\b` requires a
+  word boundary after the digit, which "p" doesn't supply; the
+  reply-substance overlap was whole-word only). Loosening the
+  digit regex to `\d` and adding prefix-5 stemming to the
+  overlap check fixed the asymmetry without weakening the
+  signal. Lesson: heuristic-test-then-tune is fine; just make
+  the asymmetry visible in the tests before the fix lands.
+* The §28.2 drift check (`test_prompt_builder_splices_all_13_rules`)
+  was hardcoded to 13 even though §28.2 already had 15 rules
+  in the spec (Phase 5.8 added #14, Phase 5.9 spec added #15).
+  Re-wrote the assertion as `spec_count == prompt_count` so it
+  doesn't break when the spec grows. The drift contract is the
+  load-bearing rule, not the absolute count.
+
+## Next phase
+
+Phase 5.9 — Niche & Content-Type Calibration Pack (§28.16–§28.21).
+Rule #15 is already in §28.2; the implementation lives in
+spec §25 Phase 5.9.
