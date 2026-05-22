@@ -126,23 +126,23 @@ def test_csv_export_opt_in_includes_opt_in_columns(db_conn, tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 # Test 3 — excluded columns never appear, opt-in or not.
 #
-# We synthesise an excluded column on an allowlist clone (the live posts
-# allowlist has none at Phase 5; this verifies the GUARANTEE, not just the
-# current data). Test patches a TableAllowlist into the registry, then
-# calls columns_for_export to confirm the guard fires when default/opt-in
-# leak an excluded column.
+# Originally a single test interleaving three concerns; split into three
+# single-concern tests per /review-2 🔵 S5 so a failure points at the
+# specific guarantee that broke.
 # ---------------------------------------------------------------------------
-def test_csv_export_excludes_excluded_columns_even_with_opt_in(
-    db_conn, tmp_path: Path, monkeypatch
-) -> None:
-    # Sanity: no live allowlist currently has any excluded columns.
+def test_csv_export_no_live_allowlist_collides_with_excluded(db_conn, tmp_path: Path) -> None:
+    """Sanity: no live allowlist has any default/opt-in column also in
+    excluded_columns. Catches a future copy-paste mistake at import time."""
     for table in ALLOWLISTS:
         assert all(
             c not in get_excluded_columns(table)
             for c in ALLOWLISTS[table]["default_columns"] + ALLOWLISTS[table]["opt_in_columns"]
-        )
+        ), table
 
-    # Inject a misconfigured table to confirm the guard raises.
+
+def test_csv_export_inconsistent_allowlist_fails_fast(db_conn, tmp_path: Path, monkeypatch) -> None:
+    """A misconfigured allowlist (default/opt-in column also in excluded)
+    must raise ValueError BEFORE the SELECT runs."""
     from app.exports import allowlists as al
 
     bad = {"default_columns": ["a", "secret_col"], "opt_in_columns": [], "excluded_columns": ["secret_col"]}
@@ -150,7 +150,9 @@ def test_csv_export_excludes_excluded_columns_even_with_opt_in(
     with pytest.raises(ValueError, match="internally inconsistent"):
         columns_for_export("__bad__")
 
-    # And UnknownTableError fires for genuinely missing tables.
+
+def test_csv_export_unknown_table_raises(db_conn, tmp_path: Path) -> None:
+    """A genuinely missing table name surfaces UnknownTableError."""
     with pytest.raises(UnknownTableError):
         export_table_to_csv("posts_DOES_NOT_EXIST", tmp_path / "x.csv", conn=db_conn)
 
