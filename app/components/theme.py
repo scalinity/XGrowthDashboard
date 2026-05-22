@@ -715,6 +715,163 @@ def recommended_action_badge(label: str | None) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 5.10 / Strategic Analysis Pack — shared primitives used by §14.9
+# Brain Dump, §14.10 Coach, §29.7 Account Researcher tab, and §14.7 Profile
+# Audit panel. All four surfaces want a consistent visual treatment for:
+#
+#   1. An immutable "specimen" block (raw pasted text Daniel can't edit).
+#   2. A status chip (unprocessed / processing / processed / failed).
+#   3. A candidate-draft card (kicker label + body + meta line + button slot).
+#   4. A citation chip (record_type + id_or_filter, optional `stripped` flag).
+#
+# Keeping the components here means the four pages share styling tokens and
+# don't drift. Adding new tokens? Extend PALETTE first; never inline hex.
+# ---------------------------------------------------------------------------
+def specimen_block(text: str, *, max_height_rem: float = 16.0) -> None:
+    """Render an immutable raw-text "specimen card".
+
+    Used by §14.9 Brain Dump and §14.10 Coach to display content Daniel
+    cannot edit (raw_text, pasted reply target text, prior conversation
+    turns). The dashed left keyline signals "this is preserved, not a
+    field you can change."
+    """
+    # HTML escape via Streamlit markdown's default code rendering — we
+    # explicitly wrap in <pre> so the text renders verbatim including
+    # boundary markers if they happen to be in the paste.
+    safe = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    st.markdown(
+        f"""<div style='padding:0.7rem 0.9rem; margin:0.4rem 0 0.7rem 0;
+                        background:{PALETTE['surface']};
+                        border-left:2px dashed {PALETTE['hairline']};
+                        border-radius:2px;
+                        max-height:{max_height_rem}rem; overflow-y:auto;'>
+            <pre style='margin:0; font-family: IBM Plex Sans, sans-serif;
+                         font-size:0.92rem; line-height:1.45;
+                         color:{PALETTE['bone']};
+                         white-space: pre-wrap; word-wrap: break-word;'>{safe}</pre>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def status_chip(label: str, *, tone: str = "neutral") -> str:
+    """Return HTML for a status chip — caller composes into a row.
+
+    ``tone`` is one of: 'neutral' (bone_dim), 'active' (phosphor),
+    'warn' (warn_amber), 'done' (phosphor_dim), 'failed' (warn_amber).
+    Keep tone names semantic — caller picks the meaning, the palette
+    stays anchored.
+    """
+    tones: dict[str, tuple[str, str]] = {
+        "neutral": (PALETTE["surface_raised"], PALETTE["bone_dim"]),
+        "active":  (PALETTE["phosphor_dim"],   PALETTE["bone"]),
+        "warn":    (PALETTE["warn_amber"],     PALETTE["ink"]),
+        "done":    (PALETTE["surface"],        PALETTE["phosphor"]),
+        "failed":  (PALETTE["warn_amber"],     PALETTE["ink"]),
+    }
+    bg, fg = tones.get(tone, tones["neutral"])
+    return (
+        f"<span style='font-family: JetBrains Mono, monospace; "
+        f"font-size:0.74rem; letter-spacing:0.08em; text-transform:uppercase; "
+        f"background:{bg}; color:{fg}; padding:2px 8px; border-radius:2px;'>"
+        f"{label}</span>"
+    )
+
+
+def citation_chip(
+    record_type: str,
+    id_or_filter: str,
+    *,
+    stripped: bool = False,
+) -> str:
+    """Return HTML for a §28.23 Coach citation chip.
+
+    Surviving citations render in phosphor; stripped citations render in
+    warn_amber with strikethrough so the user can see what the agent
+    tried to claim but couldn't ground. Always inline-composable — the
+    caller wraps a row of these inside a paragraph.
+    """
+    if stripped:
+        bg = PALETTE["surface"]
+        fg = PALETTE["warn_amber"]
+        extra = "text-decoration: line-through;"
+    else:
+        bg = PALETTE["surface"]
+        fg = PALETTE["phosphor"]
+        extra = ""
+    return (
+        f"<span style='font-family: JetBrains Mono, monospace; "
+        f"font-size:0.74rem; letter-spacing:0.06em; "
+        f"background:{bg}; color:{fg}; padding:1px 7px; "
+        f"border:1px solid {PALETTE['hairline']}; border-radius:2px; "
+        f"margin: 0 0.15rem; {extra}'>"
+        f"〔{record_type} {id_or_filter}〕</span>"
+    )
+
+
+def candidate_card(
+    *,
+    index: int,
+    text: str,
+    pillar: str,
+    audience: str,
+    cta: str,
+    content_type: str,
+    rationale: str,
+    button_slot: object | None = None,
+    status_label: str | None = None,
+) -> None:
+    """Render one Brain Dump candidate draft card.
+
+    ``button_slot`` is the Streamlit container the caller has pre-created
+    via ``st.container()`` so the button's on_click runs in the right
+    rerun cycle (Streamlit closures + on_click don't compose otherwise).
+    Pass ``status_label`` to display a "sent" or "discarded" badge in
+    place of the button (Daniel already acted on this candidate).
+    """
+    kicker_line = (
+        f"<span class='kicker' style='color:{PALETTE['phosphor']};'>"
+        f"CANDIDATE {index}</span> "
+        f"<span class='dim' style='font-family: JetBrains Mono, monospace; "
+        f"font-size:0.72rem; letter-spacing:0.06em; "
+        f"color:{PALETTE['bone_faint']};'>"
+        f"{pillar} · {audience} · {cta} · {content_type}</span>"
+    )
+    safe_text = (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_rationale = (
+        rationale.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    st.markdown(
+        f"""<div style='padding:0.7rem 0.9rem; margin:0.4rem 0 0.4rem 0;
+                        background:{PALETTE['surface']};
+                        border-left:2px solid {PALETTE['phosphor']};
+                        border-radius:2px;'>
+            <div style='margin-bottom:0.45rem;'>{kicker_line}</div>
+            <div style='font-size:0.96rem; color:{PALETTE['bone']};
+                         line-height:1.45; white-space: pre-wrap;'>{safe_text}</div>
+            <div style='margin-top:0.55rem; font-style: italic;
+                         color:{PALETTE['bone_dim']}; font-size:0.82rem;
+                         font-family: Fraunces, IBM Plex Serif, Georgia, serif;'>
+                {safe_rationale}
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    if status_label is not None:
+        st.markdown(
+            f"<div style='margin: -0.1rem 0 0.7rem 0;'>"
+            f"{status_chip(status_label, tone='done')}</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def recommended_action_keyline_color(label: str | None) -> str:
     """Return the PALETTE color matching a recommended-action label.
 

@@ -356,6 +356,8 @@ _PAGES = [
     ("5_Funnel.py",                 "Funnel"),
     ("6_Weekly_Review.py",          "Weekly review"),
     ("7_Settings.py",               "Settings"),
+    # Phase 5.10 / §14.9 — Brain Dump capture-first view.
+    ("11_Brain_Dump.py",            "brain dump"),
 ]
 
 
