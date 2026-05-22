@@ -224,13 +224,29 @@ def specificity_score(text: str) -> int:
 def length_fit_score(text: str, draft_kind: str = "standalone") -> int:
     """0-3. Within target chars; long form earns its length.
 
-    Hard ceiling at POST_MAX_CHARS (280) → 0. For standalones, the
-    target is SHORT_POST_TARGET_CHARS (200) — within ~10% earns 3,
-    within ~25% earns 2, longer-but-under-ceiling earns 1.
+    Hard ceiling at POST_MAX_CHARS (280) → 0 across all draft kinds.
+
+    Replies legitimately run much shorter than a standalone (a tight
+    `"yes — 3x in 24h."` reply is the spec's positive anchor, not the
+    negative one). They earn 3 anywhere from 10 to 240 chars, 2 from
+    240 to the 280 ceiling, and 1 below 10 chars (still readable but
+    likely too thin).
+
+    Standalones use the §28.11 target band: within ~10% of
+    SHORT_POST_TARGET_CHARS (200) earns 3, within ~25% earns 2,
+    longer-but-under-ceiling earns 1, far-under-target (n<20) earns 0.
     """
     n = len(text)
+    if n == 0:
+        return 0
     if n > POST_MAX_CHARS:
         return 0
+    if draft_kind == "reply":
+        if n < 10:
+            return 1
+        if n <= 240:
+            return 3
+        return 2
     if n < 20:
         return 0
     target = SHORT_POST_TARGET_CHARS

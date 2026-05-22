@@ -81,6 +81,42 @@ def test_length_around_200_returns_three() -> None:
     assert ps.length_fit_score(text) == 3
 
 
+def test_length_short_reply_scores_three_not_zero() -> None:
+    """P58R-2: short replies (>=10 chars, <=240) should earn 3, not 0.
+    Replies legitimately run shorter than standalones."""
+    text = "yes — 3x in 24h."  # 16 chars
+    assert ps.length_fit_score(text, draft_kind="reply") == 3
+    # And the same text as a standalone would still earn the legacy 0
+    # (way under the 200-char target).
+    assert ps.length_fit_score(text, draft_kind="standalone") == 0
+
+
+def test_length_very_short_reply_scores_one() -> None:
+    text = "yes."  # 4 chars
+    assert ps.length_fit_score(text, draft_kind="reply") == 1
+
+
+def test_length_reply_over_ceiling_returns_zero() -> None:
+    text = "x" * 281
+    assert ps.length_fit_score(text, draft_kind="reply") == 0
+
+
+def test_score_short_reply_does_not_collapse_to_weak() -> None:
+    """End-to-end: a short reply with real substance should NOT be 'weak'
+    purely on length. P58R-2 regression."""
+    row = ps.score(
+        draft_text="The reply substance signal here is exactly the thing.",  # 53 chars
+        draft_kind="reply",
+        pillar="build",
+        audience=None,
+        cta="none",
+        target_post_text="Specific reply substance is the dimension that matters.",
+        active_voice_profile=None,
+    )
+    assert row.length_fit_score == 3
+    assert row.composite_label in ("viable", "strong")
+
+
 def test_format_trailing_ellipsis_returns_zero() -> None:
     assert ps.format_fit_score("Sentence that trails off...") == 0
 
