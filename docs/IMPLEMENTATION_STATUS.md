@@ -3,232 +3,216 @@
 | Field          | Value                                  |
 | -------------- | -------------------------------------- |
 | Project        | X Growth Dashboard                     |
-| Current phase  | 5 — Export                             |
+| Current phase  | 5.5 — Growth Agent                     |
 | Spec version   | 2026-05-21 (see `spec.md` §0 revision notes) |
-| Next phase     | `phase-5.5-growth-agent.md`            |
+| Next phase     | `phase-5.6-reply-target-discovery.md`  |
 
 ---
 
 ## Completed in this phase
 
-### Allowlist module (`app/exports/allowlists.py`)
+### Migrations
 
-- `TableAllowlist` TypedDict with `default_columns` / `opt_in_columns` /
-  `excluded_columns`.
-- Per-table allowlists for 11 MVP tables: `account_snapshots`, `posts`,
-  `post_metric_snapshots`, `post_classifications`, `daily_activity`,
-  `reply_sessions`, `stir_conversion_events`, `stir_testers`,
-  `milestones`, `weekly_reviews`, `experiments`.
-- `POSTS_ALLOWLIST` ships only the currently-existing Phase 1 columns;
-  the file body has `# PHASE 5.5 INSERT HERE` / `# PHASE 5.6 INSERT HERE`
-  markers that the future phase prompts cite directly.
-- `columns_for_export(table_name, include_opt_in=False)` — single-helper
-  surface that fails fast (`ValueError`) when the allowlist for a table
-  is internally inconsistent (a column in both an inclusion list and the
-  excluded list).
-- `UnknownTableError(KeyError)` for callers passing an unregistered table.
-- `docs/ARCHITECTURE.md` "Export allowlist contract" section documents
-  the per-column policy for Phase 5.5 / 5.6 additions.
+- `migrations/005_agent_core.sql` — six agent-domain tables
+  (`agent_conversations`, `agent_messages`, `agent_tool_calls` with
+  `redacted_arguments` flag, `agent_target_accounts`, `voice_samples`,
+  `agent_drafts` with `iwh_attempt_index DEFAULT 1`).
+- `migrations/006_publish_columns.sql` — ALTER `posts` with
+  `agent_draft_id`, `published_via_agent_message_id`, `published_to_x_at`,
+  `publish_method`, `publish_last_error`, `publish_attempt_count`; CREATE
+  TABLE `publish_confirmation_tokens` with `token_hash UNIQUE`,
+  `draft_text_hash_at_issue`, `expires_at_utc`, `consumed_at_utc`.
 
-### CSV exporter (`app/exports/csv_exporter.py`)
+### `app/agent/` module
 
-- `export_table_to_csv(table_name, output_path, *, include_opt_in=False,
-  conn=None, db_path=None)` — UTF-8 CSV with header.
-- Defensive `_quote_identifier()` for the SELECT (allowlist column names
-  come from this repo's own source, but quoting future-proofs against a
-  keyword collision).
-- Records each run in `data_exports` (kind=`csv`).
-- CLI: `python -m app.exports.csv_exporter --table <t> --output <p> [--opt-in]`.
+- `audit.py` — single-source `log_tool_call()` with raw-token redaction
+  driven by `PUBLISH_TOOL_NAMES` (§28.2 rule #11).
+- `confirmation.py` — `mint_confirmation_token()` + `validate_and_consume_
+  token()` with the six-check chain and typed exceptions per failure
+  path (§28.2 rule #10).
+- `publish.py` — `publish_post_atomic()` runs validation, MVP manual-
+  clipboard branch (builds X intent URL, no API call), publish-state
+  writes, audit logging. Validation failures leave the token unconsumed
+  (§28.10 step 6); post-validation failures consume the token and mark
+  the row `publish_method='failed'` (§28.4 atomicity rule).
+- `_internal_tools.py` — `INTERNAL_TOOLS` list with `publish_post_to_x`
+  and `publish_reply_to_x`. Imported NOWHERE except by the click-handler
+  and the startup assertion.
+- `tools.py` — `AGENT_TOOLS` list with 15 entries: the merged §28.4 +
+  §25 catalog. Each carries an Anthropic input_schema + Python handler.
+- `recovery.py` — `detect_orphans()` + `mark_orphan_posted/failed`.
+- `cost.py` — `estimate_cost()`, `month_to_date_spend_usd()`,
+  `check_ceiling_or_raise()` with versioned rate table.
+- `lint.py` — `lint_draft()` invokes Haiku (or falls back to an offline
+  substring matcher when `LINT_OFFLINE=1` or the API is unavailable).
+- `session.py` — `parse_iwh_self_score()` + `decide_save_or_revise()`
+  policy gate. IWH counter never enters the agent's reachable state.
+- `voice.py` — `get_active_voice_samples()`, `add_voice_sample()`,
+  `deactivate_voice_sample()`, `touch_last_used_at()`.
+- `prompt_builder.py` — `build_system_prompt()` splices spec §28.2
+  rules verbatim into the Section 3 placeholder, top-N voice samples
+  into Section 5, AGENT_TOOLS catalog into Section 7. Drift check
+  `verify_rule_count_matches_spec()` asserts 13/13 rules.
+- `client.py` — `AgentClient.send_message_sync()` + `dispatch_tool_call()`.
+  `_call_model` is overridable for tests; SDK call uses the assembled
+  system prompt + `AGENT_TOOLS` spec only.
 
-### Markdown weekly exporter (`app/exports/markdown_weekly.py`)
+### `config/agent_system_prompt.md`
 
-- `export_weekly_report(week_iso, output_path=None)` renders a §16 / §24
-  weekly report.
-- **Counterfactual gating** raises `CounterfactualMissingError` when the
-  `weekly_reviews` row is missing OR `counterfactual_note` is NULL OR
-  whitespace-only. The gate sits at the export layer regardless of the
-  `counterfactual_required` settings toggle (per `docs/ARCHITECTURE.md`).
-- Sections rendered: Summary, Reps shipped, Content performance top 3
-  lanes (with confidence label visible), Stir funnel with App-Store-gap
-  block, What moved / What got stuck, Lesson, Next week's experiment,
-  Counterfactual (verbatim), §13 hard rules bulleted, Open hypotheses.
-- Stamps `weekly_reviews.exported_markdown_path` and bumps `updated_at`
-  on successful export so the Weekly Review form can show "last
-  exported" later.
-- CLI: `python -m app.exports.markdown_weekly --week 2026-W21 [--output …]`.
-  Exit 2 with a clear message on `CounterfactualMissingError`.
+8-section template per §28.3 with three placeholders the prompt builder
+substitutes at runtime. The template carries the engagement-psychology
+guidance verbatim (Section 4) and the output-format rules (Section 8).
 
-### Raw JSON exporter (`app/exports/json_exporter.py`)
+### Startup invariant
 
-- `export_database_to_json(output_path, *, redact_secrets=True,
-  include_stir_pii=False)` dumps 13 MVP tables.
-- Schema: `{schema_version, exported_at_utc, db_schema_migrations_applied,
-  redactions, tables}`.
-- Column-name redaction: `*_token`, `*_key`, `*_secret`, `*_password`,
-  `*_credential` and plural variants — replaced with `[REDACTED]`.
-- Nested redaction of `Authorization`, `X-API-Key`, `Cookie`,
-  `set-cookie`, `Proxy-Authorization`, `X-Amz-Security-Token`, and a list
-  of OAuth top-level secret keys inside `raw_api_responses.response_json`
-  / `request_params_json` blobs.
-- `stir_testers` and `stir_conversion_events.qualitative_feedback` are
-  excluded by default per §18 rules 4-6; opt-in via `--include-stir-pii`.
-- CLI: `python -m app.exports.json_exporter --output <p>
-  [--include-stir-pii] [--minified]`.
+`app/main.py` runs `_assert_publish_tools_unreachable()` once per
+session: asserts `AGENT_TOOLS.name` ∩ `INTERNAL_TOOLS.name` = ∅.
 
-### Migration 004 — `data_exports` audit table
+### UI surfaces (theme: `app/components/theme.py`)
 
-- `data_exports(id, exported_at_utc, kind, table_name, output_path,
-  row_count, include_opt_in, notes)`. `kind` CHECK in `('csv',
-  'markdown_weekly', 'json')`. `include_opt_in` 0/1 nullable.
-- Two indexes (`kind`, `exported_at_utc`) for the Settings page manifest.
+Five new theme helpers — all using existing PALETTE tokens, no new
+fonts: `tool_call_block`, `iwh_meter`, `cost_meter`,
+`token_ttl_countdown`, `console_log_row`.
 
-### Settings page Exports section
+- `app/pages/9_Agent_Chat.py` — §14.8 chat surface. Sidebar = cost
+  meter (always) → IWH meter (when active draft) → past sessions list.
+  Inline draft actions: publish / save / discard. Publish modal mints
+  a token, renders the post text in Fraunces 1.3rem, runs the TTL
+  countdown at 1Hz (the only animated element in the app), and
+  invokes `_internal_tools.publish_post_to_x` synchronously. Crash-
+  recovery orphan banner at top.
+- `app/pages/7_Settings.py` — Growth Agent panel appended: cost meter,
+  IWH policy form, voice samples CRUD, curated `agent_target_accounts`
+  CRUD, orphan-post recovery list.
+- `app/pages/1_Today.py`, `2_Next_Rep.py`, `4_Content_Performance.py`,
+  `6_Weekly_Review.py` — "Ask the agent" button rows append to existing
+  layouts. Each sets `st.session_state.agent_context_seed` and switches
+  to the chat page.
 
-- New "Exports" sub-readout in `app/pages/7_Settings.py` themed with the
-  existing instrument-panel tokens — no new PALETTE keys or fonts.
-- Per-table CSV: dropdown of allowlisted tables, opt-in checkbox,
-  primary-styled "Export CSV" button.
-- Markdown weekly: ISO-week text input (defaults to the current ISO
-  week), disabled-state explanation when the counterfactual is missing,
-  primary-styled "Export Markdown weekly" button.
-- Raw JSON: confirmation checkbox + PII opt-in, primary-styled "Export
-  raw JSON" button.
-- Recent exports manifest: collapsed expander rendering the last 20 rows
-  from `data_exports` as a console-log grid (when · kind · table · file
-  · rows · opt-in), with a "Keep open across reruns" pin.
+### Export allowlist extensions
 
-### Tests (`tests/test_exports.py`)
+`app/exports/allowlists.py` extended per §16 (7) / (8):
 
-Ten tests — seven prompt-required, three defensive:
+- `POSTS_ALLOWLIST.default_columns` gains `agent_draft_id`,
+  `published_to_x_at`, `publish_method`, `publish_attempt_count`.
+- `POSTS_ALLOWLIST.opt_in_columns` gains
+  `published_via_agent_message_id`.
+- `POSTS_ALLOWLIST.excluded_columns` gains `publish_last_error` —
+  NEVER exported under any flag.
+- Six new allowlists for the agent-domain tables, with
+  `agent_tool_calls.arguments_json` / `result_json` / `error_message`
+  in `excluded_columns` for defense in depth.
 
-1. `test_csv_export_uses_allowlist_default_columns`
-2. `test_csv_export_opt_in_includes_opt_in_columns`
-3. `test_csv_export_excludes_excluded_columns_even_with_opt_in`
-4. `test_markdown_weekly_requires_counterfactual` (all three blank-states
-   — missing row, empty string, whitespace-only — plus the success path)
-5. `test_markdown_weekly_includes_app_store_gap_label`
-6. `test_json_export_redacts_secret_columns`
-7. `test_csv_round_trip_preserves_data` (comma + quote-bearing rows)
+### Settings seeds
 
-Defensive guards:
+7 new settings rows: `agent_default_model`,
+`agent_monthly_cost_cap_usd`, `agent_voice_sample_count`,
+`iwh_self_score_minimum`, `iwh_max_revision_attempts`,
+`agent_dark_pattern_lint_enabled`,
+`x_posting_confirmation_token_ttl_seconds`.
 
-- `test_every_allowlist_column_exists_in_schema` — fails fast if a future
-  edit appends to `default_columns` before the column's migration lands.
-- `test_opt_in_and_excluded_columns_are_disjoint` — protects against
-  copy-paste mistakes between lists.
-- `test_data_exports_audit_records_each_run` — every export kind writes
-  the audit row with the right `(kind, table_name, include_opt_in)`
-  tuple.
+### Tests
 
-### Schema test updates
+`tests/test_agent.py` — 16 Session-1 invariants:
 
-- `test_schema_migrations_records_each_file` and
-  `test_apply_migrations_is_idempotent` now include
-  `004_data_exports.sql` in the expected list.
+- Tool-registry partitioning (3 tests).
+- IWH counter outside agent context (1).
+- Six-check confirmation chain (6).
+- Atomic publish — validation failure leaves token unconsumed, success
+  path stages manual_clipboard, double-publish rejected (3).
+- Raw-token redaction — happy path + error path (2).
+- Orphan-post detection (1).
 
----
+`tests/test_agent_session2.py` — 32 Session-2 behaviors:
 
-## Acceptance gates satisfied
+- Dark-pattern lint offline mode (5).
+- Monthly cost ceiling (4).
+- IWH `decide_save_or_revise` policy gate (6).
+- Prompt drift check + voice/tool injection (5).
+- Voice samples CRUD (3).
+- Export carve-outs (7).
+- Conversation/message persistence helper (1).
 
-- [x] `uv run python -m app.exports.csv_exporter --table posts --output
-      data/exports/posts.csv` → 20-column header matching
-      `POSTS_ALLOWLIST.default_columns` byte-for-byte.
-- [x] Same with `--opt-in` → header equals `default_columns +
-      opt_in_columns` (currently 20 columns since opt_in is empty in
-      Phase 5; the structure handles non-empty correctly per
-      `test_csv_export_opt_in_includes_opt_in_columns`).
-- [x] `uv run python -m app.exports.markdown_weekly --week 2026-W21`
-      against a DB with no `weekly_reviews` row for that week exits 2
-      with the `CounterfactualMissingError` message.
-- [x] `uv run python -m app.exports.json_exporter --output
-      data/exports/dump.json` produces a valid JSON file; `grep -c
-      Authorization data/exports/dump.json` returns `0`.
-- [x] `uv run pytest tests/test_exports.py -v` → 10/10 green in 0.09s.
-- [x] `uv run pytest -q` → 137/137 green.
-- [x] `uv run ruff check` clean.
-- [x] Settings page renders the Exports section with all three export
-      kinds; AppTest harness via `test_each_page_renders_without_exception`
-      confirms no exceptions on render.
+Schema test list updated to include `005_agent_core.sql` +
+`006_publish_columns.sql`.
 
 ---
 
-## Sample output
+## Acceptance gates satisfied (§25 Phase 5.5)
 
-Generated against a populated `weekly_reviews` row for 2026-W21
-(63-line Markdown, well under the 1,000-line "permalink instead" guard):
-
-```markdown
-# X Growth Weekly Review — 2026-W21 (2026-05-18 → 2026-05-24)
-
-## 1. Summary
-
-- Followers · start `61` → end `73` (Δ `+12`)
-- Posts shipped: `7`
-- Replies shipped: `30`
-- Reply sessions completed: `5`
-- Daily reps days completed: `6 / 7`
-
-## 4. Stir funnel — App-Store-attribution-gap visible
-
-**Distribution signal (X-side)**
-- X impressions (estimate): `0`
-- getstir.app visits (UTM-attributed): `0`
-
-*App Store attribution gap (§14.5):* UTM tagging works fine for
-getstir.app visits but does NOT survive the jump to the App Store.
-Everything below is self-reported by testers, not auto-attributed.
-
-**Validation signal (Stir-side, self-reported)**
-- Downloads: `0` (self-reported source)
-- Working-parent / home-cook testers (self-reported): `0`
-
-## 8. Counterfactual — what this tool could not measure
-
-Working-parent cohort discovered Stir via Reddit threads two weeks ago,
-so this week's growth may not be from X at all.
-
-## 9. What we know / what we don't know (§13 hard rules)
-
-- Follower count is a *stock*; posts/replies/downloads are *flow*. …
-- App Store downloads are NEVER auto-attributed to a specific X post or
-  reply — the UTM chain doesn't survive the App Store jump. (§14.5)
-```
+- [x] Startup assertion passes — `test_publish_tools_not_in_agent_
+      registry` + `_assert_publish_tools_unreachable()` runs at bootstrap.
+- [x] Prompt-injection test — `test_prompt_injected_iwh_score_does_
+      not_override_orchestrator`.
+- [x] Dark-pattern lint catches "5 secrets parents don't know — number
+      3 will surprise you!" — `test_engagement_bait_number_will_
+      surprise_is_flagged`.
+- [x] Atomic publish: simulated failure — `test_validation_failure_
+      leaves_token_unconsumed_and_marks_attempt`.
+- [x] Crash recovery — `test_detect_orphan_posts`.
+- [x] Raw-token redaction — `test_raw_token_redacted_from_arguments_json`
+      + variant on error path.
+- [x] Double-publish rejected — `test_double_publish_rejected_by_
+      check_f`.
+- [x] CSV export carve-out — `TestExportCarveOuts` (7 tests).
+- [x] Cost ceiling — `test_over_ceiling_raises`.
+- [x] Six-check chain — `TestSixCheckConfirmationChain` (6 tests).
+- [x] Daniel can chat in `9_Agent_Chat.py` — page boots with 0
+      exceptions in AppTest.
+- [x] Daniel can publish via manual-clipboard — publish modal mints
+      token → atomic publish → callout with intent URL.
+- [x] `uv run pytest tests/test_agent.py -v` — 16/16 green.
+- [x] `uv run pytest -q` — 190/190 green.
+- [x] `uv run ruff check` — clean.
 
 ---
 
-## Known limitations / future work
+## Known limitations
 
-- **CSV import is V1.5+.** This phase ships export-only; the reverse path
-  is a separate future feature.
-- **Selective row export (e.g., "only posts from last 7 days")** is
-  future work.
-- **Export scheduling** is intentionally absent — Phase 4's launchd
-  recipes cover backups; exports stay manual-trigger per spec §17.
-- **Encrypted exports** deferred to V1.1+ per §18.
-- **Phase 5.5 placeholders** are comments-only. When the publish-flow
-  migration lands, the corresponding allowlist edits are a single-line
-  insertion at the marked sites in `app/exports/allowlists.py`.
+- **`publish_post_to_x` MVP is manual-clipboard only.** V1.2 replaces
+  the manual branch with a direct `POST /2/tweets` call under the same
+  six-check + atomic-transaction contract. `x_client.py` exists but
+  carries only the manual-clipboard helper.
+- **Tool #9 `score_reply_candidates` and tool #15 `record_reply_target`
+  are stubs** until Phase 5.6 lands the dedicated `reply_targets` table
+  per §29.6.
+- **Voice-sample auto-classification from posted-tweet history is V1.5+.**
+  Daniel manually adds samples in Settings.
+- **Streaming responses are deferred.** `send_message_sync` returns the
+  full turn at once; the architecture already separates the SDK call
+  from the UI render so a streaming upgrade is a future iteration on
+  the existing surface.
+- **X API read access (V1.1).** Crash recovery is manual at MVP; V1.1
+  will use `GET /2/users/:id/tweets?since_id=` to auto-reconcile.
 
 ---
 
 ## Phase boundary
 
-Commits on `main` for Phase 5 (in order of the phase prompt's work-order):
+Commits on `main` for Phase 5.5 (in order):
 
-1. `feat(exports): per-table CSV allowlist module`
-2. `feat(exports): CSV exporter`
-3. `feat(exports): raw JSON exporter with secret redaction`
-4. `feat(exports): markdown weekly report with counterfactual gating`
-5. `feat(migrations): data_exports audit table (004)`
-6. `feat(settings): exports section`
-7. `test(exports): allowlist, redaction, counterfactual, round-trip`
+1. `feat(migrations): #2 #3 — agent core tables + publish surface (005, 006)`
+2. `feat(agent): #6 #9 — confirmation token chain + raw-token redaction`
+3. `feat(agent): #4 #7 — atomic publish + INTERNAL_TOOLS registry`
+4. `feat(agent): #5 #8 — AGENT_TOOLS registry + orphan-post recovery`
+5. `feat(agent): #10 — startup assertion: publish tools cannot leak into AGENT_TOOLS`
+6. `test(agent): #11 — Session-1 invariants (16 tests)`
+7. `feat(agent): #13-#19 — Session-2 backend (prompt, cost, lint, session, voice, client)`
+8. `feat(exports): #20 — Phase 5.5 carve-outs for posts + agent tables`
+9. `test(agent): #24 — Session-2 behaviors`
+10. `feat(views): #21 #22 #23 — agent chat page, settings panel, integration buttons`
 
 ---
 
 ## Next phase
 
-Run `phase-5.5-growth-agent.md` — adds Anthropic-powered draft/reply
-flow, the publish_confirmation_tokens table, and the X API OAuth shim.
-Phase 5.5 must extend `app/exports/allowlists.py::POSTS_ALLOWLIST` at
-the marked insertion sites; the contract is documented in
-`docs/ARCHITECTURE.md` "Export allowlist contract".
+Run `phase-5.6-reply-target-discovery.md` — promotes `score_reply_
+candidates` and `record_reply_target` from stubs to the four-dimension
+scoring + deterministic recommended_action resolver per §29. Adds the
+`reply_targets` table, the §29.7 Reply Target Queue view, and wires
+`posts.in_reply_to_reply_target_id` into the manual-mode "Mark posted"
+click-handler.
+
+Phase 5.5 must NOT be extended in the same session — Daniel reviews
+the agent surface (system prompt, IWH gate behavior, publish modal
+UX) before the reply-target subsystem is layered on top.
