@@ -3,192 +3,232 @@
 | Field          | Value                                  |
 | -------------- | -------------------------------------- |
 | Project        | X Growth Dashboard                     |
-| Current phase  | 4 — Backup and data hygiene            |
+| Current phase  | 5 — Export                             |
 | Spec version   | 2026-05-21 (see `spec.md` §0 revision notes) |
-| Next phase     | `phase-5-export.md`                    |
+| Next phase     | `phase-5.5-growth-agent.md`            |
 
 ---
 
 ## Completed in this phase
 
-### Backup runner (`scripts/backup_db.py`)
+### Allowlist module (`app/exports/allowlists.py`)
 
-- `backup_database(source_path, backups_dir, retention_days)` opens the
-  source DB through `app.db.connect()` (pragmas + aggregates), runs
-  `VACUUM INTO 'data/backups/x_growth_YYYY-MM-DD_HHMMSS.db'`, then opens
-  the new file in an independent `sqlite3` connection and runs
-  `PRAGMA integrity_check`. If the result is anything but `ok` the
-  backup file is deleted and `BackupIntegrityError` is raised.
-- Successful runs upsert `settings.last_backup_at_utc` with an ISO-8601
-  UTC timestamp.
-- Retention pruning deletes `x_growth_*.db` files whose mtime is older
-  than `settings.backup_retention_days` (default 30). The freshly-written
-  backup never appears in the prune list because its mtime is "now".
-- Returns a `BackupResult` dataclass: `{path, size_bytes, duration_ms,
-  integrity_check_passed, pruned}`.
-- CLI entrypoint at `python -m scripts.backup_db [--db-path PATH]
-  [--backups-dir PATH] [--retention-days N]` — all flags optional, all
-  defaults read from the `settings` table.
-- VACUUM INTO target paths are single-quoted with embedded-quote
-  doubling (`_quote_sqlite_path`) — `VACUUM INTO` doesn't accept
-  bound parameters, so the literal must be escaped manually.
+- `TableAllowlist` TypedDict with `default_columns` / `opt_in_columns` /
+  `excluded_columns`.
+- Per-table allowlists for 11 MVP tables: `account_snapshots`, `posts`,
+  `post_metric_snapshots`, `post_classifications`, `daily_activity`,
+  `reply_sessions`, `stir_conversion_events`, `stir_testers`,
+  `milestones`, `weekly_reviews`, `experiments`.
+- `POSTS_ALLOWLIST` ships only the currently-existing Phase 1 columns;
+  the file body has `# PHASE 5.5 INSERT HERE` / `# PHASE 5.6 INSERT HERE`
+  markers that the future phase prompts cite directly.
+- `columns_for_export(table_name, include_opt_in=False)` — single-helper
+  surface that fails fast (`ValueError`) when the allowlist for a table
+  is internally inconsistent (a column in both an inclusion list and the
+  excluded list).
+- `UnknownTableError(KeyError)` for callers passing an unregistered table.
+- `docs/ARCHITECTURE.md` "Export allowlist contract" section documents
+  the per-column policy for Phase 5.5 / 5.6 additions.
 
-### Restore runner (`scripts/restore_db.py`)
+### CSV exporter (`app/exports/csv_exporter.py`)
 
-- `restore_database(backup_path, target_path, dry_run=True)` — dry-run
-  is the default; the destructive form requires the `--confirm` flag.
-- Always integrity-checks the backup before mutating anything; refuses
-  to copy from a corrupt source.
-- Real restore renames the current target to a timestamped sidecar
-  (`<target>.pre-restore.YYYY-MM-DD_HHMMSS`) and only then copies the
-  backup over the target. The sidecar is never auto-deleted — manual
-  rollback path stays available.
-- After the copy the restored file is integrity-checked again; failure
-  prints the sidecar path so a human can revert.
+- `export_table_to_csv(table_name, output_path, *, include_opt_in=False,
+  conn=None, db_path=None)` — UTF-8 CSV with header.
+- Defensive `_quote_identifier()` for the SELECT (allowlist column names
+  come from this repo's own source, but quoting future-proofs against a
+  keyword collision).
+- Records each run in `data_exports` (kind=`csv`).
+- CLI: `python -m app.exports.csv_exporter --table <t> --output <p> [--opt-in]`.
 
-### Migration `003_backup_settings.sql`
+### Markdown weekly exporter (`app/exports/markdown_weekly.py`)
 
-- Adds two `settings` rows: `last_backup_at_utc` (initialised to JSON
-  null) and `backup_retention_days` (default 30). `INSERT OR IGNORE`
-  keeps the migration idempotent and never overwrites a value the user
-  has hand-edited between runs.
+- `export_weekly_report(week_iso, output_path=None)` renders a §16 / §24
+  weekly report.
+- **Counterfactual gating** raises `CounterfactualMissingError` when the
+  `weekly_reviews` row is missing OR `counterfactual_note` is NULL OR
+  whitespace-only. The gate sits at the export layer regardless of the
+  `counterfactual_required` settings toggle (per `docs/ARCHITECTURE.md`).
+- Sections rendered: Summary, Reps shipped, Content performance top 3
+  lanes (with confidence label visible), Stir funnel with App-Store-gap
+  block, What moved / What got stuck, Lesson, Next week's experiment,
+  Counterfactual (verbatim), §13 hard rules bulleted, Open hypotheses.
+- Stamps `weekly_reviews.exported_markdown_path` and bumps `updated_at`
+  on successful export so the Weekly Review form can show "last
+  exported" later.
+- CLI: `python -m app.exports.markdown_weekly --week 2026-W21 [--output …]`.
+  Exit 2 with a clear message on `CounterfactualMissingError`.
 
-### Settings page (`app/pages/7_Settings.py`)
+### Raw JSON exporter (`app/exports/json_exporter.py`)
 
-- New "Backups" sub-readout, themed per the locked instrument-panel
-  aesthetic (`/frontend-design` discipline; `apply_theme()` + PALETTE).
-  No new colors or fonts introduced.
-- Status block: `kicker("DATA INTEGRITY · §18 RULE 10")` followed by a
-  bordered card showing the last-backup ISO timestamp in JetBrains Mono
-  with a humanised "ago" caption beneath. Empty state shows a dimmed
-  em-dash with a "click below to run the first one" hint.
-- Action + parameter row: two columns. Left — primary-styled "Back up
-  now" button that spins on the VACUUM + integrity check then toasts
-  the resulting filename, size, and duration on success or `st.error`s
-  on failure. Right — `Retention · days` number_input bound to
-  `settings.backup_retention_days` with its own Save button.
-- Manifest expander: collapsed-by-default `Manifest · N on disk` panel
-  rendering a console-log-style grid (file | size | written) with mono
-  numbers, hairline separators, and right-aligned columns.
+- `export_database_to_json(output_path, *, redact_secrets=True,
+  include_stir_pii=False)` dumps 13 MVP tables.
+- Schema: `{schema_version, exported_at_utc, db_schema_migrations_applied,
+  redactions, tables}`.
+- Column-name redaction: `*_token`, `*_key`, `*_secret`, `*_password`,
+  `*_credential` and plural variants — replaced with `[REDACTED]`.
+- Nested redaction of `Authorization`, `X-API-Key`, `Cookie`,
+  `set-cookie`, `Proxy-Authorization`, `X-Amz-Security-Token`, and a list
+  of OAuth top-level secret keys inside `raw_api_responses.response_json`
+  / `request_params_json` blobs.
+- `stir_testers` and `stir_conversion_events.qualitative_feedback` are
+  excluded by default per §18 rules 4-6; opt-in via `--include-stir-pii`.
+- CLI: `python -m app.exports.json_exporter --output <p>
+  [--include-stir-pii] [--minified]`.
 
-### Tests (`tests/test_backup.py`)
+### Migration 004 — `data_exports` audit table
 
-Six tests covering the phase's six acceptance scenarios — all green:
+- `data_exports(id, exported_at_utc, kind, table_name, output_path,
+  row_count, include_opt_in, notes)`. `kind` CHECK in `('csv',
+  'markdown_weekly', 'json')`. `include_opt_in` 0/1 nullable.
+- Two indexes (`kind`, `exported_at_utc`) for the Settings page manifest.
 
-1. `test_backup_creates_file` — file lands at the expected path with
-   the documented prefix/suffix.
-2. `test_backup_passes_integrity_check` — re-opens the backup in a
-   fresh vanilla `sqlite3` connection and asserts `PRAGMA
-   integrity_check` returns `ok`.
-3. `test_backup_updates_last_backup_setting` — asserts the
-   `last_backup_at_utc` row is parseable ISO-8601 UTC and within a
-   sensible drift window of `now()`.
-4. `test_restore_dry_run_does_not_touch_target` — dry-run leaves the
-   target's mtime and size unchanged and creates no sidecar.
-5. `test_restore_with_confirm_moves_old_to_sidecar` — confirmed
-   restore renames the previous DB to a sidecar that still holds the
-   pre-restore byte size, then verifies the freshly-restored DB's
-   `PRAGMA integrity_check`.
-6. `test_retention_prunes_old_backups` — fake-old files (via
-   `os.utime`) are pruned at retention=7, the recent file survives,
-   and the newly-created backup never appears in the prune list.
+### Settings page Exports section
 
-### Schema test bookkeeping (`tests/test_schema.py`)
+- New "Exports" sub-readout in `app/pages/7_Settings.py` themed with the
+  existing instrument-panel tokens — no new PALETTE keys or fonts.
+- Per-table CSV: dropdown of allowlisted tables, opt-in checkbox,
+  primary-styled "Export CSV" button.
+- Markdown weekly: ISO-week text input (defaults to the current ISO
+  week), disabled-state explanation when the counterfactual is missing,
+  primary-styled "Export Markdown weekly" button.
+- Raw JSON: confirmation checkbox + PII opt-in, primary-styled "Export
+  raw JSON" button.
+- Recent exports manifest: collapsed expander rendering the last 20 rows
+  from `data_exports` as a console-log grid (when · kind · table · file
+  · rows · opt-in), with a "Keep open across reruns" pin.
+
+### Tests (`tests/test_exports.py`)
+
+Ten tests — seven prompt-required, three defensive:
+
+1. `test_csv_export_uses_allowlist_default_columns`
+2. `test_csv_export_opt_in_includes_opt_in_columns`
+3. `test_csv_export_excludes_excluded_columns_even_with_opt_in`
+4. `test_markdown_weekly_requires_counterfactual` (all three blank-states
+   — missing row, empty string, whitespace-only — plus the success path)
+5. `test_markdown_weekly_includes_app_store_gap_label`
+6. `test_json_export_redacts_secret_columns`
+7. `test_csv_round_trip_preserves_data` (comma + quote-bearing rows)
+
+Defensive guards:
+
+- `test_every_allowlist_column_exists_in_schema` — fails fast if a future
+  edit appends to `default_columns` before the column's migration lands.
+- `test_opt_in_and_excluded_columns_are_disjoint` — protects against
+  copy-paste mistakes between lists.
+- `test_data_exports_audit_records_each_run` — every export kind writes
+  the audit row with the right `(kind, table_name, include_opt_in)`
+  tuple.
+
+### Schema test updates
 
 - `test_schema_migrations_records_each_file` and
-  `test_apply_migrations_is_idempotent` extended to include
-  `003_backup_settings.sql` in the expected migration list.
-
-### Automation reference (`docs/AUTOMATION.md`)
-
-- Sample `~/Library/LaunchAgents/com.danny.xgrowth.backup.plist` for a
-  daily 03:00 backup, including install/verify/uninstall commands.
-- Sample crontab line for the same cadence as a portable fallback.
-- Explicitly states: **the plist is not installed by this phase**.
-  Daniel installs manually when ready.
-- "What this does NOT do" section — no encryption-at-rest, no cloud
-  sync, no auto-restore on corruption.
+  `test_apply_migrations_is_idempotent` now include
+  `004_data_exports.sql` in the expected list.
 
 ---
 
 ## Acceptance gates satisfied
 
-- [x] `uv run python -m scripts.backup_db` exits 0 and writes
-      `data/backups/x_growth_2026-05-21_210605.db` (258 KB,
-      `duration_ms=1`, `integrity_check_passed=true`).
-- [x] `sqlite3 data/backups/x_growth_2026-05-21_210605.db "PRAGMA
-      integrity_check"` returns `ok`.
-- [x] `uv run python -m scripts.restore_db --backup <file> --target
-      data/dashboard.db` (without `--confirm`) prints a dry-run plan
-      including the would-be sidecar path and exits 0 without touching
-      `data/dashboard.db`.
-- [x] Settings UI: the Backups sub-readout surfaces the last-backup
-      timestamp on next render. Verified by the
-      `test_settings_page_surfaces_every_seeded_settings_key` and
-      `test_each_page_renders_without_exception` AppTest paths.
-- [x] "Back up now" button runs the backup with a spinner and emits a
-      success toast — exercised end-to-end by the backup integration
-      tests; UI wiring verified by AppTest no-exception render.
-- [x] `uv run pytest tests/test_backup.py -v` → 6/6 green in 0.08s.
-- [x] `uv run pytest -q` → 121/121 green.
-- [x] `uv run ruff check` is clean.
+- [x] `uv run python -m app.exports.csv_exporter --table posts --output
+      data/exports/posts.csv` → 20-column header matching
+      `POSTS_ALLOWLIST.default_columns` byte-for-byte.
+- [x] Same with `--opt-in` → header equals `default_columns +
+      opt_in_columns` (currently 20 columns since opt_in is empty in
+      Phase 5; the structure handles non-empty correctly per
+      `test_csv_export_opt_in_includes_opt_in_columns`).
+- [x] `uv run python -m app.exports.markdown_weekly --week 2026-W21`
+      against a DB with no `weekly_reviews` row for that week exits 2
+      with the `CounterfactualMissingError` message.
+- [x] `uv run python -m app.exports.json_exporter --output
+      data/exports/dump.json` produces a valid JSON file; `grep -c
+      Authorization data/exports/dump.json` returns `0`.
+- [x] `uv run pytest tests/test_exports.py -v` → 10/10 green in 0.09s.
+- [x] `uv run pytest -q` → 137/137 green.
+- [x] `uv run ruff check` clean.
+- [x] Settings page renders the Exports section with all three export
+      kinds; AppTest harness via `test_each_page_renders_without_exception`
+      confirms no exceptions on render.
 
 ---
 
-## Smoke-run notes
+## Sample output
 
-- `uv run python -m scripts.backup_db` printed the expected JSON
-  payload; `data/backups/x_growth_2026-05-21_210605.db` is on disk and
-  passes a separate `sqlite3 ... "PRAGMA integrity_check"` invocation.
-- Dry-run restore printed a plan that names the sidecar path
-  `data/dashboard.db.pre-restore.2026-05-21_210614` and confirms
-  integrity `ok` without touching the live DB.
-- **Caveat (same as Phase 3):** visual verification of the refreshed
-  Settings page in a real browser falls to Daniel. The AppTest harness
-  + Python syntax check + the full test suite cover boot-time
-  correctness; the on-screen reading of fonts, palette, and layout is
-  the user's call.
+Generated against a populated `weekly_reviews` row for 2026-W21
+(63-line Markdown, well under the 1,000-line "permalink instead" guard):
+
+```markdown
+# X Growth Weekly Review — 2026-W21 (2026-05-18 → 2026-05-24)
+
+## 1. Summary
+
+- Followers · start `61` → end `73` (Δ `+12`)
+- Posts shipped: `7`
+- Replies shipped: `30`
+- Reply sessions completed: `5`
+- Daily reps days completed: `6 / 7`
+
+## 4. Stir funnel — App-Store-attribution-gap visible
+
+**Distribution signal (X-side)**
+- X impressions (estimate): `0`
+- getstir.app visits (UTM-attributed): `0`
+
+*App Store attribution gap (§14.5):* UTM tagging works fine for
+getstir.app visits but does NOT survive the jump to the App Store.
+Everything below is self-reported by testers, not auto-attributed.
+
+**Validation signal (Stir-side, self-reported)**
+- Downloads: `0` (self-reported source)
+- Working-parent / home-cook testers (self-reported): `0`
+
+## 8. Counterfactual — what this tool could not measure
+
+Working-parent cohort discovered Stir via Reddit threads two weeks ago,
+so this week's growth may not be from X at all.
+
+## 9. What we know / what we don't know (§13 hard rules)
+
+- Follower count is a *stock*; posts/replies/downloads are *flow*. …
+- App Store downloads are NEVER auto-attributed to a specific X post or
+  reply — the UTM chain doesn't survive the App Store jump. (§14.5)
+```
 
 ---
 
 ## Known limitations / future work
 
-- **No encryption-at-rest.** Backup files are unencrypted SQLite. The
-  spec defers this to V1.1+ (§18 future work). FileVault on the
-  laptop is the de facto encryption boundary at MVP.
-- **No off-machine backup.** Single-user local tool per §7.1 — cloud
-  sync is explicitly out of scope. If the laptop dies before
-  off-machine sync exists, the backups die with it.
-- **No automatic restore on corruption.** Restoration is always a
-  manual decision. `scripts/restore_db.py` is the entry point.
-- **launchd plist documented but not installed.** Phase 4 ships the
-  recipes; Daniel installs them manually per `docs/AUTOMATION.md`
-  when he wants the daily cadence.
-- **Retention pruning uses mtime, not the filename timestamp.** They
-  agree under normal conditions; if a file is touched (`touch`) its
-  mtime advances and it survives pruning, which is the correct
-  behavior — the user explicitly extended its life.
+- **CSV import is V1.5+.** This phase ships export-only; the reverse path
+  is a separate future feature.
+- **Selective row export (e.g., "only posts from last 7 days")** is
+  future work.
+- **Export scheduling** is intentionally absent — Phase 4's launchd
+  recipes cover backups; exports stay manual-trigger per spec §17.
+- **Encrypted exports** deferred to V1.1+ per §18.
+- **Phase 5.5 placeholders** are comments-only. When the publish-flow
+  migration lands, the corresponding allowlist edits are a single-line
+  insertion at the marked sites in `app/exports/allowlists.py`.
 
 ---
 
 ## Phase boundary
 
-Commits on `main` for Phase 4 (in order of the phase prompt's
-work-order):
+Commits on `main` for Phase 5 (in order of the phase prompt's work-order):
 
-1. `feat(migrations): settings additions for backup retention (003)`
-2. `feat(scripts): real backup_db with VACUUM INTO + integrity check`
-3. `feat(scripts): restore_db with dry-run default`
-4. `feat(settings): backup section with last-backup timestamp`
-5. `test(backup): integrity + restore + retention tests`
-6. `docs(automation): launchd + cron recipes`
+1. `feat(exports): per-table CSV allowlist module`
+2. `feat(exports): CSV exporter`
+3. `feat(exports): raw JSON exporter with secret redaction`
+4. `feat(exports): markdown weekly report with counterfactual gating`
+5. `feat(migrations): data_exports audit table (004)`
+6. `feat(settings): exports section`
+7. `test(exports): allowlist, redaction, counterfactual, round-trip`
 
 ---
 
 ## Next phase
 
-Run `phase-5-export.md` — CSV export of `posts` with the §16 (7)
-column allowlist, Markdown weekly-report export to
-`settings.weekly_report_export_path`, and the dedicated "Export agent
-audit" carve-out scaffold per §16 (8) (the agent tables themselves land
-in Phase 5.5).
+Run `phase-5.5-growth-agent.md` — adds Anthropic-powered draft/reply
+flow, the publish_confirmation_tokens table, and the X API OAuth shim.
+Phase 5.5 must extend `app/exports/allowlists.py::POSTS_ALLOWLIST` at
+the marked insertion sites; the contract is documented in
+`docs/ARCHITECTURE.md` "Export allowlist contract".
