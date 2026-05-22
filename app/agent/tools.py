@@ -22,6 +22,7 @@ Phase 5.5 Session 1 ships handlers as functional stubs:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -35,6 +36,8 @@ from app.agent.reply_targets import (
     resolve_recommended_action,
     saturation_score as _saturation_score_helper,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -394,10 +397,15 @@ def _load_engagement_surface_settings(conn: sqlite3.Connection) -> dict[str, Any
     ).fetchall()
     settings = dict(defaults)
     for r in rows:
+        # /review-2 🔵 #7 — narrow the catch + log so a corrupted setting
+        # row doesn't silently fall back to the default with no signal.
         try:
             settings[r["key"]] = json.loads(r["value_json"])
-        except Exception:
-            pass
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            _LOG.warning(
+                "engagement-surface setting %r unparseable (%r); using default %r",
+                r["key"], exc, defaults.get(r["key"]),
+            )
     return settings
 
 
