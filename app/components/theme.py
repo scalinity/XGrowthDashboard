@@ -565,3 +565,163 @@ def readout_card(
         </div>""",
         unsafe_allow_html=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# score_bank — §29.3 four-dimension instrument cluster.
+#
+# Same DNA as iwh_meter but laid out as four columns of equal width, each a
+# stepped 4-bar indicator + big mono numeral. Reads like a patch bay — Daniel
+# can scan a column of cards and instantly see which rows are 3-3-3-3 vs
+# 2-1-1-2. The dimensions accept None for V1.1+ (velocity/timing) and the
+# missing slot renders as a dim "—" with a dashed top rule so the row still
+# aligns vertically.
+# ---------------------------------------------------------------------------
+SCORE_STEP_COLORS: list[str] = [
+    PALETTE["bone_faint"],   # 0 — no value
+    PALETTE["bone_dim"],     # 1
+    PALETTE["phosphor_dim"], # 2
+    PALETTE["phosphor"],     # 3
+]
+
+
+def _score_meter_segment(label: str, value: int | None) -> str:
+    """Return the inner HTML for a single score-bank column."""
+    if value is None:
+        color = PALETTE["bone_faint"]
+        bars_html = (
+            "<div style='display:flex; gap:1px; margin-bottom:0.2rem;'>"
+            + (
+                f"<div style='flex:1; height:3px; background:transparent; "
+                f"border-top:1px dashed {PALETTE['hairline']};'></div>" * 4
+            )
+            + "</div>"
+        )
+        numeral = "—"
+        numeral_color = PALETTE["bone_faint"]
+    else:
+        v = max(0, min(3, int(value)))
+        color = SCORE_STEP_COLORS[v]
+        bars = []
+        # Four discrete bars; the i-th bar is bright if i <= v, else dim.
+        for i in range(4):
+            on = i <= v
+            bg = color if on else PALETTE["hairline"]
+            bars.append(
+                f"<div style='flex:1; height:3px; background:{bg};'></div>"
+            )
+        bars_html = (
+            "<div style='display:flex; gap:2px; margin-bottom:0.3rem;'>"
+            + "".join(bars)
+            + "</div>"
+        )
+        numeral = str(v)
+        numeral_color = color
+    return (
+        f"<div style='flex:1; padding:0.45rem 0.5rem 0.4rem 0.5rem; "
+        f"background:{PALETTE['surface']}; border-radius:2px;'>"
+        f"{bars_html}"
+        f"<div style='display:flex; justify-content:space-between; align-items:baseline;'>"
+        f"<span style='font-family: JetBrains Mono, monospace; font-size:0.66rem; "
+        f"letter-spacing:0.1em; color:{PALETTE['bone_faint']};'>{label}</span>"
+        f"<span class='numeric' style='font-size:1.15rem; line-height:1; "
+        f"color:{numeral_color};'>{numeral}</span>"
+        f"</div>"
+        f"</div>"
+    )
+
+
+def score_bank(
+    relevance: int | None,
+    engagement_surface: int | None,
+    saturation: int | None,
+    reply_opportunity: int | None,
+    *,
+    engagement_footnote: str | None = None,
+) -> None:
+    """Render the §29.3 four-dimension instrument cluster.
+
+    Columns left-to-right: ``R`` (relevance), ``E`` (engagement), ``S``
+    (saturation), ``O`` (reply opportunity). When the candidate's
+    ``target_author_follower_count`` is NULL, the caller may pass a short
+    ``engagement_footnote`` (e.g. "floor — no author size") and the engagement
+    column renders a small superscript indicator so Daniel knows the score is
+    using §29.4 floor thresholds.
+    """
+    e_label = "E"
+    if engagement_footnote:
+        e_label = "E*"
+    cluster = (
+        f"<div style='display:flex; gap:0.45rem; margin:0.45rem 0 0.5rem 0;'>"
+        f"{_score_meter_segment('R', relevance)}"
+        f"{_score_meter_segment(e_label, engagement_surface)}"
+        f"{_score_meter_segment('S', saturation)}"
+        f"{_score_meter_segment('O', reply_opportunity)}"
+        f"</div>"
+    )
+    footnote_html = ""
+    if engagement_footnote:
+        footnote_html = (
+            f"<div class='faint' style='font-size:0.7rem; color:{PALETTE['bone_faint']}; "
+            f"margin:-0.2rem 0 0.3rem 0.1rem;'>"
+            f"<span style='font-family: JetBrains Mono, monospace;'>*</span> "
+            f"{engagement_footnote}</div>"
+        )
+    st.markdown(cluster + footnote_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# recommended_action_badge — §29.3 stepped intensity ladder.
+#
+# 'reply_now'     → phosphor bg, ink text   — brightest readout
+# 'reply_if_time' → phosphor_dim bg, bone   — softer
+# 'consider'      → surface_raised, bone_dim — neutral
+# 'skip'          → surface, bone_faint, strikethrough — drained
+#
+# NO RED. "Skip" is drained, not wrong; same discipline as the rest of the
+# UI (sample-size labels frame questions, never failures).
+# ---------------------------------------------------------------------------
+def recommended_action_badge(label: str | None) -> str:
+    """Return HTML for the stepped recommended-action badge.
+
+    Returns a string (not st.markdown) so callers can compose it into a
+    larger row, same pattern as ``dim()`` / ``numeric()``.
+    """
+    if label is None or label == "":
+        return (
+            f"<span style='font-family: JetBrains Mono, monospace; "
+            f"font-size:0.75rem; letter-spacing:0.08em; text-transform:uppercase; "
+            f"background:{PALETTE['surface']}; color:{PALETTE['bone_faint']}; "
+            f"padding:2px 8px; border-radius:2px;'>unscored</span>"
+        )
+    styles: dict[str, tuple[str, str, str]] = {
+        # label → (bg color key, fg color key, extra css)
+        "reply_now":     ("phosphor",        "ink",        ""),
+        "reply_if_time": ("phosphor_dim",    "bone",       ""),
+        "consider":      ("surface_raised",  "bone_dim",   ""),
+        "skip":          ("surface",         "bone_faint", "text-decoration: line-through;"),
+    }
+    bg_key, fg_key, extra = styles.get(label, ("surface", "bone_dim", ""))
+    return (
+        f"<span style='font-family: JetBrains Mono, monospace; "
+        f"font-size:0.75rem; letter-spacing:0.08em; text-transform:uppercase; "
+        f"background:{PALETTE[bg_key]}; color:{PALETTE[fg_key]}; "
+        f"padding:2px 8px; border-radius:2px; {extra}'>"
+        f"{label.replace('_', ' ')}</span>"
+    )
+
+
+def recommended_action_keyline_color(label: str | None) -> str:
+    """Return the PALETTE color matching a recommended-action label.
+
+    Used by the Queue's candidate cards (and the Next Rep windowed cards)
+    to set their left-keyline color so the action ladder is visible at the
+    edge of peripheral vision when scanning a column.
+    """
+    mapping = {
+        "reply_now":     PALETTE["phosphor"],
+        "reply_if_time": PALETTE["phosphor_dim"],
+        "consider":      PALETTE["bone_dim"],
+        "skip":          PALETTE["hairline"],
+    }
+    return mapping.get(label or "", PALETTE["hairline"])

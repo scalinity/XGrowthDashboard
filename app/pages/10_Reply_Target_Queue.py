@@ -1,0 +1,504 @@
+"""Reply Target Queue — spec.md §29.7.
+
+The ninth and final MVP view (§19). The Queue is where Daniel reviews
+candidate posts to reply *under*. Each row carries:
+
+* The four §29.3 dimension scores rendered as a four-strip score bank.
+* The deterministic recommended_action label (§29.3 resolver).
+* Per-row operations: Open original / Draft reply / Skip / Mark posted.
+
+The view also hosts the "Add candidate" form (manual URL paste + optional
+metric snapshot) and a sticky banner for §29.11 stale-drafted rows.
+
+Design language: instrument-panel readouts. The score bank component lives
+in ``app.components.theme`` next to ``iwh_meter`` because it shares the
+same step-color ladder discipline (§28.2 IWH meter pattern, §29.3 here).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+import streamlit as st
+
+from app.agent.reply_targets import (
+    REPLY_INTENT_ENUM,
+    SKIP_REASON_ENUM,
+)
+from app.agent.tools import _parse_x_post_id, _record_reply_target, _score_reply_candidates
+from app.components.theme import (
+    PALETTE,
+    apply_theme,
+    callout,
+    hairline,
+    kicker,
+    readout_card,
+    recommended_action_badge,
+    recommended_action_keyline_color,
+    score_bank,
+)
+from app.db import transaction
+from app.jobs.reply_target_maintenance import (
+    expire_stale_candidates,
+    stale_drafted_candidates,
+)
+from app.pages import open_connection
+
+
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
+def _counters(conn: sqlite3.Connection) -> dict[str, int]:
+    """Header counter strip — candidates / drafted / posted today / skipped today."""
+    rows = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'candidate'                              THEN 1 ELSE 0 END) AS candidates,
+            SUM(CASE WHEN status = 'drafted'                                THEN 1 ELSE 0 END) AS drafted,
+            SUM(CASE WHEN status = 'posted'
+                      AND DATE(last_checked_at_utc) = DATE('now')           THEN 1 ELSE 0 END) AS posted_today,
+            SUM(CASE WHEN status = 'skipped'
+                      AND DATE(last_checked_at_utc) = DATE('now')           THEN 1 ELSE 0 END) AS skipped_today
+        FROM reply_targets
+        """
+    ).fetchone()
+    return {
+        "candidates":    int(rows["candidates"]    or 0),
+        "drafted":       int(rows["drafted"]       or 0),
+        "posted_today":  int(rows["posted_today"]  or 0),
+        "skipped_today": int(rows["skipped_today"] or 0),
+    }
+
+
+def _query_rows(
+    conn: sqlite3.Connection,
+    *,
+    status: str,
+    pillar: str | None,
+    reply_intent: str | None,
+    recommended_action: str | None,
+    author: str | None,
+) -> list[sqlite3.Row]:
+    """Apply the filter bar — every filter is optional."""
+    sql = "SELECT * FROM reply_targets WHERE 1=1"
+    params: list[object] = []
+    if status and status != "all":
+        sql += " AND status = ?"
+        params.append(status)
+    if pillar:
+        sql += " AND pillar = ?"
+        params.append(pillar)
+    if reply_intent:
+        sql += " AND reply_intent = ?"
+        params.append(reply_intent)
+    if recommended_action:
+        sql += " AND recommended_action_label = ?"
+        params.append(recommended_action)
+    if author:
+        sql += " AND target_author_handle LIKE ?"
+        params.append(f"%{author.strip().lstrip('@')}%")
+    sql += " ORDER BY COALESCE(recommended_action_score, -1) DESC, last_checked_at_utc DESC"
+    return conn.execute(sql, params).fetchall()
+
+
+def _row_age(conn: sqlite3.Connection, row: sqlite3.Row) -> str:
+    """Render a short relative-age label for a row (e.g. "74 min ago")."""
+    out = conn.execute(
+        "SELECT CAST((julianday('now') - julianday(?)) * 1440 AS INTEGER) AS m",
+        (row["discovered_at_utc"],),
+    ).fetchone()
+    m = int(out["m"] or 0)
+    if m < 60:
+        return f"{m} min ago"
+    h = m // 60
+    if h < 48:
+        return f"{h} h ago"
+    return f"{h // 24} d ago"
+
+
+def _truncate(s: str | None, n: int) -> str:
+    if not s:
+        return ""
+    s = s.strip().replace("\n", " ")
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+# ---------------------------------------------------------------------------
+# Render
+# ---------------------------------------------------------------------------
+apply_theme()
+conn = open_connection()
+
+# Boot-time maintenance — idempotent. §29.11 expiry transition.
+_expired = expire_stale_candidates(conn)
+_stale_drafted_rows = stale_drafted_candidates(conn)
+
+kicker("§29 · INSTRUMENT 9 / 9 · REPLY TARGET QUEUE")
+st.title("Reply target queue")
+st.caption(
+    "Candidates to reply *under*, scored on four dimensions per §29.3. "
+    "The recommended action is deterministic from the scores — no hidden "
+    "composite. Sort order is "
+    "reply_now → reply_if_time → consider → skip, then by recency."
+)
+
+# ---------------------------------------------------------------------------
+# Stale-drafted banner — §29.11 row 3.
+# ---------------------------------------------------------------------------
+if _stale_drafted_rows:
+    n = len(_stale_drafted_rows)
+    st.markdown(
+        f"""<div style='border-left:2px solid {PALETTE['warn_amber']};
+                       background:{PALETTE['surface']};
+                       padding:0.65rem 0.9rem; margin:0.5rem 0 1rem 0;
+                       border-radius:2px;'>
+            <div class='kicker' style='color:{PALETTE['warn_amber']};'>
+                STALE DRAFTED — §29.11
+            </div>
+            <div style='margin-top:0.2rem; color:{PALETTE['bone']};'>
+                {n} candidate{'s' if n != 1 else ''} sitting in
+                <span class='numeric'>drafted</span> for more than 24h.
+                Did you post them? Use <em>Mark posted</em> on each row to
+                record the URL, or <em>Skip</em> to close them out.
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+# ---------------------------------------------------------------------------
+# Counter strip
+# ---------------------------------------------------------------------------
+counts = _counters(conn)
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    readout_card("Candidates", str(counts["candidates"]))
+with c2:
+    readout_card("Drafted", str(counts["drafted"]), accent="phosphor_dim")
+with c3:
+    readout_card("Posted · today", str(counts["posted_today"]), accent="phosphor")
+with c4:
+    readout_card(
+        "Skipped · today",
+        str(counts["skipped_today"]),
+        accent="bone_dim",
+        empty=(counts["skipped_today"] == 0),
+    )
+
+# ---------------------------------------------------------------------------
+# Filter bar — five horizontal dropdowns.
+# ---------------------------------------------------------------------------
+st.markdown(
+    "<div class='kicker' style='margin-top:0.4rem;'>FILTERS</div>",
+    unsafe_allow_html=True,
+)
+f1, f2, f3, f4, f5 = st.columns(5)
+status_options = ["all", "candidate", "drafted", "posted", "skipped", "expired", "target_deleted"]
+flt_status = f1.selectbox(
+    "status", status_options, index=1, key="rtq_filter_status", label_visibility="visible"
+)
+pillar_options = ["—", "stir", "build", "self"]
+flt_pillar_raw = f2.selectbox(
+    "pillar", pillar_options, index=0, key="rtq_filter_pillar"
+)
+intent_options = ["—", *REPLY_INTENT_ENUM]
+flt_intent_raw = f3.selectbox(
+    "reply intent", intent_options, index=0, key="rtq_filter_intent"
+)
+action_options = ["—", "reply_now", "reply_if_time", "consider", "skip"]
+flt_action_raw = f4.selectbox(
+    "recommended action", action_options, index=0, key="rtq_filter_action"
+)
+flt_author = f5.text_input("author handle", "", placeholder="@handle", key="rtq_filter_author")
+
+flt_pillar = None if flt_pillar_raw == "—" else flt_pillar_raw
+flt_intent = None if flt_intent_raw == "—" else flt_intent_raw
+flt_action = None if flt_action_raw == "—" else flt_action_raw
+
+# ---------------------------------------------------------------------------
+# Add candidate — collapsible expander; the Queue is for review, not capture.
+# ---------------------------------------------------------------------------
+with st.expander("＋  add candidate (paste URL)", expanded=False):
+    with st.form("rtq_add_candidate", clear_on_submit=True):
+        url = st.text_input(
+            "target post URL",
+            placeholder="https://x.com/{handle}/status/{id}",
+        )
+        ac_a, ac_b = st.columns(2)
+        author_handle = ac_a.text_input("author handle", placeholder="@handle (optional)")
+        author_followers = ac_b.number_input(
+            "author follower count (optional)", min_value=0, value=0, step=100
+        )
+        target_text = st.text_area(
+            "target text (optional)",
+            placeholder="paste the post text so the score rationale has context",
+            height=80,
+        )
+        m1, m2, m3 = st.columns(3)
+        like_count = m1.number_input("likes", min_value=0, value=0, step=1)
+        reply_count = m2.number_input("replies", min_value=0, value=0, step=1)
+        repost_count = m3.number_input("reposts", min_value=0, value=0, step=1)
+        p1, p2 = st.columns(2)
+        c_pillar = p1.selectbox("pillar (optional)", ["—", "stir", "build", "self"], index=0)
+        c_intent = p2.selectbox(
+            "reply intent (optional)", ["—", *REPLY_INTENT_ENUM], index=0
+        )
+
+        submitted = st.form_submit_button("Add to queue", width="stretch")
+        if submitted:
+            url_clean = (url or "").strip()
+            if not url_clean:
+                st.error("URL is required.")
+            else:
+                parsed_handle = ""
+                p = urlparse(url_clean)
+                if p.netloc.endswith(("x.com", "twitter.com")) and "/status/" in p.path:
+                    parsed_handle = p.path.split("/")[1] if len(p.path.split("/")) > 1 else ""
+                final_handle = (author_handle.strip().lstrip("@") or parsed_handle or "unknown")
+                # Duplicate-URL guard surfaces the existing row id (§29.11 row 6).
+                already = conn.execute(
+                    "SELECT id FROM reply_targets WHERE target_post_url = ?",
+                    (url_clean,),
+                ).fetchone()
+                if already:
+                    st.warning(
+                        f"Already in queue (id {already['id']}). "
+                        "Use the filter bar above to find the existing row."
+                    )
+                else:
+                    rec = _record_reply_target(
+                        conn,
+                        target_post_url=url_clean,
+                        target_post_text=target_text or None,
+                        target_user=final_handle,
+                        target_author_follower_count=int(author_followers) or None,
+                        like_count=int(like_count) or None,
+                        reply_count=int(reply_count) or None,
+                        repost_count=int(repost_count) or None,
+                        pillar=None if c_pillar == "—" else c_pillar,
+                        reply_intent=None if c_intent == "—" else c_intent,
+                        discovered_via="manual",
+                    )
+                    rt_id = rec.get("reply_target_id")
+                    if rt_id:
+                        # Auto-score on save (no agent judgment yet — relevance
+                        # and reply_opportunity stay NULL until Daniel or the
+                        # agent supplies them).
+                        _score_reply_candidates(conn, reply_target_id=rt_id)
+                        st.success(f"Added candidate #{rt_id}.")
+                        st.rerun()
+                    else:
+                        st.error(f"Could not record: {rec.get('error', 'unknown')}")
+
+# ---------------------------------------------------------------------------
+# Candidate rows
+# ---------------------------------------------------------------------------
+hairline()
+
+rows = _query_rows(
+    conn,
+    status=flt_status,
+    pillar=flt_pillar,
+    reply_intent=flt_intent,
+    recommended_action=flt_action,
+    author=flt_author,
+)
+
+if not rows:
+    callout(
+        "<em>No rows for these filters.</em> Loosen the status filter to "
+        "<span class='numeric'>all</span> or drop the author search to see "
+        "everything."
+    )
+
+for row in rows:
+    rt_id = int(row["id"])
+    age = _row_age(conn, row)
+    handle = (row["target_author_handle"] or "unknown").lstrip("@")
+    keyline = recommended_action_keyline_color(row["recommended_action_label"])
+    eng_footnote = (
+        "floor — no author size" if row["target_author_follower_count"] is None else None
+    )
+
+    # Card surface: keyline color matches the action ladder. Strikethrough
+    # is reserved for skipped rows (the badge already renders strike).
+    st.markdown(
+        f"""<div style='border-left:3px solid {keyline};
+                        padding:0.7rem 0.95rem 0.5rem 0.95rem;
+                        margin:0.6rem 0;
+                        background:{PALETTE['surface']};
+                        border-radius:2px;'>
+            <div style='display:flex; justify-content:space-between; align-items:baseline;'>
+                <span style='color:{PALETTE['bone']}; font-weight:500;
+                              font-family: "IBM Plex Sans", sans-serif;'>@{handle}</span>
+                <span class='numeric' style='font-size:0.75rem; color:{PALETTE['bone_faint']};'>
+                    {age} · #{rt_id}
+                </span>
+            </div>
+            <div style='margin:0.3rem 0 0.2rem 0; color:{PALETTE['bone']};
+                         font-family: "IBM Plex Sans", sans-serif; line-height:1.4;'>
+                {_truncate(row['target_text'], 220) or "<span class='faint'>(no target text saved)</span>"}
+            </div>
+            <div class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};
+                                          margin-top:0.2rem;'>
+                {row['like_count'] or 0} likes · {row['reply_count'] or 0} replies ·
+                {row['repost_count'] or 0} reposts · velocity: —
+                <span class='faint'>(V1.1)</span>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    # Score bank (rendered after the card surface so the gap between scores
+    # and metrics breathes; Streamlit doesn't let us embed it inline).
+    score_bank(
+        row["relevance_score"],
+        row["engagement_surface_score"],
+        row["saturation_score"],
+        row["reply_opportunity_score"],
+        engagement_footnote=eng_footnote,
+    )
+    # Recommended-action ribbon + pillar/intent.
+    pillar_text = row["pillar"] or "—"
+    intent_text = row["reply_intent"] or "—"
+    st.markdown(
+        f"""<div style='display:flex; align-items:baseline; gap:0.6rem;
+                        margin:0 0 0.35rem 0;'>
+            {recommended_action_badge(row['recommended_action_label'])}
+            <span class='faint' style='font-size:0.78rem;'>
+                pillar = <span class='numeric'>{pillar_text}</span> ·
+                intent = <span class='numeric'>{intent_text}</span>
+            </span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    if row["score_rationale"]:
+        st.markdown(
+            f"<div style='color:{PALETTE['bone_dim']}; font-style:italic; "
+            f"font-family: \"IBM Plex Sans\", sans-serif; font-size:0.88rem; "
+            f"margin:0.05rem 0 0.45rem 0;'>"
+            f"{_truncate(row['score_rationale'], 320)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Per-row actions.
+    a1, a2, a3, a4 = st.columns([1.1, 1.1, 1.1, 1.4])
+    with a1:
+        st.link_button("Open original", row["target_post_url"], width="stretch")
+    with a2:
+        if st.button("Draft reply", key=f"rtq_draft_{rt_id}", width="stretch"):
+            st.session_state.agent_conversation_id = None
+            st.session_state.agent_context_seed = "reply_target_queue_draft"
+            st.session_state.agent_pre_armed_reply_target_id = rt_id
+            st.switch_page("pages/9_Agent_Chat.py")
+    with a3:
+        skip_key = f"rtq_skip_open_{rt_id}"
+        if st.button("Skip", key=f"rtq_skip_btn_{rt_id}", width="stretch"):
+            st.session_state[skip_key] = True
+        if st.session_state.get(skip_key):
+            with st.form(f"rtq_skip_form_{rt_id}"):
+                reason = st.selectbox(
+                    "skip reason", SKIP_REASON_ENUM, key=f"rtq_skip_reason_{rt_id}"
+                )
+                col_x, col_y = st.columns(2)
+                confirm = col_x.form_submit_button("Confirm skip")
+                cancel = col_y.form_submit_button("Cancel")
+                if confirm:
+                    with transaction(conn):
+                        conn.execute(
+                            """
+                            UPDATE reply_targets
+                            SET status = 'skipped',
+                                skip_reason = ?,
+                                last_checked_at_utc = datetime('now')
+                            WHERE id = ?
+                            """,
+                            (reason, rt_id),
+                        )
+                    st.session_state.pop(skip_key, None)
+                    st.rerun()
+                if cancel:
+                    st.session_state.pop(skip_key, None)
+                    st.rerun()
+    with a4:
+        mp_key = f"rtq_mp_open_{rt_id}"
+        if st.button("Mark posted", key=f"rtq_mp_btn_{rt_id}", width="stretch"):
+            st.session_state[mp_key] = True
+        if st.session_state.get(mp_key):
+            with st.form(f"rtq_mp_form_{rt_id}"):
+                posted_url = st.text_input(
+                    "posted reply URL",
+                    placeholder="https://x.com/{your_handle}/status/{id}",
+                    key=f"rtq_mp_url_{rt_id}",
+                )
+                mp_intent_default = list(REPLY_INTENT_ENUM).index(row["reply_intent"]) \
+                    if row["reply_intent"] in REPLY_INTENT_ENUM else 0
+                mp_intent = st.selectbox(
+                    "reply intent (locked in on the posted row)",
+                    REPLY_INTENT_ENUM,
+                    index=mp_intent_default,
+                    key=f"rtq_mp_intent_{rt_id}",
+                )
+                col_x, col_y = st.columns(2)
+                confirm = col_x.form_submit_button("Record posted")
+                cancel = col_y.form_submit_button("Cancel")
+                if confirm:
+                    posted_url_clean = (posted_url or "").strip()
+                    if not posted_url_clean:
+                        st.error("Posted URL is required.")
+                    else:
+                        # §29.11 — atomic three-write transaction:
+                        #   1. INSERT posts row
+                        #   2. UPDATE reply_targets.status='posted' + posted_reply_post_id
+                        #   3. (the post row is the one carrying in_reply_to_reply_target_id)
+                        try:
+                            with transaction(conn):
+                                x_id = _parse_x_post_id(posted_url_clean)
+                                cur = conn.execute(
+                                    """
+                                    INSERT INTO posts
+                                        (created_at_utc, created_date, text, type,
+                                         posted_via, manual_confirmation_status,
+                                         x_post_id, url, in_reply_to_reply_target_id,
+                                         reply_intent)
+                                    VALUES
+                                        (datetime('now'), date('now'), ?, 'reply',
+                                         'manual', 'needs_metrics', ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        row["target_text"] or "(reply text not captured)",
+                                        x_id,
+                                        posted_url_clean,
+                                        rt_id,
+                                        mp_intent,
+                                    ),
+                                )
+                                new_post_id = int(cur.lastrowid)
+                                conn.execute(
+                                    """
+                                    UPDATE reply_targets
+                                    SET status = 'posted',
+                                        posted_reply_post_id = ?,
+                                        reply_intent = ?,
+                                        last_checked_at_utc = datetime('now')
+                                    WHERE id = ?
+                                    """,
+                                    (new_post_id, mp_intent, rt_id),
+                                )
+                            st.session_state.pop(mp_key, None)
+                            st.success(
+                                f"Marked posted (post #{new_post_id} ↔ candidate #{rt_id})."
+                            )
+                            st.rerun()
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"Mark-posted failed (rolled back): {exc}")
+                if cancel:
+                    st.session_state.pop(mp_key, None)
+                    st.rerun()
+
+    hairline()
