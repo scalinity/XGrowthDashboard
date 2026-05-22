@@ -44,9 +44,13 @@ def _now_utc_iso() -> str:
 
 
 def _anchor_on_project_root(path: Path) -> Path:
-    """Mirror :func:`app.backup._anchor_on_project_root` so output paths
-    behave the same when callers pass a relative path from a foreign CWD."""
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    """Thin alias for :func:`app.exports._audit.anchor_on_project_root`.
+
+    Hoisted in P58R-31; the prior per-exporter copies (csv / markdown /
+    json) all returned `PROJECT_ROOT / path` for relative inputs.
+    """
+    from app.exports._audit import anchor_on_project_root
+    return anchor_on_project_root(path)
 
 
 def _quote_identifier(name: str) -> str:

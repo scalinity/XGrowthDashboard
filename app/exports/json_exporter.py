@@ -150,7 +150,9 @@ class JsonExportResult:
 
 
 def _anchor_on_project_root(path: Path) -> Path:
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    # Thin alias for app.exports._audit.anchor_on_project_root (P58R-31).
+    from app.exports._audit import anchor_on_project_root
+    return anchor_on_project_root(path)
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:

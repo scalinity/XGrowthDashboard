@@ -42,6 +42,19 @@ EXPORT_KINDS: frozenset[str] = frozenset({
 ExportKind = Literal["csv", "markdown_weekly", "json"]
 
 
+def anchor_on_project_root(path: Path) -> Path:
+    """Resolve relative output paths against PROJECT_ROOT instead of CWD.
+
+    Hoisted from per-exporter copies (P58R-31). Mirror of
+    ``app.backup._anchor_on_project_root`` — both share the convention
+    that a relative path from any CWD anchors at the repo root.
+    """
+    # Local import to avoid an import cycle with app.db (which imports
+    # nothing from app.exports). PROJECT_ROOT is a Path constant.
+    from app.db import PROJECT_ROOT
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

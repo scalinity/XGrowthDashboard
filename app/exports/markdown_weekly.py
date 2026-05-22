@@ -130,7 +130,9 @@ _ISO_WEEK_RE: re.Pattern[str] = re.compile(r"^(\d{4})-W(0[1-9]|[1-4]\d|5[0-3])$"
 
 
 def _anchor_on_project_root(path: Path) -> Path:
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    # Thin alias for app.exports._audit.anchor_on_project_root (P58R-31).
+    from app.exports._audit import anchor_on_project_root
+    return anchor_on_project_root(path)
 
 
 def _iso_week_to_dates(week_iso: str) -> tuple[date, date]:
