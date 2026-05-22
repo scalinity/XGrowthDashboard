@@ -275,14 +275,49 @@ def test_audit_log_no_agent_tool_exposes_audit_logs() -> None:
         "§28.30 forbids the agent from reading or writing the audit log."
     )
 
+    # P511R-10: strengthen the source-scan to ALSO catch "audit_log"
+    # (not just the plural "audit_logs"). The substring check now trips
+    # on `from app.agent import audit_log`, `from app.agent.audit_log
+    # import log`, or any handler closure that names the module — the
+    # import statement itself is the smoke. Previous test only caught
+    # the table name; a developer could have added the module import
+    # without the test noticing.
+    #
+    # AST-level walk of the imports also runs below for belt-and-
+    # suspenders — substring scan flags comments + docstrings, AST
+    # walk flags actual import statements only. Together they cover
+    # both "looks suspicious in source" and "actually imports the
+    # forbidden module" failure modes.
     tools_source = Path("app/agent/tools.py").read_text()
-    # The implementing module must not reference audit_logs the table.
-    # (`audit_log.log(...)` calls from the agent path are also forbidden;
-    # state-changing tools should log via the underlying server-side
-    # path, not directly.)
-    assert "audit_logs" not in tools_source, (
-        "app/agent/tools.py references audit_logs — the agent must not "
-        "read or write the audit log table directly (§28.30)."
+    assert "audit_log" not in tools_source, (
+        "app/agent/tools.py references audit_log (the module OR the "
+        "table). The agent must NOT read or write the audit log table "
+        "directly per §28.30 — state-changing tools should log via the "
+        "underlying server-side module path, not from inside a tool "
+        "handler."
+    )
+
+    import ast as _ast
+    tree = _ast.parse(tools_source)
+    forbidden_imports: list[str] = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Import):
+            for alias in node.names:
+                if alias.name == "app.agent.audit_log" or alias.name.endswith(
+                    ".audit_log"
+                ):
+                    forbidden_imports.append(alias.name)
+        elif isinstance(node, _ast.ImportFrom):
+            module = node.module or ""
+            if module == "app.agent.audit_log" or module.endswith(".audit_log"):
+                forbidden_imports.append(module)
+            if module == "app.agent":
+                for alias in node.names:
+                    if alias.name == "audit_log":
+                        forbidden_imports.append(f"app.agent.{alias.name}")
+    assert not forbidden_imports, (
+        f"app/agent/tools.py imports audit_log: {forbidden_imports}. "
+        "§28.30 forbids the agent layer from accessing the audit log."
     )
 
 
