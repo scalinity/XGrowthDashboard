@@ -31,8 +31,14 @@ import streamlit as st
 from app.agent.reply_targets import (
     REPLY_INTENT_ENUM,
     SKIP_REASON_ENUM,
+    engagement_footnote as _engagement_footnote,
 )
-from app.agent.tools import _parse_x_post_id, _record_reply_target, _score_reply_candidates
+from app.agent.tools import (
+    _load_engagement_surface_settings,
+    _parse_x_post_id,
+    _record_reply_target,
+    _score_reply_candidates,
+)
 from app.components.theme import (
     PALETTE,
     apply_theme,
@@ -322,8 +328,12 @@ for row in rows:
     age = _row_age(conn, row)
     handle = (row["target_author_handle"] or "unknown").lstrip("@")
     keyline = recommended_action_keyline_color(row["recommended_action_label"])
-    eng_footnote = (
-        "floor — no author size" if row["target_author_follower_count"] is None else None
+    # /review-2 🟡 #1 — also label when the absolute floor (rather than the
+    # %-of-followers calc) is the binding threshold; a 200-follower author's
+    # pct calc rounds below the 15-likes floor, so the floor wins silently.
+    eng_footnote = _engagement_footnote(
+        row["target_author_follower_count"],
+        _load_engagement_surface_settings(conn),
     )
 
     # Card surface: keyline color matches the action ladder. Strikethrough

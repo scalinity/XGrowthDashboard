@@ -24,6 +24,7 @@ import pytest
 
 from app.agent.reply_targets import (
     ACTION_TO_SCORE,
+    engagement_footnote,
     engagement_surface_score,
     engagement_surface_thresholds,
     resolve_recommended_action,
@@ -204,3 +205,30 @@ def test_saturation_one_hundred_replies_is_0():
 
 def test_saturation_huge_thread_is_0():
     assert saturation_score(1_500) == 0
+
+
+# ---------------------------------------------------------------------------
+# engagement_footnote — §29.4 floor-binding labeling (/review-2 🟡 #1).
+# ---------------------------------------------------------------------------
+def test_footnote_null_author_uses_no_author_size_label():
+    assert engagement_footnote(None, DEFAULT_SETTINGS) == "floor — no author size"
+
+
+def test_footnote_fires_when_floor_binds_on_small_author():
+    """200 × 0.001 = 0.2 → max(15, 0) = 15 (floor wins). Must surface footnote."""
+    note = engagement_footnote(200, DEFAULT_SETTINGS)
+    assert note is not None
+    assert "author too small" in note
+    assert "200" in note
+
+
+def test_footnote_none_when_pct_calc_exceeds_floor():
+    """50000 × 0.001 = 50 > floor 15 → no footnote, pct calc dominates."""
+    assert engagement_footnote(50_000, DEFAULT_SETTINGS) is None
+
+
+def test_footnote_boundary_at_floor_breakeven():
+    """15000 × 0.001 = 15 == floor 15 → not strictly less, no footnote."""
+    assert engagement_footnote(15_000, DEFAULT_SETTINGS) is None
+    # Just below the breakeven follower count: 14999 × 0.001 = 14 < 15 → footnote.
+    assert engagement_footnote(14_999, DEFAULT_SETTINGS) is not None

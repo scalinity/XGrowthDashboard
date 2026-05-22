@@ -98,6 +98,31 @@ def engagement_surface_thresholds(
     )
 
 
+def engagement_footnote(
+    target_author_follower_count: int | None,
+    settings: dict[str, Any],
+) -> str | None:
+    """Footnote string when the floor (rather than the %-of-followers calc)
+    is the active engagement-surface threshold — None otherwise.
+
+    /review-2 🟡 #1 — the prior footnote rule only fired when the author
+    follower count was NULL, missing the small-author case where the
+    %-of-followers calculation produces a value below the floor and the
+    floor wins. Daniel reads ``engagement_surface_score = 2`` and assumes
+    a real per-author bar was crossed; in fact only the absolute floor was.
+    """
+    if target_author_follower_count is None:
+        return "floor — no author size"
+    floor_med = int(settings.get("engagement_surface_floor_likes", 15))
+    pct_med = float(settings.get("engagement_surface_pct_of_author", 0.001))
+    if int(pct_med * int(target_author_follower_count)) < floor_med:
+        return (
+            f"floor — author too small "
+            f"({int(target_author_follower_count)} followers)"
+        )
+    return None
+
+
 def saturation_score(reply_count: int) -> int:
     """Map current ``reply_count`` into the §29.3 saturation dimension.
 

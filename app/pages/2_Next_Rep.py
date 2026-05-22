@@ -19,6 +19,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
+from app.agent.reply_targets import engagement_footnote as _engagement_footnote
+from app.agent.tools import _load_engagement_surface_settings
 from app.components.badges.sample_size import sample_size_badge
 from app.components.theme import (
     PALETTE,
@@ -258,10 +260,11 @@ else:
             _text_excerpt = _text_excerpt[:79] + "…"
         if not _text_excerpt:
             _text_excerpt = "<span class='faint'>(no target text saved)</span>"
-        _eng_footnote = (
-            "floor — no author size"
-            if _r["target_author_follower_count"] is None
-            else None
+        # /review-2 🟡 #1 — also label when the floor is binding for a small
+        # author, not just when the follower count is unknown.
+        _eng_footnote = _engagement_footnote(
+            _r["target_author_follower_count"],
+            _load_engagement_surface_settings(conn),
         )
         st.markdown(
             f"""<div style='border-left:3px solid {_keyline};
