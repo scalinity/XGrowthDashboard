@@ -218,10 +218,17 @@ def test_lane_performance_median_and_iqr_are_sensible(
     assert row["iqr_impressions_high"] == pytest.approx(775)
 
 
-def test_lane_performance_uses_latest_classification_per_post(
+def test_lane_performance_uses_current_classification_per_post(
     empty_db_conn: sqlite3.Connection,
 ) -> None:
-    """A post reclassified mid-stream counts once, against the latest lane."""
+    """A post reclassified mid-stream counts once, against the current lane.
+
+    Pre-migration-007 this test inserted a second post_classifications
+    row to simulate reclassification (and the view's CTE picked the
+    newest classified_at). Migration 007 adds UNIQUE(post_id), so
+    reclassification is now an UPDATE — the test asserts the same
+    semantic via the new shape.
+    """
     _seed_lane(
         empty_db_conn,
         pillar="stir",
@@ -230,12 +237,14 @@ def test_lane_performance_uses_latest_classification_per_post(
         post_count=5,
         days_covered=5,
     )
-    # Reclassify post 1 — newer classified_at wins.
+    # Reclassify post 1 via UPDATE — one row per post, current values win.
     empty_db_conn.execute(
         """
-        INSERT INTO post_classifications
-          (post_id, pillar, audience, cta, classified_at)
-        VALUES (1, 'build', 'other', 'none', '2099-01-01T00:00:00Z')
+        UPDATE post_classifications
+           SET pillar = 'build', audience = 'other', cta = 'none',
+               classified_at = '2099-01-01T00:00:00Z',
+               updated_at = '2099-01-01T00:00:00Z'
+         WHERE post_id = 1
         """
     )
     rows = empty_db_conn.execute(
@@ -261,12 +270,15 @@ def test_lane_performance_stir_signal_follows_latest_classification(
         pillar="stir", audience="icp", cta="ask",
         created_date="2026-05-01", impressions=100, idx=1,
     )
-    # …then gets reclassified to (build, other, none) at a later timestamp.
+    # …then gets reclassified to (build, other, none) via UPDATE (one row
+    # per post under migration 007's UNIQUE(post_id) constraint).
     empty_db_conn.execute(
         """
-        INSERT INTO post_classifications
-          (post_id, pillar, audience, cta, classified_at)
-        VALUES (1, 'build', 'other', 'none', '2099-01-01T00:00:00Z')
+        UPDATE post_classifications
+           SET pillar = 'build', audience = 'other', cta = 'none',
+               classified_at = '2099-01-01T00:00:00Z',
+               updated_at = '2099-01-01T00:00:00Z'
+         WHERE post_id = 1
         """
     )
     # Seed 5 unrelated posts in (stir, icp, ask) so that lane appears in

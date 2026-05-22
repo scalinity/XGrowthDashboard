@@ -494,17 +494,22 @@ def _save_draft_post(
             (post_id, draft_id),
         )
 
-        # W12 lands the UNIQUE(post_id) index that lets a future change
-        # switch this to INSERT ON CONFLICT. Until then we just INSERT —
-        # since this whole block is inside `transaction(conn)`, a retry
-        # would be caught by the transaction failure path, not produce a
-        # duplicate. Duplicates can only arise across SEPARATE successful
-        # save_draft_post calls for the same post (which W12 prevents).
+        # W12 added a UNIQUE(post_id) index on post_classifications. ON
+        # CONFLICT DO UPDATE keeps the row a single source of truth and
+        # absorbs retries idempotently — repeated save_draft_post calls
+        # for the same post now overwrite the classification rather than
+        # accumulating rows.
         conn.execute(
             """
             INSERT INTO post_classifications
                 (post_id, pillar, audience, cta, hypothesis)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+                pillar = excluded.pillar,
+                audience = excluded.audience,
+                cta = excluded.cta,
+                hypothesis = excluded.hypothesis,
+                updated_at = datetime('now')
             """,
             (post_id, pillar, audience, cta, hypothesis),
         )
