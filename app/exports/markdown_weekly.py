@@ -17,6 +17,7 @@ to *audit* the interpretation, which means showing absences too.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import sys
@@ -479,28 +480,53 @@ def export_weekly_report(
             open_hypotheses=hypotheses,
         )
 
-        target.write_text(document, encoding="utf-8")
+        # /review-2 W1: atomic file + UPDATE + audit-INSERT.
+        # Three-phase write so a DB failure can never leave an orphan
+        # markdown file on disk:
+        #   1. write the document to target.tmp (durable but invisible)
+        #   2. BEGIN IMMEDIATE + UPDATE weekly_reviews + record_export + COMMIT
+        #   3. os.replace(tmp, target) — atomic on POSIX
+        # If any step fails before the rename, the tmp file is removed.
+        # If the rename succeeds, the audit row's output_path is valid.
+        tmp_target = target.with_suffix(target.suffix + ".tmp")
+        tmp_target.write_text(document, encoding="utf-8")
+        try:
+            active.execute("BEGIN IMMEDIATE")
+            try:
+                active.execute(
+                    """
+                    UPDATE weekly_reviews
+                       SET exported_markdown_path = ?,
+                           updated_at = datetime('now')
+                     WHERE id = ?
+                    """,
+                    (str(target), review["id"]),
+                )
+                record_export(
+                    active,
+                    kind=EXPORT_KIND_MARKDOWN_WEEKLY,
+                    output_path=target,
+                    row_count=1,
+                    notes=f"week={week_iso}",
+                )
+                active.execute("COMMIT")
+            except Exception:
+                # Any failure between BEGIN and COMMIT — including the
+                # IntegrityError re-raise from record_export — rolls back
+                # both writes so the DB stays consistent with disk.
+                active.execute("ROLLBACK")
+                raise
+            os.replace(tmp_target, target)
+        except Exception:
+            # File-write or rename failure after a successful commit is
+            # rare (mkdir already ran, parent exists), but if it happens
+            # we still want the orphan tmp gone.
+            try:
+                tmp_target.unlink()
+            except FileNotFoundError:
+                pass
+            raise
         byte_count = target.stat().st_size
-
-        # Also stamp the exported_markdown_path on the review row so
-        # future-Daniel can find his own export from the DB.
-        active.execute(
-            """
-            UPDATE weekly_reviews
-               SET exported_markdown_path = ?,
-                   updated_at = datetime('now')
-             WHERE id = ?
-            """,
-            (str(target), review["id"]),
-        )
-
-        record_export(
-            active,
-            kind=EXPORT_KIND_MARKDOWN_WEEKLY,
-            output_path=target,
-            row_count=1,
-            notes=f"week={week_iso}",
-        )
     finally:
         if own_conn:
             active.close()
