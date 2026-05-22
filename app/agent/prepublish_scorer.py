@@ -179,11 +179,15 @@ def hook_strength_score(text: str) -> int:
     for pat in _GENERIC_OPENER_PATTERNS:
         if pat.search(first_line):
             return 0
+    # P58R-17 — strip URLs and hashtags before the digit / proper-noun
+    # check so incidental digits inside an URL (`/status/1234`) or a
+    # hashtag (`#build2024`) don't fake-pass the "concrete signal" gate.
+    cleaned_first_line = re.sub(r"https?://\S+|#\w+", " ", first_line)
     # Concrete signal: a digit OR a proper-noun-shaped word, plus length.
     # Any digit anywhere counts — "7pm" is concrete even though `\b\d+\b`
     # would miss it because `pm` is a word char with no boundary.
-    has_digit = bool(re.search(r"\d", first_line))
-    has_proper = bool(re.search(r"\b[A-Z][a-zA-Z]{2,}\b", first_line))
+    has_digit = bool(re.search(r"\d", cleaned_first_line))
+    has_proper = bool(re.search(r"\b[A-Z][a-zA-Z]{2,}\b", cleaned_first_line))
     words = first_line.split()
     if has_digit and len(words) >= 6:
         return 3

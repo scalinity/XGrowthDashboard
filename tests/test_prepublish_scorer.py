@@ -60,6 +60,22 @@ def test_hook_with_digit_returns_three() -> None:
     assert ps.hook_strength_score("Three failed dinner attempts before 7pm.") == 3
 
 
+def test_hook_digit_inside_url_does_not_score_three() -> None:
+    """P58R-17: an embedded URL id like /status/1234 should NOT fake-pass
+    the digit signal. With URLs stripped, this 6-word line earns 1."""
+    s = ps.hook_strength_score("see https://x.com/abc/status/1234567 worth a look")
+    assert s <= 1
+
+
+def test_hook_digit_inside_hashtag_does_not_score_three() -> None:
+    """P58R-17: digits inside a hashtag (#build2024) should not fake-pass."""
+    s = ps.hook_strength_score("ship #build2024 has been wild so far")
+    # Without the digit signal, this 8-word line still has a proper-noun
+    # and 5+ words so earns 2 via the proper-noun branch — but it must
+    # NOT earn 3 (which would require the digit signal).
+    assert s < 3
+
+
 def test_specificity_with_numbers_and_proper_nouns() -> None:
     text = "Stir launched in March with 12 testers. Three already cook weekly."
     assert ps.specificity_score(text) == 3
