@@ -550,7 +550,11 @@ def _resolve_output_path(
     from app.forms import get_setting
 
     seeded = get_setting(conn, "weekly_report_export_path", default="data/exports")
-    base = Path(seeded) if seeded else Path("data/exports")
+    # get_setting JSON-decodes value_json, so seeded can be None, str, int,
+    # list, etc. Coerce to str before Path() — a hand-edited integer in the
+    # settings row would otherwise crash with TypeError("argument should be
+    # a str…").
+    base = Path(str(seeded)) if seeded else Path("data/exports")
     base = _anchor_on_project_root(base)
     return base / f"weekly_report_{week_iso}.md"
 

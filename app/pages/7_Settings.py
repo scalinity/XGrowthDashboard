@@ -470,7 +470,9 @@ def _exports_dir_from_settings() -> Path:
     from app.db import PROJECT_ROOT
 
     seeded = get_setting(conn, "export_dir", default="data/exports")
-    path = Path(seeded) if seeded else Path("data/exports")
+    # /review-2 W3: get_setting JSON-decodes value_json — coerce to str
+    # before Path() so a hand-edited non-string value doesn't TypeError.
+    path = Path(str(seeded)) if seeded else Path("data/exports")
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     return path.resolve()
