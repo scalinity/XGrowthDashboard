@@ -183,36 +183,82 @@ def _get_open_hypotheses(conn: sqlite3.Connection) -> dict[str, Any]:
 # 5. get_lane_gaps (§25)
 # ---------------------------------------------------------------------------
 def _get_lane_gaps(conn: sqlite3.Connection, *, week_offset: int = 0) -> dict[str, Any]:
-    """Lanes with zero posts this week — surface the missing distribution lanes."""
-    rows = conn.execute(
-        """
-        WITH possible AS (
-            SELECT 'stir' AS pillar UNION SELECT 'build' UNION SELECT 'self'
-        ),
-        lanes AS (
-            SELECT p.pillar AS pillar, a.audience AS audience, c.cta AS cta
-            FROM possible p
-            CROSS JOIN (SELECT 'icp' AS audience UNION SELECT 'other') a
-            CROSS JOIN (SELECT 'ask' AS cta UNION SELECT 'none') c
-        ),
-        recent_counts AS (
-            SELECT pc.pillar, pc.audience, pc.cta, COUNT(*) AS post_count
-            FROM posts po
-            JOIN post_classifications pc ON pc.post_id = po.id
-            WHERE po.created_date >= date('now', ?)
-            GROUP BY pc.pillar, pc.audience, pc.cta
-        )
-        SELECT l.pillar, l.audience, l.cta,
-               COALESCE(r.post_count, 0) AS post_count
-        FROM lanes l
-        LEFT JOIN recent_counts r
-          ON r.pillar = l.pillar AND r.audience = l.audience AND r.cta = l.cta
-        ORDER BY post_count ASC, l.pillar, l.audience, l.cta
-        """,
-        (f"-{(int(week_offset) + 1) * 7} days",),
-    ).fetchall()
+    """Lanes with zero posts in the given week — surface missing lanes.
+
+    ``week_offset=0`` is the current 7-day window (back to today-7);
+    ``week_offset=1`` is the prior week (today-14 to today-7); etc.
+    The prior implementation only had a lower bound, so any prior-week
+    query also included this week's posts and under-reported gaps.
+    """
+    n = int(week_offset)
+    lower_bound = f"-{(n + 1) * 7} days"
+    if n == 0:
+        # Current window — include today (open upper bound).
+        # NOTE: post_classifications has no UNIQUE(post_id) yet (W12 lands
+        # the migration), so the JOIN can double-count a post that picked
+        # up multiple classification rows from an earlier retry. Use
+        # COUNT(DISTINCT po.id) defensively.
+        rows = conn.execute(
+            """
+            WITH possible AS (
+                SELECT 'stir' AS pillar UNION SELECT 'build' UNION SELECT 'self'
+            ),
+            lanes AS (
+                SELECT p.pillar AS pillar, a.audience AS audience, c.cta AS cta
+                FROM possible p
+                CROSS JOIN (SELECT 'icp' AS audience UNION SELECT 'other') a
+                CROSS JOIN (SELECT 'ask' AS cta UNION SELECT 'none') c
+            ),
+            recent_counts AS (
+                SELECT pc.pillar, pc.audience, pc.cta,
+                       COUNT(DISTINCT po.id) AS post_count
+                FROM posts po
+                JOIN post_classifications pc ON pc.post_id = po.id
+                WHERE po.created_date >= date('now', ?)
+                GROUP BY pc.pillar, pc.audience, pc.cta
+            )
+            SELECT l.pillar, l.audience, l.cta,
+                   COALESCE(r.post_count, 0) AS post_count
+            FROM lanes l
+            LEFT JOIN recent_counts r
+              ON r.pillar = l.pillar AND r.audience = l.audience AND r.cta = l.cta
+            ORDER BY post_count ASC, l.pillar, l.audience, l.cta
+            """,
+            (lower_bound,),
+        ).fetchall()
+    else:
+        upper_bound = f"-{n * 7} days"
+        rows = conn.execute(
+            """
+            WITH possible AS (
+                SELECT 'stir' AS pillar UNION SELECT 'build' UNION SELECT 'self'
+            ),
+            lanes AS (
+                SELECT p.pillar AS pillar, a.audience AS audience, c.cta AS cta
+                FROM possible p
+                CROSS JOIN (SELECT 'icp' AS audience UNION SELECT 'other') a
+                CROSS JOIN (SELECT 'ask' AS cta UNION SELECT 'none') c
+            ),
+            recent_counts AS (
+                SELECT pc.pillar, pc.audience, pc.cta,
+                       COUNT(DISTINCT po.id) AS post_count
+                FROM posts po
+                JOIN post_classifications pc ON pc.post_id = po.id
+                WHERE po.created_date >= date('now', ?)
+                  AND po.created_date <  date('now', ?)
+                GROUP BY pc.pillar, pc.audience, pc.cta
+            )
+            SELECT l.pillar, l.audience, l.cta,
+                   COALESCE(r.post_count, 0) AS post_count
+            FROM lanes l
+            LEFT JOIN recent_counts r
+              ON r.pillar = l.pillar AND r.audience = l.audience AND r.cta = l.cta
+            ORDER BY post_count ASC, l.pillar, l.audience, l.cta
+            """,
+            (lower_bound, upper_bound),
+        ).fetchall()
     return {
-        "week_offset": int(week_offset),
+        "week_offset": n,
         "lanes": [dict(r) for r in rows],
         "zero_post_lanes": [dict(r) for r in rows if (r["post_count"] or 0) == 0],
     }

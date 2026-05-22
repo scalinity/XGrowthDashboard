@@ -105,11 +105,19 @@ def mark_orphan_posted(
 
 
 def mark_orphan_failed(conn: sqlite3.Connection, *, post_id: int, reason: str) -> None:
-    """Reconcile an orphan as never-posted. publish_method → 'failed'."""
+    """Reconcile an orphan as never-posted.
+
+    Sets ``publish_method = 'failed'`` AND clears ``published_to_x_at``
+    (per the module docstring's promise — the prior implementation set
+    only the method, leaving the intent timestamp populated, which
+    would resurface the row if a future query dropped the
+    ``publish_method != 'failed'`` predicate).
+    """
     conn.execute(
         """
         UPDATE posts
         SET publish_method = 'failed',
+            published_to_x_at = NULL,
             publish_last_error = ?
         WHERE id = ?
         """,

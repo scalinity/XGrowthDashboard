@@ -37,21 +37,42 @@ def _read_template() -> str:
     return PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+class SpecRuleExtractionError(RuntimeError):
+    """Raised when extract_rules_from_spec cannot find any rules.
+
+    Treat as a hard build failure — the assembled system prompt would
+    otherwise carry the literal '(rule splice failed — see prompt_builder.py)'
+    placeholder string in place of Section 3, and the agent would lose
+    the non-negotiable rules silently.
+    """
+
+
 def extract_rules_from_spec(spec_path: Path | None = None) -> list[str]:
     """Extract numbered rules 1-13 from §28.2 of ``spec.md``.
 
     The regex is anchored to the ``### 28.2 Non-negotiable rules`` heading
-    and stops at the next ``### `` heading. Each ``N. **...**`` numbered
-    item is captured.
+    and stops at the next ``###`` OR ``##`` heading, OR end-of-file —
+    so reorganizing §28.2 to be the last subsection of §28 (or the spec
+    ending after it) doesn't silently break the splice. Each
+    ``N. **...**`` numbered item is captured.
+
+    Raises ``SpecRuleExtractionError`` if zero rules are extracted —
+    the prior silent ``return []`` made drift undetectable because
+    ``verify_rule_count_matches_spec`` would report ``(0, 0)`` and
+    declare itself matched.
     """
     text = (spec_path or SPEC_PATH).read_text(encoding="utf-8")
     section_match = re.search(
-        r"###\s+28\.2\s+Non-negotiable rules.*?\n(.*?)\n###\s",
+        r"###\s+28\.2\s+Non-negotiable rules.*?\n(.*?)(?:\n###\s|\n##\s|\Z)",
         text,
         flags=re.DOTALL,
     )
     if not section_match:
-        return []
+        raise SpecRuleExtractionError(
+            f"Could not locate the §28.2 'Non-negotiable rules' section in "
+            f"{spec_path or SPEC_PATH}. Has the spec been renumbered or "
+            f"moved? Update extract_rules_from_spec's regex anchor."
+        )
     section = section_match.group(1)
     # Match "1. **...**" through end-of-paragraph (blank line OR next number).
     rule_re = re.compile(
@@ -63,6 +84,11 @@ def extract_rules_from_spec(spec_path: Path | None = None) -> list[str]:
         num = m.group(1)
         body = m.group(2).strip()
         rules.append(f"{num}. {body}")
+    if not rules:
+        raise SpecRuleExtractionError(
+            f"Found §28.2 but extracted zero rules. The 'N. **...**' rule "
+            f"shape regex no longer matches; check rule_re or spec formatting."
+        )
     return rules
 
 

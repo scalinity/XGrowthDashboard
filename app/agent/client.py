@@ -347,11 +347,18 @@ class AgentClient:
             )
             dispatched.append(result)
             # Persist tool_result message so the next turn has it in context.
+            # Switch on `status` instead of truthy result — a legitimate empty
+            # result ({} / []) is falsy and used to fall through to error,
+            # which was None, persisted as the literal string "null" (W6).
+            if result.get("status") == "success":
+                content_payload = result.get("result")
+            else:
+                content_payload = result.get("error") or result.get("rationale") or ""
             append_message(
                 conn,
                 conversation_id=conversation_id,
                 role="tool_result",
-                content=json.dumps(result.get("result") or result.get("error")),
+                content=json.dumps(content_payload, default=str),
                 tool_call_id=tc.get("id"),
             )
         turn.assistant_text = assistant_text
