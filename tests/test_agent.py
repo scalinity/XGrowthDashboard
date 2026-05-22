@@ -205,11 +205,31 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "bio_text": "smoke bio",
             "pinned_post_text": "smoke pinned post",
         },
+        # Phase 5.11 / §28.26 — Campaigns analyzer. campaign_id filled
+        # in below after a dual-stream campaign is seeded. Read-only.
+        "analyze_campaign_progress": {"campaign_id": None},
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
     sample_kwargs["process_brain_dump"]["brain_dump_id"] = _brain_dump.create_dump(
         db_conn, raw_text="smoke-test dump"
+    )
+    # Seed a campaign so analyze_campaign_progress has something to
+    # read. The dual-stream success criteria are required by §28.26.
+    from app.agent import campaigns as _campaigns
+    sample_kwargs["analyze_campaign_progress"]["campaign_id"] = (
+        _campaigns.create_campaign(
+            db_conn,
+            name="smoke campaign",
+            theme="t",
+            hypothesis="h",
+            start_date="2026-05-01",
+            end_date="2026-05-28",
+            success_criteria={
+                "distribution": [{"metric": "impressions", "target": "10000"}],
+                "validation": [{"metric": "downloads", "target": "5"}],
+            },
+        )
     )
 
     from app.agent.tools import AGENT_TOOLS

@@ -30,6 +30,7 @@ from typing import Any, Callable
 from app.db import transaction
 from app.agent import account_research as _account_research
 from app.agent import brain_dump as _brain_dump
+from app.agent import campaigns as _campaigns
 from app.agent import profile_audit as _profile_audit
 from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
@@ -1350,7 +1351,7 @@ def _brain_dump_process_to_dict(
     }
 
 
-# AGENT_TOOLS — the registered tool catalog (21 entries after Phase 5.10).
+# AGENT_TOOLS — the registered tool catalog (22 entries after Phase 5.11 — #21 analyze_campaign_progress).
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -1872,6 +1873,35 @@ AGENT_TOOLS: list[ToolDef] = [
                 recent_post_window_days=recent_post_window_days,
                 pinned_post_id=pinned_post_id,
             )
+        ),
+    ),
+    # ----- #21 analyze_campaign_progress (Phase 5.11 §28.26) -----
+    # Read-only structured progress payload for one campaign. Powers
+    # the §14.12 "Ask the agent for ideas" affordance and any chat-
+    # driven "how's campaign N going?" question. The agent doesn't
+    # transition campaign state via tools — every transition is a
+    # Daniel-click in the §14.12 view that goes through the audit-
+    # logged server-side path.
+    ToolDef(
+        name="analyze_campaign_progress",
+        description=(
+            "Return a structured read-only progress report for one "
+            "campaign (§28.26): status, days_remaining, item counts, "
+            "linked-posts summary, and success-criteria progress with "
+            "on_track flags. Use to ground 'how's this campaign going' "
+            "questions and to propose new items for the agent-chat "
+            "'Ask the agent for ideas' flow. Read-only — campaign "
+            "state changes happen via the Campaigns view, not the agent."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "integer"},
+            },
+            "required": ["campaign_id"],
+        },
+        handler=lambda conn, *, campaign_id: _campaigns.analyze_progress(
+            conn, campaign_id=int(campaign_id)
         ),
     ),
 ]
