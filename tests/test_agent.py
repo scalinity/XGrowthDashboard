@@ -234,6 +234,15 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         "draft_blog": {"blog_id": None},
         "suggest_blog_edits": {"blog_id": None},
         "generate_blog_seo_metadata": {"blog_id": None},
+        # Phase 6 / §28.34 — Two repurposing tools. blog_id / post_id
+        # filled in below. Handlers surface BlogRepurposingError as
+        # {"status": "failed"} so the smoke test holds without
+        # ANTHROPIC_API_KEY and without a defined niche.
+        "repurpose_blog_to_x": {
+            "blog_id": None,
+            "mode": "thread_from_sections",
+        },
+        "repurpose_x_to_blog_idea": {"post_id": None},
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
@@ -274,6 +283,20 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
     for _t in ("outline_blog", "draft_blog", "suggest_blog_edits",
                "generate_blog_seo_metadata"):
         sample_kwargs[_t]["blog_id"] = _smoke_blog.id
+
+    # Phase 6 / §28.34 — Repurposing tools need a blog_id and a post_id.
+    # The post we reuse from above isn't available here; insert one.
+    sample_kwargs["repurpose_blog_to_x"]["blog_id"] = _smoke_blog.id
+    _smoke_post_id = db_conn.execute(
+        """
+        INSERT INTO posts (created_date, text, type, posted_via,
+                           manual_confirmation_status)
+        VALUES ('2026-05-22', 'smoke source post', 'standalone', 'manual',
+                'confirmed')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    sample_kwargs["repurpose_x_to_blog_idea"]["post_id"] = _smoke_post_id
 
     from app.agent.tools import AGENT_TOOLS
     saved_draft_id: int | None = None

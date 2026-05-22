@@ -30,6 +30,7 @@ from typing import Any, Callable
 from app.db import transaction
 from app.agent import account_research as _account_research
 from app.agent import blog_drafting as _blog_drafting
+from app.agent import blog_repurposing as _blog_repurposing
 from app.agent import brain_dump as _brain_dump
 from app.agent import campaigns as _campaigns
 from app.agent import inspiration as _inspiration
@@ -836,6 +837,88 @@ def _suggest_blog_edits_to_dict(
         ],
         "overall_confidence_label": result.overall_confidence_label,
         "summary": result.summary,
+        "tokens_used": result.tokens_used,
+    }
+
+
+def _repurpose_blog_to_x_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    blog_id: int,
+    mode: str,
+    override_plagiarism: bool = False,
+) -> dict[str, Any]:
+    try:
+        result = _blog_repurposing.repurpose_blog_to_x(
+            conn,
+            blog_id=int(blog_id),
+            mode=mode,  # type: ignore[arg-type]
+            override_plagiarism=bool(override_plagiarism),
+        )
+    except _blog_repurposing.PlagiarismBlockedError as exc:
+        _LOG.info(
+            "repurpose_blog_to_x blocked by plagiarism guard (blog_id=%s): %d items",
+            blog_id, len(exc.blocked_outputs),
+        )
+        return {
+            "status": "plagiarism_blocked",
+            "blocked_outputs": exc.blocked_outputs,
+            "error": str(exc),
+        }
+    except _blog_repurposing.BlogRepurposingError as exc:
+        _LOG.warning(
+            "repurpose_blog_to_x tool failed (blog_id=%s, mode=%s): %s",
+            blog_id, mode, exc, exc_info=True,
+        )
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "saved",
+        "blog_id": result.blog_id,
+        "mode": result.mode,
+        "drafts": [
+            {
+                "draft_id": d.draft_id,
+                "text": d.text,
+                "section_anchor": d.section_anchor,
+                "confidence_label": d.confidence_label,
+                "plagiarism_risk_label": d.plagiarism_risk_label,
+                "jaccard_similarity": d.jaccard_similarity,
+                "longest_shared_ngram_length": d.longest_shared_ngram_length,
+                "plagiarism_override_used": d.plagiarism_override_used,
+            }
+            for d in result.drafts
+        ],
+        "overall_confidence_label": result.overall_confidence_label,
+        "rationale": result.rationale,
+        "tokens_used": result.tokens_used,
+    }
+
+
+def _repurpose_x_to_blog_idea_to_dict(
+    conn: sqlite3.Connection, *, post_id: int
+) -> dict[str, Any]:
+    try:
+        result = _blog_repurposing.repurpose_x_to_blog_idea(
+            conn, post_id=int(post_id)
+        )
+    except _blog_repurposing.BlogRepurposingError as exc:
+        _LOG.warning(
+            "repurpose_x_to_blog_idea tool failed (post_id=%s): %s",
+            post_id, exc, exc_info=True,
+        )
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "saved",
+        "post_id": result.post_id,
+        "new_blog_id": result.new_blog_id,
+        "title": result.title,
+        "outline_markdown": result.outline_markdown,
+        "target_length_words": result.target_length_words,
+        "pillar_recommendation": result.pillar_recommendation,
+        "audience_recommendation": result.audience_recommendation,
+        "confidence_label": result.confidence_label,
+        "rationale": result.rationale,
+        "blog_to_post_link_id": result.blog_to_post_link_id,
         "tokens_used": result.tokens_used,
     }
 
@@ -2321,6 +2404,67 @@ AGENT_TOOLS: list[ToolDef] = [
         },
         handler=lambda conn, *, blog_id: _generate_blog_seo_metadata_to_dict(
             conn, blog_id=blog_id
+        ),
+    ),
+    # ----- #29 repurpose_blog_to_x (Phase 6 §28.34) -----
+    # blog → X. Three modes. Plagiarism guard mandatory (§28.29 floor)
+    # against the source blog body; high overlap blocks the
+    # drafts-pipeline insert until Daniel sets override_plagiarism=True.
+    # Linkage rows in blog_to_post_links land at SHIP time, not draft
+    # time (drafts may be discarded).
+    ToolDef(
+        name="repurpose_blog_to_x",
+        description=(
+            "Convert one of Daniel's blogs into X drafts (§28.34). "
+            "Modes: thread_from_sections (one post per H2), "
+            "single_post_summary (one post), teaser_with_link (hook + "
+            "URL). Every output runs through the §28.29 plagiarism "
+            "floor against the source blog body — high overlap returns "
+            "status='plagiarism_blocked' until Daniel passes "
+            "override_plagiarism=true. Drafts flow into agent_drafts "
+            "via the standard pipeline; blog_to_post_links rows land "
+            "at ship time."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blog_id": {"type": "integer"},
+                "mode": {
+                    "type": "string",
+                    "enum": list(_blog_repurposing.VALID_REPURPOSE_MODES),
+                },
+                "override_plagiarism": {"type": "boolean", "default": False},
+            },
+            "required": ["blog_id", "mode"],
+        },
+        handler=lambda conn, *, blog_id, mode, override_plagiarism=False: (
+            _repurpose_blog_to_x_to_dict(
+                conn, blog_id=blog_id, mode=mode,
+                override_plagiarism=override_plagiarism,
+            )
+        ),
+    ),
+    # ----- #30 repurpose_x_to_blog_idea (Phase 6 §28.34) -----
+    # X post → new blog row with status='idea' + outline + niche
+    # snapshots + immediate blog_to_post_links row.
+    ToolDef(
+        name="repurpose_x_to_blog_idea",
+        description=(
+            "Expand a shipped X post into a new blog idea (§28.34). "
+            "Creates a blogs row with status='idea', seeds the outline "
+            "via the agent's structured output, snapshots niche, and "
+            "inserts a blog_to_post_links(direction='post_to_blog') row "
+            "immediately (linkage is unambiguous at idea creation)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "post_id": {"type": "integer"},
+            },
+            "required": ["post_id"],
+        },
+        handler=lambda conn, *, post_id: _repurpose_x_to_blog_idea_to_dict(
+            conn, post_id=post_id
         ),
     ),
 ]
