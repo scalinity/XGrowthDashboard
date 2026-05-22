@@ -226,6 +226,14 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "source_text": "the quick brown fox jumps over the lazy dog",
             "output_text": "a slow red cat hides under the agile mouse",
         },
+        # Phase 6 / §28.32 — Four blog drafting tools. blog_id filled in
+        # below. Niche is unset on a fresh DB → handlers return
+        # {"status": "failed"} (BlogDraftingNicheUndefinedError → dict),
+        # which still satisfies the smoke contract.
+        "outline_blog": {"blog_id": None},
+        "draft_blog": {"blog_id": None},
+        "suggest_blog_edits": {"blog_id": None},
+        "generate_blog_seo_metadata": {"blog_id": None},
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
@@ -257,6 +265,15 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             source_post_text="smoke source text for agent tool registry",
         )
     )
+
+    # Seed a blog so the four Phase 6 tools have something to address.
+    # Niche is empty on the fresh DB so each handler returns
+    # {"status": "failed", "error": "...niche..."}.
+    from app.agent import blogs as _blogs
+    _smoke_blog = _blogs.create_blog(db_conn, title="smoke blog")
+    for _t in ("outline_blog", "draft_blog", "suggest_blog_edits",
+               "generate_blog_seo_metadata"):
+        sample_kwargs[_t]["blog_id"] = _smoke_blog.id
 
     from app.agent.tools import AGENT_TOOLS
     saved_draft_id: int | None = None

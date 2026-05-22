@@ -29,6 +29,7 @@ from typing import Any, Callable
 
 from app.db import transaction
 from app.agent import account_research as _account_research
+from app.agent import blog_drafting as _blog_drafting
 from app.agent import brain_dump as _brain_dump
 from app.agent import campaigns as _campaigns
 from app.agent import inspiration as _inspiration
@@ -746,6 +747,119 @@ def _score_inspiration_plagiarism_to_dict(
         "jaccard_similarity": read.jaccard_similarity,
         "longest_shared_ngram_length": read.longest_shared_ngram_length,
         "deterministic_risk_label": read.deterministic_risk_label,
+    }
+
+
+# Phase 6 §28.32 — blog drafting tool wrappers. Each surfaces
+# BlogDraftingError subclasses as {"status": "failed"} dicts so the
+# smoke test holds without ANTHROPIC_API_KEY and so a niche-undefined
+# refusal lands as data instead of an exception bubbling up.
+def _outline_blog_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    blog_id: int,
+    daniel_notes: str | None = None,
+) -> dict[str, Any]:
+    try:
+        result = _blog_drafting.outline_blog(
+            conn, blog_id=int(blog_id), daniel_notes=daniel_notes
+        )
+    except _blog_drafting.BlogDraftingError as exc:
+        _LOG.warning("outline_blog tool failed (blog_id=%s): %s", blog_id, exc, exc_info=True)
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "saved",
+        "blog_id": result.blog_id,
+        "version_id": result.version_id,
+        "version_number": result.version_number,
+        "outline_markdown": result.outline_markdown,
+        "section_count": result.section_count,
+        "estimated_length_words": result.estimated_length_words,
+        "confidence_label": result.confidence_label,
+        "rationale": result.rationale,
+        "tokens_used": result.tokens_used,
+    }
+
+
+def _draft_blog_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    blog_id: int,
+    target_length_words: int | None = None,
+) -> dict[str, Any]:
+    try:
+        result = _blog_drafting.draft_blog(
+            conn,
+            blog_id=int(blog_id),
+            target_length_words=(
+                int(target_length_words) if target_length_words is not None else None
+            ),
+        )
+    except _blog_drafting.BlogDraftingError as exc:
+        _LOG.warning("draft_blog tool failed (blog_id=%s): %s", blog_id, exc, exc_info=True)
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "saved",
+        "blog_id": result.blog_id,
+        "version_id": result.version_id,
+        "version_number": result.version_number,
+        "body_markdown": result.body_markdown,
+        "word_count": result.word_count,
+        "sections_used": list(result.sections_used),
+        "confidence_label": result.confidence_label,
+        "notes": result.notes,
+        "tokens_used": result.tokens_used,
+    }
+
+
+def _suggest_blog_edits_to_dict(
+    conn: sqlite3.Connection, *, blog_id: int
+) -> dict[str, Any]:
+    try:
+        result = _blog_drafting.suggest_blog_edits(conn, blog_id=int(blog_id))
+    except _blog_drafting.BlogDraftingError as exc:
+        _LOG.warning(
+            "suggest_blog_edits tool failed (blog_id=%s): %s", blog_id, exc, exc_info=True
+        )
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "ok",
+        "blog_id": result.blog_id,
+        "suggestions": [
+            {
+                "paragraph_anchor": s.paragraph_anchor,
+                "suggested_replacement": s.suggested_replacement,
+                "rationale": s.rationale,
+                "confidence_label": s.confidence_label,
+            }
+            for s in result.suggestions
+        ],
+        "overall_confidence_label": result.overall_confidence_label,
+        "summary": result.summary,
+        "tokens_used": result.tokens_used,
+    }
+
+
+def _generate_blog_seo_metadata_to_dict(
+    conn: sqlite3.Connection, *, blog_id: int
+) -> dict[str, Any]:
+    try:
+        result = _blog_drafting.generate_blog_seo_metadata(conn, blog_id=int(blog_id))
+    except _blog_drafting.BlogDraftingError as exc:
+        _LOG.warning(
+            "generate_blog_seo_metadata tool failed (blog_id=%s): %s",
+            blog_id, exc, exc_info=True,
+        )
+        return {"status": "failed", "error": str(exc)}
+    return {
+        "status": "saved",
+        "blog_id": result.blog_id,
+        "seo_title": result.seo_title,
+        "seo_description": result.seo_description,
+        "seo_tags": list(result.seo_tags),
+        "confidence_label": result.confidence_label,
+        "rationale": result.rationale,
+        "tokens_used": result.tokens_used,
     }
 
 
@@ -2106,6 +2220,107 @@ AGENT_TOOLS: list[ToolDef] = [
         },
         handler=lambda conn, *, campaign_id: _campaigns.analyze_progress(
             conn, campaign_id=int(campaign_id)
+        ),
+    ),
+    # ----- #25 outline_blog (Phase 6 §28.32) -----
+    # Generates a structured Markdown outline for one blog. Persists
+    # via blogs.save_blog(... agent_action='outline'). Refuses when
+    # niche is undefined (§28.16 rule #15). Emits <confidence> tags.
+    ToolDef(
+        name="outline_blog",
+        description=(
+            "Produce a structured Markdown outline for one of Daniel's "
+            "long-form blogs (§28.32). Reads the unified identity stack "
+            "(niche, voice profile, voice samples, lore) AND the blog's "
+            "current title/pillar/audience/notes. Writes a blog_versions "
+            "row with agent_action='outline'. Refuses if niche is "
+            "undefined. Emit <confidence> tags."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blog_id": {"type": "integer"},
+                "daniel_notes": {"type": "string"},
+            },
+            "required": ["blog_id"],
+        },
+        handler=lambda conn, *, blog_id, daniel_notes=None: (
+            _outline_blog_to_dict(conn, blog_id=blog_id, daniel_notes=daniel_notes)
+        ),
+    ),
+    # ----- #26 draft_blog (Phase 6 §28.32) -----
+    # Full draft body from the current outline. Refuses if no outline
+    # exists. Writes a blog_versions row with agent_action='draft'.
+    ToolDef(
+        name="draft_blog",
+        description=(
+            "Produce a full long-form blog draft from the current "
+            "outline (§28.32). Reads identity stack + outline + prior "
+            "body if any. Writes a blog_versions row with "
+            "agent_action='draft'. Requires the blog to have an "
+            "outline_markdown populated; refuses otherwise. Emit "
+            "<confidence> tags."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blog_id": {"type": "integer"},
+                "target_length_words": {"type": "integer"},
+            },
+            "required": ["blog_id"],
+        },
+        handler=lambda conn, *, blog_id, target_length_words=None: (
+            _draft_blog_to_dict(
+                conn, blog_id=blog_id, target_length_words=target_length_words
+            )
+        ),
+    ),
+    # ----- #27 suggest_blog_edits (Phase 6 §28.32) -----
+    # Per-paragraph rewrite suggestions. NEVER auto-applies — UI
+    # surfaces with Accept / Reject / Modify. No version row from this
+    # tool itself; Accept calls save_blog(... agent_action='edit_suggestion_applied').
+    ToolDef(
+        name="suggest_blog_edits",
+        description=(
+            "Survey a blog draft and propose per-paragraph rewrites "
+            "(§28.32). Returns a structured list — does NOT auto-apply. "
+            "Each suggestion carries paragraph_anchor + "
+            "suggested_replacement + rationale + confidence_label. The "
+            "editor's UI accepts/rejects/modifies each one; only "
+            "accepted edits write to the body via save_blog."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blog_id": {"type": "integer"},
+            },
+            "required": ["blog_id"],
+        },
+        handler=lambda conn, *, blog_id: _suggest_blog_edits_to_dict(
+            conn, blog_id=blog_id
+        ),
+    ),
+    # ----- #28 generate_blog_seo_metadata (Phase 6 §28.32) -----
+    # SEO sidecar. Writes blogs.seo_* columns directly; NO version row
+    # (SEO is metadata, not content).
+    ToolDef(
+        name="generate_blog_seo_metadata",
+        description=(
+            "Generate SEO metadata (title, description, tags) from a "
+            "blog body + niche context (§28.32). Writes blogs.seo_title "
+            "/ seo_description / seo_tags_json DIRECTLY — no version "
+            "row is created because SEO metadata is sidecar, not content. "
+            "Emit <confidence> tags."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blog_id": {"type": "integer"},
+            },
+            "required": ["blog_id"],
+        },
+        handler=lambda conn, *, blog_id: _generate_blog_seo_metadata_to_dict(
+            conn, blog_id=blog_id
         ),
     ),
 ]
