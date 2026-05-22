@@ -938,6 +938,16 @@ def _save_draft_reply(
                 (json.dumps(similarity_warning), draft_id),
             )
 
+        # Phase 5.9 / §28.21 — personality lore invocation scan, mirrors
+        # the _save_draft_post path. content_type='personality' is a
+        # permitted value on replies; the scan must run there too or the
+        # over-reliance banner undercounts. P59A-W1.
+        invoked_lore_ids: list[int] = []
+        if ct == "personality":
+            invoked_lore_ids = _personality_lore.scan_and_increment_invocations(
+                conn, draft_text=text
+            )
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
@@ -945,6 +955,7 @@ def _save_draft_reply(
         "target_post_url": target_post_url,
         "prepublish_label": score_row.composite_label,
         "similarity_warning": similarity_warning,
+        "invoked_lore_ids": invoked_lore_ids,
     }
 
 
