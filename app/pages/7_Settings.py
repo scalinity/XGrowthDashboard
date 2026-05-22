@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -278,9 +278,16 @@ _last_backup = get_setting(conn, "last_backup_at_utc")
 _age_caption = ""
 if _last_backup:
     try:
-        _parsed = datetime.strptime(_last_backup, "%Y-%m-%dT%H:%M:%SZ")
+        # Attach tzinfo so the subtraction below is timezone-aware on both
+        # sides; the rest of the codebase already uses datetime.now(timezone.utc)
+        # (see app/forms/__init__.py:51 and app/backup.py:_now_utc_iso).
+        # datetime.utcnow() is deprecated in Python 3.12+ and the previous
+        # naive-vs-naive subtraction only worked by coincidence.
+        _parsed = datetime.strptime(
+            _last_backup, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
         _age_caption = _humanise_age(
-            (datetime.utcnow() - _parsed).total_seconds()
+            (datetime.now(timezone.utc) - _parsed).total_seconds()
         )
     except ValueError:
         _age_caption = ""
