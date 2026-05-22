@@ -69,6 +69,8 @@ def test_schema_migrations_records_each_file(db_conn: sqlite3.Connection) -> Non
         "002_views.sql",
         "003_backup_settings.sql",
         "004_data_exports.sql",
+        "005_agent_core.sql",
+        "006_publish_columns.sql",
     ]
 
 
@@ -82,6 +84,8 @@ def test_apply_migrations_is_idempotent(db_path: Path) -> None:
         "002_views.sql",
         "003_backup_settings.sql",
         "004_data_exports.sql",
+        "005_agent_core.sql",
+        "006_publish_columns.sql",
     ]
     assert second_run == []
 
