@@ -94,6 +94,15 @@ def main(argv: list[str] | None = None) -> int:
             retention_days=args.retention_days,
         )
     except (FileNotFoundError, BackupIntegrityError, RuntimeError) as exc:
+        # Emit a structured JSON object on stderr too so launchd/cron
+        # logs stay parseable. The leading "Backup failed: …" text
+        # is preserved on a second line for humans tailing the log.
+        failure_payload = {
+            "ok": False,
+            "error_class": type(exc).__name__,
+            "error": str(exc),
+        }
+        print(json.dumps(failure_payload, indent=2), file=sys.stderr)
         print(f"Backup failed: {exc}", file=sys.stderr)
         return 1
 
