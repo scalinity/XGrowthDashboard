@@ -329,8 +329,19 @@ def validate_and_consume_token(
     if consumed_at_str is not None:
         raise ConsumedTokenError(f"token {token_id} already consumed at {consumed_at_str}")
 
-    # (b) not expired
-    expires_at = _parse_db_timestamp(expires_at_str)
+    # (b) not expired. P58RF-2: any timestamp form `fromisoformat` AND
+    # the strptime fallback can't parse (e.g. corrupted row written by
+    # a stray UPDATE) surfaces as ExpiredTokenError rather than a bare
+    # ValueError that escapes the typed-exception catch in
+    # publish_post_atomic. A token row whose expiry we can't read is by
+    # definition not safely usable; treat as expired.
+    try:
+        expires_at = _parse_db_timestamp(expires_at_str)
+    except ValueError as exc:
+        raise ExpiredTokenError(
+            f"token {token_id} has an unparseable expires_at_utc "
+            f"({expires_at_str!r}): {exc}"
+        ) from exc
     if expires_at <= now:
         raise ExpiredTokenError(
             f"token {token_id} expired at {expires_at_str} (now={now.isoformat()})"

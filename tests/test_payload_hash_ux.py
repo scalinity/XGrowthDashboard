@@ -46,6 +46,28 @@ def test_parse_db_timestamp_with_fractional_seconds() -> None:
     assert parsed.year == 2026 and parsed.tzinfo == timezone.utc
 
 
+def test_validate_token_treats_unparseable_expires_as_expired(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P58RF-2: a corrupted expires_at_utc string must surface as
+    ExpiredTokenError, not bare ValueError. ValueError escapes the
+    typed-exception catch in publish_post_atomic and leaves the token
+    chain in an indeterminate state."""
+    post_id = _setup_draft_post(db_conn, "Original draft.")
+    minted = confirmation.mint_confirmation_token(
+        db_conn, post_id=post_id, draft_text="Original draft."
+    )
+    # Corrupt the expires_at_utc to truly-unparseable garbage.
+    db_conn.execute(
+        "UPDATE publish_confirmation_tokens SET expires_at_utc = ? WHERE id = ?",
+        ("not-a-date-at-all", minted.token_id),
+    )
+    with pytest.raises(confirmation.ExpiredTokenError):
+        confirmation.validate_and_consume_token(
+            db_conn, post_id=post_id, raw_token=minted.raw_token
+        )
+
+
 def _setup_draft_post(conn: sqlite3.Connection, text: str = "Draft v1") -> int:
     """Insert a posts row in 'draft' state suitable for the publish flow."""
     row = conn.execute(
