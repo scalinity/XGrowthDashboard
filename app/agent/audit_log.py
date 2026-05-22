@@ -149,12 +149,21 @@ def log(
 
 
 def _json_safe(obj: Any) -> Any:
-    """Fallback for json.dumps — coerce common non-JSON types to strings."""
+    """Fallback for json.dumps — coerce common non-JSON types to strings.
+
+    P511R-18: narrowed the bare ``except Exception`` to the realistic
+    failure modes (ImportError on the datetime stdlib import, which
+    shouldn't ever happen but the import was wrapped defensively in
+    the original). Letting unexpected exception types propagate makes
+    future additions to this fallback chain debuggable rather than
+    silently swallowed. The OUTER ``log()`` is the audit floor — that's
+    where the "never crash" promise lives.
+    """
     try:
         from datetime import date, datetime
         if isinstance(obj, (datetime, date)):
             return obj.isoformat()
-    except Exception:  # noqa: BLE001 — defensive; never let audit logging itself crash
+    except (ImportError, AttributeError):
         pass
     return str(obj)
 
