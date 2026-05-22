@@ -592,6 +592,12 @@ AGENT_DRAFTS_ALLOWLIST: TableAllowlist = {
         "cta",
         "hypothesis_id",
         "target_post_url",
+        # voice_self_score is a JSON blob of three integers {0..3}^3 — no
+        # PII. Keeping it in default_columns means lane-postmortem CSV
+        # exports include the IWH gate's snapshot per draft without needing
+        # opt-in. (W18: prior placement under opt_in alongside free-text
+        # was an inconsistency, not a privacy carve-out.)
+        "voice_self_score",
         "iwh_attempt_index",
         "status",
         "final_post_id",
@@ -602,7 +608,6 @@ AGENT_DRAFTS_ALLOWLIST: TableAllowlist = {
         "text",
         "target_post_text",
         "agent_reasoning",
-        "voice_self_score",
         "user_feedback",
     ],
     "excluded_columns": [],

@@ -188,16 +188,25 @@ def dispatch_tool_call(
         tool = tools.get_tool(tool_name)
         result = tool.handler(conn, **tool_input)
         duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+        # W26: handlers can signal stub/partial completion via a private
+        # `_audit_status` key in the result dict. Strip it from the audit
+        # payload AND from the value we return to the caller, but promote
+        # it to the agent_tool_calls.status column so audit reviewers can
+        # filter on it.
+        audit_status = "success"
+        if isinstance(result, dict) and result.get("_audit_status") in {"partial", "success"}:
+            audit_status = str(result["_audit_status"])
+            result = {k: v for k, v in result.items() if k != "_audit_status"}
         audit.log_tool_call(
             conn,
             message_id=message_id,
             tool_name=tool_name,
             arguments=tool_input,
-            status="success",
+            status=audit_status,
             result=result,
             duration_ms=duration_ms,
         )
-        return {"tool_name": tool_name, "result": result, "status": "success"}
+        return {"tool_name": tool_name, "result": result, "status": audit_status}
     except Exception as exc:
         duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
         audit.log_tool_call(

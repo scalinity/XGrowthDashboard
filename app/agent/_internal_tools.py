@@ -40,6 +40,32 @@ class InternalToolDef:
     handler: Callable[..., Any]
 
 
+def _publish(
+    conn: sqlite3.Connection,
+    post_id: int,
+    confirmation_token: str,
+    *,
+    message_id: int | None = None,
+    tool_name: str,
+) -> publish.PublishResult:
+    """Shared body for publish_post_to_x / publish_reply_to_x (W25).
+
+    The "post" vs "reply" semantic distinction lives ENTIRELY in the
+    upstream ``posts.type`` and ``posts.in_reply_to_post_id`` columns,
+    which ``publish.publish_post_atomic`` reads to build the intent URL.
+    The two entry points are kept as distinct names so the audit log
+    (``agent_tool_calls.tool_name``) preserves the click-handler's
+    intent for review purposes — but the bodies are now one path.
+    """
+    return publish.publish_post_atomic(
+        conn,
+        post_id=post_id,
+        raw_token=confirmation_token,
+        message_id=message_id,
+        tool_name=tool_name,
+    )
+
+
 def publish_post_to_x(
     conn: sqlite3.Connection,
     post_id: int,
@@ -53,12 +79,9 @@ def publish_post_to_x(
     ``PublishResult`` with ``method='manual_clipboard'`` and the intent
     URL the UI opens for Daniel to complete the manual post.
     """
-    return publish.publish_post_atomic(
-        conn,
-        post_id=post_id,
-        raw_token=confirmation_token,
-        message_id=message_id,
-        tool_name="publish_post_to_x",
+    return _publish(
+        conn, post_id, confirmation_token,
+        message_id=message_id, tool_name="publish_post_to_x",
     )
 
 
@@ -73,14 +96,13 @@ def publish_reply_to_x(
 
     Same contract as ``publish_post_to_x``. The intent URL preserves
     ``in_reply_to`` so the resulting X post is a real reply, not a
-    standalone post.
+    standalone post. The 'reply' semantic comes from the upstream
+    ``posts.type='reply'`` row — this entry point is a name-only
+    variant for audit-log clarity (W25).
     """
-    return publish.publish_post_atomic(
-        conn,
-        post_id=post_id,
-        raw_token=confirmation_token,
-        message_id=message_id,
-        tool_name="publish_reply_to_x",
+    return _publish(
+        conn, post_id, confirmation_token,
+        message_id=message_id, tool_name="publish_reply_to_x",
     )
 
 

@@ -390,10 +390,14 @@ def _extract_lesson(conn: sqlite3.Connection, *, post_id: int) -> dict[str, Any]
     ).fetchone()
     if row is None:
         return {"error": f"post {post_id} not found"}
+    # W26: signal stub status to the dispatcher via a private key so
+    # the audit row records status='partial' instead of 'success'.
+    # Reviewers can grep agent_tool_calls.status for stub-noise.
     return {
         "post_id": int(post_id),
         "context": dict(row),
         "lesson_text": None,
+        "_audit_status": "partial",
         "note": (
             "Session-1 stub: returns structured context only. Session-2 "
             "wires the Anthropic call that drafts the lesson_text."

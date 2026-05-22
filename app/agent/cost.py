@@ -174,8 +174,10 @@ def check_ceiling_or_raise(
     mtd = month_to_date_spend_usd(conn, now=now)
     cap = get_monthly_ceiling_usd(conn)
     if mtd + projected_call_cost_usd >= cap:
+        # W21: wording clarified — `>=` refuses at the cap exactly, not
+        # only over it. "would reach or exceed" matches the comparison.
         raise MonthlyCostCeilingExceeded(
             f"month-to-date spend ${mtd:.2f} + projected ${projected_call_cost_usd:.4f} "
-            f"would breach cap ${cap:.2f}. Raise the cap in Settings → Growth Agent "
-            f"or wait until the next month."
+            f"would reach or exceed cap ${cap:.2f}. Raise the cap in "
+            f"Settings → Growth Agent or wait until the next month."
         )

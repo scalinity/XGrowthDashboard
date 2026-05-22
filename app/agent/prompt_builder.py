@@ -125,11 +125,26 @@ def render_tool_catalog(tool_defs: list[tools.ToolDef] | None = None) -> str:
     return "\n".join(lines)
 
 
+# W22: explicit numbered splice instead of `\n\n`.join — the drift check
+# can then compare the number of inserted rule strings directly without
+# re-parsing rendered markdown.
+_RULE_SEPARATOR = "\n\n"
+# A sentinel comment line surrounds the spliced block so the drift check
+# can find it deterministically regardless of how the surrounding
+# template evolves.
+_RULES_BEGIN = "<!-- BEGIN spliced rules from spec.md §28.2 -->"
+_RULES_END = "<!-- END spliced rules -->"
+
+
 def build_system_prompt(conn: sqlite3.Connection) -> str:
     """Assemble the runtime system prompt from the template + DB."""
     template = _read_template()
     rules = extract_rules_from_spec()
-    rules_block = "\n\n".join(rules) if rules else "(rule splice failed — see prompt_builder.py)"
+    rules_block = (
+        f"{_RULES_BEGIN}\n"
+        + _RULE_SEPARATOR.join(rules)
+        + f"\n{_RULES_END}"
+    )
 
     samples = voice.get_active_voice_samples(conn)
     voice_block = render_voice_samples_section(samples)
@@ -142,23 +157,24 @@ def build_system_prompt(conn: sqlite3.Connection) -> str:
 
 
 def verify_rule_count_matches_spec(prompt_text: str) -> tuple[int, int]:
-    """Drift check: how many rules in spec vs how many in the prompt.
+    """Drift check — count of rules in spec vs count spliced into the prompt.
 
-    Returns ``(spec_count, prompt_count)``. Callers (CI / pre-commit) should
-    assert equality. Mismatch means a rule was added/removed in spec without
-    rerunning the build, OR the template was edited to drop a rule —
-    either way, an explicit failure beats silent drift.
+    Returns ``(spec_count, prompt_count)``. Callers (CI / pre-commit)
+    assert equality. Implementation reads the BEGIN/END sentinel comments
+    that ``build_system_prompt`` writes around the spliced block, then
+    counts the ``^N. **`` rule starts inside. This is more robust than
+    parsing Section 3 markdown because the structural boundary is
+    explicit and doesn't depend on Section 4's heading remaining stable.
     """
     spec_rules = extract_rules_from_spec()
-    # In the prompt, rules appear as "N. **..." lines under Section 3.
-    section_3 = re.search(
-        r"#\s+Section\s+3\b(.*?)(?=^#\s+Section\s+4\b)",
+    block = re.search(
+        re.escape(_RULES_BEGIN) + r"(.*?)" + re.escape(_RULES_END),
         prompt_text,
-        flags=re.DOTALL | re.MULTILINE | re.IGNORECASE,
+        flags=re.DOTALL,
     )
-    if not section_3:
+    if not block:
         return (len(spec_rules), 0)
     prompt_count = len(
-        re.findall(r"^\d+\.\s+\*\*", section_3.group(1), flags=re.MULTILINE)
+        re.findall(r"^\d+\.\s+\*\*", block.group(1), flags=re.MULTILINE)
     )
     return (len(spec_rules), prompt_count)

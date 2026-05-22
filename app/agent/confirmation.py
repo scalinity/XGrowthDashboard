@@ -88,6 +88,27 @@ def hash_draft_text(text: str) -> str:
     return _sha256_hex(text)
 
 
+def _parse_db_timestamp(s: str) -> datetime:
+    """Tolerate either ``YYYY-MM-DD HH:MM:SS`` or ISO-8601 with ``T`` separator.
+
+    SQLite's ``datetime('now')`` writes the space-separator form, and
+    ``mint_confirmation_token`` matches it with strftime. But a debug
+    shell, migration replay, or future operator using
+    ``datetime.now(...).isoformat()`` would emit the ``T`` form and
+    crash the prior strict ``strptime`` with ``ValueError`` — escaping
+    the typed-exception catch in ``publish_post_atomic`` and leaving
+    the token consumption in an indeterminate state. Defensive parser
+    normalizes the separator and strips fractional seconds before the
+    strict parse.
+    """
+    normalized = s.replace("T", " ")
+    if "." in normalized:
+        normalized = normalized.split(".", 1)[0]
+    return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=timezone.utc,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Mint — used by the click-handler ONLY. Returns the raw UUID; caller MUST
 # pass it synchronously to the publish tool and never persist or log it.
@@ -195,9 +216,7 @@ def validate_and_consume_token(
         raise ConsumedTokenError(f"token {token_id} already consumed at {consumed_at_str}")
 
     # (b) not expired
-    expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc
-    )
+    expires_at = _parse_db_timestamp(expires_at_str)
     if expires_at <= now:
         raise ExpiredTokenError(
             f"token {token_id} expired at {expires_at_str} (now={now.isoformat()})"

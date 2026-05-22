@@ -26,10 +26,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
-from app.components.theme import PALETTE, apply_theme, hairline, kicker, readout_card
-from app.db import DEFAULT_DB_PATH
-from app.forms import get_setting, set_setting
-from app.pages import open_connection
+from app.agent import cost as _agent_cost
+from app.agent import recovery as _agent_recovery
+from app.agent import voice as _agent_voice
 from app.backup import (
     BACKUP_FILENAME_GLOB,
     BackupIntegrityError,
@@ -37,6 +36,9 @@ from app.backup import (
     DEFAULT_RETENTION_DAYS,
     backup_database,
 )
+from app.components.theme import PALETTE, apply_theme, hairline, kicker, readout_card
+from app.components.theme import cost_meter as _cost_meter
+from app.db import DEFAULT_DB_PATH
 from app.exports import (
     ALLOWLISTS,
     CounterfactualMissingError,
@@ -44,6 +46,8 @@ from app.exports import (
     export_table_to_csv,
     export_weekly_report,
 )
+from app.forms import get_setting, set_setting
+from app.pages import open_connection
 
 # ---------------------------------------------------------------------------
 # Group definitions. Each entry: (group label, [(key, editable, helptext)]).
@@ -815,12 +819,8 @@ for col, category in zip([ladders_left, ladders_right], ["distribution", "valida
 
 # ---------------------------------------------------------------------------
 # Growth Agent panel — §28.6 cost + §28.2 IWH policy + voice/target accounts.
+# (Agent / cost_meter imports moved to module top in W24.)
 # ---------------------------------------------------------------------------
-from app.agent import cost as _agent_cost  # noqa: E402
-from app.agent import recovery as _agent_recovery  # noqa: E402
-from app.agent import voice as _agent_voice  # noqa: E402
-from app.components.theme import cost_meter as _cost_meter  # noqa: E402
-
 hairline()
 kicker("growth-agent · §28")
 st.markdown("## Growth Agent")

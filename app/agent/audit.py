@@ -16,6 +16,7 @@ redaction policy.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Mapping
 
@@ -29,11 +30,34 @@ PUBLISH_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# W19 defense in depth: a value-pattern guard that catches a raw token
+# regardless of which argument name it arrives under. `uuid.uuid4().hex`
+# produces exactly 32 lowercase hex characters; we scan every string
+# value in the args dict for this shape and refuse the insert if found.
+# This is BELT to the name-keyed suspenders in _redact_publish_args —
+# defense against a future caller routing the token through a different
+# arg name.
+_UUID_HEX_RE: re.Pattern[str] = re.compile(r"\b[0-9a-f]{32}\b")
+
+
+class RawTokenLeakError(RuntimeError):
+    """Raised when the value-pattern guard detects what looks like a raw
+    publish token (32-hex string) in the args dict at audit-insert time.
+
+    The right response is to fix the call site so the token never enters
+    audit.log_tool_call as a string value — not to swallow this error.
+    """
+
 
 def _redact_publish_args(
     args: Mapping[str, Any], confirmation_token_id: int | None
 ) -> tuple[dict[str, Any], bool]:
-    """Strip raw token from publish-tool args; return (redacted_args, was_redacted)."""
+    """Strip raw token from publish-tool args; return (redacted_args, was_redacted).
+
+    First strips by argument name (the canonical path), then runs the
+    value-pattern guard over what remains — raises RawTokenLeakError if
+    any remaining string value matches the 32-hex UUID shape.
+    """
     out = dict(args)
     redacted = False
     if "confirmation_token" in out:
@@ -41,6 +65,15 @@ def _redact_publish_args(
         redacted = True
     if confirmation_token_id is not None:
         out["confirmation_token_id"] = confirmation_token_id
+
+    # Value-pattern defense.
+    for k, v in out.items():
+        if isinstance(v, str) and _UUID_HEX_RE.search(v):
+            raise RawTokenLeakError(
+                f"Argument {k!r} contains what appears to be a raw 32-hex "
+                "publish token. Audit insert refused — fix the call site "
+                "so the raw value never reaches log_tool_call as a string."
+            )
     return out, redacted
 
 
