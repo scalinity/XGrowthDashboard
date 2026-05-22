@@ -124,10 +124,23 @@ def parse_replier_paste(payload: str) -> list[ReplierExcerpt]:
 # ---------------------------------------------------------------------------
 # Scoring.
 # ---------------------------------------------------------------------------
+def _stem(token: str) -> str:
+    """P59A-S3: trivial trailing-s stemmer for tokens >4 chars.
+
+    'creators' vs 'creator' should match. Anything more sophisticated
+    (Porter, Lancaster) is overkill — the paste flow is fuzzy by
+    design and Daniel's niche_person values are short noun phrases.
+    """
+    if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
 def _tokens(text: str | None) -> set[str]:
     if not text:
         return set()
-    return {m.group(0) for m in _TOKEN_RE.finditer(text.lower())} - _STOPWORDS
+    raw = {m.group(0) for m in _TOKEN_RE.finditer(text.lower())} - _STOPWORDS
+    return {_stem(t) for t in raw}
 
 
 def thread_context_fit_score(
