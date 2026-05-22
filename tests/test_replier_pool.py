@@ -188,6 +188,47 @@ def test_pool_is_idempotent_on_thread_handle(db_conn: sqlite3.Connection) -> Non
     assert n == 1
 
 
+def test_handle_less_anchor_is_process_stable(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P59A-C2 regression: re-pasting the same handle-less excerpt across
+    process restarts must hit the same reply_targets row, not insert a
+    duplicate. Before the sha1 fix, Python's built-in hash() randomized
+    the anchor per interpreter and the idempotency contract failed for
+    excerpts without a handle.
+
+    Static check (we can't actually restart the interpreter mid-test):
+    invoke score_replier_pool twice with the same handle-less payload
+    and assert exactly one reply_targets row results. With the old
+    hash() this would still pass within one process — the stronger
+    static check is that the produced anchor uses hashlib, which we
+    verify by checking the URL fragment length (sha1[:12] = 12 hex
+    chars) and that it's deterministic across calls.
+    """
+    _niche.set_niche(db_conn, problem="x", person="educational creators")
+    payload = "educational creators are aligned with the niche"
+    out1 = replier_pool.score_replier_pool(
+        db_conn,
+        thread_url="https://x.com/big/status/42",
+        replier_handles_or_excerpts=payload,
+    )
+    out2 = replier_pool.score_replier_pool(
+        db_conn,
+        thread_url="https://x.com/big/status/42",
+        replier_handles_or_excerpts=payload,
+    )
+    assert out1["created_count"] == 1
+    assert out2["created_count"] == 0
+    assert out2["updated_count"] == 1
+    # Confirm the URL fragment is the sha1[:12] shape (12 hex chars).
+    url = db_conn.execute(
+        "SELECT target_post_url FROM reply_targets WHERE source = 'replier_under_thread'"
+    ).fetchone()[0]
+    fragment = url.split("#replier=_", 1)[1]
+    assert len(fragment) == 12
+    assert all(c in "0123456789abcdef" for c in fragment)
+
+
 def test_pool_handles_unparseable_payload(db_conn: sqlite3.Connection) -> None:
     _niche.set_niche(db_conn, problem="x", person="y")
     out = replier_pool.score_replier_pool(

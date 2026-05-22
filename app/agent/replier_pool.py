@@ -20,6 +20,7 @@ delegates the persistence to the existing ``reply_targets`` machinery.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -318,8 +319,17 @@ def score_replier_pool(
         # collide across pasted batches for the same thread. Anchor on
         # the thread URL + #replier=<handle> fragment when a handle is
         # known; otherwise on a hashed excerpt suffix.
+        # P59A-C2: hashlib.sha1 instead of Python's built-in hash().
+        # hash() is randomized per interpreter (PYTHONHASHSEED) — using
+        # it for the idempotency key meant the same handle-less excerpt
+        # produced a different anchor on every Streamlit reload, breaking
+        # the function's "idempotent on (thread_url, handle)" contract
+        # and accumulating duplicate reply_targets rows. sha1 is process-
+        # stable; this is an integrity tag, not a security boundary.
         anchor = scored.handle or (
-            f"_{abs(hash(scored.excerpt or '')):x}"
+            "_" + hashlib.sha1(
+                (scored.excerpt or "").encode("utf-8")
+            ).hexdigest()[:12]
         )
         target_post_url = f"{thread_url}#replier={anchor}"
         author_handle = scored.handle or "unknown"
