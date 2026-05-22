@@ -328,7 +328,11 @@ def is_over_relied_on(
     )
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    return (now - last).days < 30
+    # P59A-S1: defensive lower bound. A future-dated last_invoked_at
+    # (clock skew, test fixtures, manual edit) would otherwise pass the
+    # `< 30` check trivially since (now - future).days is negative.
+    delta_days = (now - last).days
+    return 0 <= delta_days < 30
 
 
 # ---------------------------------------------------------------------------
