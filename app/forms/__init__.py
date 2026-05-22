@@ -116,6 +116,14 @@ def set_setting(
     Daniel-editable settings should never pass this flag.
     """
     # Capture the prior value BEFORE the upsert so the diff is honest.
+    # P511R-14: when the stored value_json fails to decode, we used to
+    # assign the raw string to old_value, then compare it via != to
+    # the typed `value` — that always reports a "change" even when
+    # the underlying intent is identical. Spurious settings_changed_*
+    # rows polluted the audit log on legacy/garbage settings. Now:
+    # mark the prior value as "undecodable" and suppress the diff
+    # audit for this write (log a warning so the operator notices).
+    prior_decode_failed = False
     prior_row = conn.execute(
         "SELECT value_json FROM settings WHERE key = ?", (key,)
     ).fetchone()
@@ -124,8 +132,14 @@ def set_setting(
     else:
         try:
             old_value = json.loads(prior_row[0])
-        except (TypeError, json.JSONDecodeError):
-            old_value = prior_row[0]  # surface the raw text so the diff isn't lost
+        except (TypeError, json.JSONDecodeError) as decode_exc:
+            old_value = None
+            prior_decode_failed = True
+            _log.warning(
+                "settings[%r] prior value_json failed to decode (%s); "
+                "skipping diff audit for this write.",
+                key, decode_exc,
+            )
 
     settings_sql = """
         INSERT INTO settings (key, value_json, updated_at)
@@ -142,8 +156,11 @@ def set_setting(
     # autocommit writes — a transient audit-write failure left the
     # settings change persisted with no audit trace, silently degrading
     # the §28.30 invariant.
+    # P511R-14: also skip when the prior value_json was undecodable
+    # (the diff would be lossy).
     will_audit = (
         not suppress_audit
+        and not prior_decode_failed
         and old_value != value
         and _audit_logs_table_exists(conn)
     )
@@ -174,8 +191,9 @@ def set_setting(
 
     # Audit-log the change (§28.30 write-through point). Skipped when
     # the value didn't actually change OR when the caller flagged the
-    # write as operational telemetry (P511R-11).
-    if suppress_audit:
+    # write as operational telemetry (P511R-11) OR when the prior
+    # value couldn't be decoded (P511R-14 — the diff would be lossy).
+    if suppress_audit or prior_decode_failed:
         return
     if old_value != value:
         try:

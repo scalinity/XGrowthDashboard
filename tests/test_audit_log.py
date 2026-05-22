@@ -173,6 +173,32 @@ def test_set_setting_audit_records_first_write_as_old_none(
     assert rows[0].details["new_value"] == "v1"
 
 
+def test_p511r14_set_setting_skips_audit_on_undecodable_prior(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P511R-14: when the prior value_json is non-JSON garbage, the
+    diff comparison would be lossy (raw string vs typed value), so
+    set_setting suppresses the audit append entirely. The settings
+    write still succeeds — the audit row is what's skipped."""
+    # Force a garbage value into the row directly so the decode step
+    # in set_setting trips.
+    db_conn.execute(
+        "INSERT INTO settings (key, value_json, note) VALUES (?, ?, ?)",
+        ("p511r14_test_key", "not-valid-json{{", "test"),
+    )
+    set_setting(db_conn, "p511r14_test_key", "new value")
+    # Settings write landed.
+    stored = db_conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?", ("p511r14_test_key",)
+    ).fetchone()[0]
+    assert json.loads(stored) == "new value"
+    # Audit row did NOT land (decode failure suppressed the diff).
+    rows = audit_log.query(
+        db_conn, category="settings", target_id="p511r14_test_key"
+    )
+    assert rows == []
+
+
 def test_p511r11_set_setting_suppress_audit_skips_row(
     db_conn: sqlite3.Connection,
 ) -> None:
