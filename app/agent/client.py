@@ -459,7 +459,13 @@ class AgentClient:
         """
         import anthropic  # local import keeps the offline path cheap
 
-        client = anthropic.Anthropic(api_key=self._api_key)
+        # P511R-20: explicit 120s timeout. The main agent loop's
+        # max_tokens runs higher than the extracted-module callers
+        # (which use 2-4k); the orchestrator may also have larger
+        # message history. 120s gives the model breathing room
+        # without letting a hung network freeze the Streamlit
+        # thread for the SDK's default 10 minutes.
+        client = anthropic.Anthropic(api_key=self._api_key, timeout=120.0)
         system_prompt = prompt_builder.build_system_prompt(conn)
         messages = self._load_messages_history(conn, conversation_id)
         tool_specs = [t.to_anthropic_spec() for t in tools.AGENT_TOOLS]

@@ -127,7 +127,14 @@ def _default_caller(
         )
     import anthropic  # local import — keeps the cold path free of the dep
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # P511R-20: explicit 90s timeout. Default Anthropic SDK timeout is
+    # 10 minutes; without an override a hung network blocks the
+    # Streamlit thread for that long. 90s accommodates the larger
+    # brain-dump payloads (multi-paragraph raw text + ≤5 candidate
+    # drafts in the response) — same systemic gap also closed in
+    # account_research, profile_audit, inspiration, and the main
+    # agent client.
+    client = anthropic.Anthropic(api_key=api_key, timeout=90.0)
     resp = client.messages.create(
         model=model,
         max_tokens=4096,

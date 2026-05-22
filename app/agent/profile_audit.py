@@ -429,7 +429,10 @@ def _default_caller(
         )
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # P511R-20: explicit 90s timeout — see brain_dump._default_caller
+    # for rationale (default is 10 minutes; same systemic gap closed
+    # across all four extracted-module callers + the main agent client).
+    client = anthropic.Anthropic(api_key=api_key, timeout=90.0)
     resp = client.messages.create(
         model=model,
         max_tokens=4096,
