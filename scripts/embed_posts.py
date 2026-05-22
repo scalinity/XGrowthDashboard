@@ -14,6 +14,20 @@ Usage:
 The script writes one row per `posts.id` (PK on post_embeddings.post_id).
 `--re-embed-all` re-writes existing rows in place — use after editing
 DEFAULT_PROVIDER in `app/agent/embeddings.py`.
+
+Rate-limit cooldown (P58R-12)
+-----------------------------
+`sleep_for_rate_limit()` runs between batches *within* one invocation
+(after every batch except the last). It does NOT enforce a cooldown
+across separate script invocations. If you re-run with `--re-embed-all`
+in a tight loop (e.g. a wrapper script), back-to-back invocations can
+exceed the provider's documented per-minute cap. For Voyage AI's
+documented ~3 RPM ceiling on `voyage-3-lite`, sleep at least
+20 seconds between invocations:
+
+  uv run python scripts/embed_posts.py --re-embed-all && \\
+    sleep 20 && \\
+    uv run python scripts/embed_posts.py --re-embed-all
 """
 
 from __future__ import annotations
