@@ -658,6 +658,7 @@
         <li><a href="#phase-5-6"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.6</span><span>Reply Target Discovery</span></a></li>
         <li><a href="#phase-5-8"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.8</span><span>Drafting Intelligence Pack</span></a></li>
         <li><a href="#phase-5-10"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.10</span><span>Strategic Analysis Pack</span></a></li>
+        <li><a href="#phase-5-11"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.11</span><span>Growth Layer + QoL Pack</span></a></li>
       </ul>
       <div class="add-phase">+ NEXT PHASE GOES HERE</div>
 
@@ -1513,6 +1514,85 @@
           <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Next phase pointer</span></summary>
           <div class="subsection-body">
             <p>Phase 5.11 candidates: (1) <code>monthly_reviews</code> table + the matching Coach resolver path, (2) Coach conversation persistence across sessions + a strip-log format that drives the §28.23 avg-strips/message average, (3) Account Researcher V1.1+ programmatic X API pull replacing the paste step, (4) Profile Audit V1.1+ direct API bio-pull. None are blockers — Phase 5.10 ships the workflows; Phase 5.11 polishes them.</p>
+          </div>
+        </details>
+      </section>
+
+      <section class="phase" id="phase-5-11" data-phase-id="5.11" data-phase-title="Growth Layer + Quality-of-Life Pack">
+        <header class="phase-header">
+          <p class="kicker">Phase 5.11 · Growth Layer + QoL Pack</p>
+          <h2>Growth layer <em>+ quality-of-life</em> pack</h2>
+          <p class="meta"><span data-mono>2026-05-22</span><span class="sep">·</span>spec <span class="spec">28.26</span>–<span class="spec">28.30</span></p>
+        </header>
+
+        <div class="score-bank" aria-label="Phase 5.11 counters">
+          <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number">01</div><div class="tile-bar" aria-hidden="true"><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">711</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Acceptance gates</p><div class="tile-number">09</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+        </div>
+
+        <details class="subsection" id="phase-5-11-completed" data-section-type="completed" open>
+          <summary><span class="caret"></span><span class="label-kicker">01 / Shipped</span><span class="label-title">Five features — campaigns, monthly reviews, calendar, inspiration, audit log</span></summary>
+          <div class="subsection-body">
+            <ul>
+              <li><strong>Migration <code>migrations/015_growth_layer_qol.sql</code></strong> — six new tables (<code>campaigns</code>, <code>campaign_items</code>, <code>monthly_reviews</code>, <code>saved_inspiration_posts</code>, <code>inspiration_transforms</code>, <code>audit_logs</code>), one view (<code>v_campaign_progress</code>), eight new settings rows (four plagiarism thresholds, monthly auto-draft flag, audit retention, calendar default view, AM cutoff hour). Final statement logs its own application to <code>audit_logs</code> so write-through is live from day one. Slot 014 was taken by Phase 5.9's velocity-view migration; spec was corrected to 015 before implementation. <span class="spec">10</span> <span class="spec">28.26</span>–<span class="spec">28.30</span></li>
+              <li><strong>Audit logs (<span class="spec">28.30</span>)</strong> — <code>app/agent/audit_log.py</code> exposes <code>log()</code> / <code>log_setting_change()</code> / <code>query()</code> / <code>prune()</code>. Wired write-through into <code>set_setting</code>, <code>record_export</code>, <code>backup_database</code>, and all four <code>publish_post_atomic</code> branches (success + three failure modes). <code>scripts/prune_audit_log.py</code> respects the retention setting and self-audits the prune. Settings → Audit log viewer panel with category + limit filters. Agent has NO tool that touches the table — startup assertion test enforces.</li>
+              <li><strong>Campaigns (<span class="spec">28.26</span> + <span class="spec">14.12</span>)</strong> — <code>app/agent/campaigns.py</code> enforces dual-stream success criteria (≥1 distribution AND ≥1 validation metric) at <code>create_campaign</code>. <code>complete_campaign</code> refuses without per-criterion actuals + lesson + counterfactual. Item state machine (planned → drafted → shipped) enforced. No auto-completion on <code>end_date</code> pass — the view shows "ended N days ago" and waits for Daniel. <code>app/pages/15_Campaigns.py</code> renders four status sections. Agent tool <code>#21 analyze_campaign_progress</code> is read-only.</li>
+              <li><strong>Monthly AI reviews (<span class="spec">28.27</span> + <span class="spec">14.6</span>)</strong> — <code>app/agent/monthly_review.py</code> computes auto-fill including strongest/weakest <code>content_type</code> from the V/G/P/P axis and <code>campaigns_completed_json</code> (campaigns whose <code>completed_at_utc</code> falls in the month window). <code>upsert_monthly_review</code> audit-logs the write. Section <span class="spec">14.6</span> page extended with Weekly / Monthly cadence radio at top; both cadences share the page shell and the canonical <code>export_blocked_reason</code> helper. Agent tool <code>#22 draft_monthly_review_section</code> mirrors the weekly stub with the new <code>campaigns_retro</code> section.</li>
+              <li><strong>Content Calendar (<span class="spec">28.28</span> + <span class="spec">14.11</span>)</strong> — <code>app/agent/calendar.py</code> aggregates POSTED + DRAFTED-FOR-FUTURE + AGENT-DRAFTED + PLANNED into one <code>CalendarCell</code> stream. AM/PM bucketing reads <code>calendar_am_cutoff_hour</code> at query time. Filters (pillar / content_type / campaign) compose with AND. <code>app/pages/14_Content_Calendar.py</code> renders week / two-weeks / month grid with prev/today/next nav, active-campaigns strip, and "+ schedule slot" form (campaign-scoped OR ad-hoc). Anti-feature footer makes the section <span class="spec">28.10</span> contract explicit — the calendar shows schedules, it does not publish.</li>
+              <li><strong>Inspiration Library + plagiarism guard (<span class="spec">28.29</span> + <span class="spec">14.13</span>)</strong> — <code>app/agent/inspiration.py</code> + <code>config/inspiration_transform_prompt.md</code>. Load-bearing rule: <code>final_risk = max(ai_reported, deterministic)</code> on the <code>low &lt; medium &lt; high</code> ordering — the AI cannot underreport when token overlap is high. Deterministic Jaccard + longest-shared-n-gram, thresholds in settings (never hard-coded). 7 transform modes kept in sync with the schema CHECK list (round-trip test asserts no drift). <code>save_inspiration</code> hash-dedupes via <code>unique(source_text_hash)</code>. <code>record_plagiarism_override</code> is audit-only — never mutates the transform row's risk label. <code>app/pages/16_Inspiration_Library.py</code> disables "send to drafts" on high-risk transforms until Daniel writes an override reason and clicks acknowledge. Agent tools <code>#23 transform_inspiration</code> + <code>#24 score_inspiration_plagiarism_risk</code>. Tool registry now at 25.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-5-11-gates" data-section-type="gates">
+          <summary><span class="caret"></span><span class="label-kicker">02 / Acceptance</span><span class="label-title">Gates satisfied (<span class="spec">25</span> Phase 5.11)</span></summary>
+          <div class="subsection-body">
+            <ul class="gates-list">
+              <li>Migration 015 applies cleanly on a fresh tmp DB AND on the current main-branch DB (<code>uv run python -m scripts.init_db --db-path /tmp/probe.db</code>).</li>
+              <li>Full pytest suite green at <span data-mono>711</span> tests (target was ≥250).</li>
+              <li><code>uv run ruff check</code> clean across all new modules.</li>
+              <li>Streamlit boot smoke HTTP 200 with the new <code>audit_log</code> write-through paths wired into <code>set_setting</code>, <code>record_export</code>, <code>backup_database</code>, and <code>publish_post_atomic</code>.</li>
+              <li>Dual-stream success-criteria rule enforced — <code>test_create_campaign_rejects_distribution_only_criteria</code> + <code>test_create_campaign_rejects_validation_only_criteria</code>.</li>
+              <li>Campaign retro-discipline enforced — <code>test_complete_campaign_blocks_without_lesson</code> + <code>_counterfactual</code> + <code>_missing_actuals</code>.</li>
+              <li>Plagiarism final-risk max-rule enforced — <code>test_final_risk_ai_low_deterministic_high_resolves_high</code> + <code>test_transform_persists_final_risk_max_rule</code>.</li>
+              <li>Audit-log no-agent-access invariant — <code>test_audit_log_no_agent_tool_exposes_audit_logs</code> scans the AGENT_TOOLS registry AND <code>app/agent/tools.py</code> source for the string <code>audit_logs</code>.</li>
+              <li>v_campaign_progress math correct on a seeded campaign — <code>test_phase511_v_campaign_progress_math</code> + <code>test_analyze_progress_reflects_two_thirds_shipped</code>.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-5-11-limitations" data-section-type="limitations">
+          <summary><span class="caret"></span><span class="label-kicker">03 / Carried</span><span class="label-title">Known limitations + deferred work</span></summary>
+          <div class="subsection-body">
+            <ul class="limitations-list">
+              <li><strong>draft_monthly_review_section is Session-1 stub.</strong> Tool #22 validates the section name and surfaces the auto-fill payload, but the Anthropic call that drafts the actual prose isn't wired yet — same status as <code>#9 draft_weekly_review_section</code>. Session 2 of the agent draft pipeline ships both.</li>
+              <li><strong>"Send to drafts" buttons in the Inspiration Library are placeholders.</strong> The promotion from <code>inspiration_transforms.output_text</code> to a real <code>agent_drafts</code> row would route through the full Phase 5.8 pipeline (IWH gate, repetition guard, prepublish score). The buttons render and respect the high-risk gating; the promotion wire-up is the next polish.</li>
+              <li><strong>Calendar "+ schedule slot" ad-hoc path doesn't pre-fill pillar/content_type.</strong> Manual drafts created via the inline form get <code>content_type='unspecified'</code> via the schema default; a follow-up can surface those fields in the form.</li>
+              <li><strong>Per-pillar / per-content-type campaign progress drill-down deferred.</strong> The <code>linked_posts_summary.by_pillar</code> / <code>.by_content_type</code> dicts return from <code>analyze_progress</code> but aren't surfaced in the §14.12 view yet.</li>
+              <li><strong>Monthly review export to Markdown is button-only.</strong> The <code>scripts/export_monthly_review.py</code> writer lands when the weekly counterpart's export wiring is finalized; the export-blocker gating is live regardless.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-5-11-lessons" data-section-type="lessons">
+          <summary><span class="caret"></span><span class="label-kicker">04 / Lessons</span><span class="label-title">What this phase taught</span></summary>
+          <div class="subsection-body">
+            <ul class="lessons-list">
+              <li>Audit-log write-through reads better as a deferred-import call at each call site than as a base-class hook — the deferred import keeps <code>app/forms/__init__.py</code> from creating a cycle through <code>app.agent</code>, and each call site can tailor the <code>details</code> payload without inheriting a generic shape.</li>
+              <li>The dual-stream success-criteria rule (§28.26) is impossible to enforce in pure SQLite — JSON shape validation is application-layer work. The pattern: schema stores the JSON unchecked, the module's <code>create_*</code> function refuses on bad shape with a typed error, and the test suite covers both the rejection AND a happy-path round-trip so the validator can't drift.</li>
+              <li>The plagiarism guard's <code>max(ai, deterministic)</code> rule wants the deterministic floor computed in Python with thresholds in <code>settings</code>, not constants — tuning is then a data change, never a code patch. The regression test that AI=low + identical source/output collapses to <code>high</code> is the contract Daniel reads when he forgets why this matters.</li>
+              <li>Migration slot 014 was taken by Phase 5.9's velocity-view work; "the next migration is 014" in the spec was already wrong by the time Phase 5.11 started. The fix: bump to 015 AND update the spec FIRST, so the implementation matches an authoritative spec rather than working around an outdated one. CLAUDE.md's "if implementation drifts from spec, update implementation" rule still holds — the drift in this case was in the spec.</li>
+              <li>The <code>posts.content_type</code> NOT NULL DEFAULT <code>'unspecified'</code> trap (migration 012) bit the test helper: passing <code>content_type=None</code> overrides the default to NULL and trips the constraint. Test helpers need to OMIT the column when None, not pass it through.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-5-11-next" data-section-type="next">
+          <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Next phase pointer</span></summary>
+          <div class="subsection-body">
+            <p>After Phase 5.11 the consolidation surface is wide enough that the only remaining CreatorOS capability is <strong>blogs</strong> — deferred to Phase 6 with an explicit §0/§1/§19 scope rewrite. Phase 5.11's stub items (Session-2 draft tool wiring, "send to drafts" promotion from inspiration transforms, per-pillar campaign drill-down, monthly export writer) are independent polish work that can land between Phase 5.11 and Phase 6 without blocking either.</p>
           </div>
         </details>
       </section>
