@@ -453,6 +453,13 @@ def audit(
     ``snapshot_inputs`` is the dict ``save()`` uses to populate the
     immutable snapshot columns: post ids, niche values, voice profile
     id. Daniel's panel passes both into save() as one transaction.
+
+    Concurrency note (P510R-6): the API call runs while ``conn`` is
+    open but not while a lock is held. autocommit + WAL keeps each
+    statement self-contained, so the conn is just a Python wrapper
+    around a file descriptor for the duration of the model round-trip.
+    No reader is blocked; no writer is blocked. The conn-hold is
+    benign in single-user usage.
     """
     if not bio_text.strip():
         raise ProfileAuditError("bio_text is empty")

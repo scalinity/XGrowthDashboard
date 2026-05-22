@@ -363,6 +363,13 @@ def analyze(
     Returns a populated ``AccountResearchAnalysis`` on success. Raises
     ``AccountResearchError`` on bad input (empty handle), missing API
     key, or unparseable model output.
+
+    Concurrency note (P510R-6): ``analyze`` takes no connection — the
+    view orchestrates conn → ``analyze`` → ``save`` with the API call
+    in the middle. Even if a caller does hold a conn across this call,
+    autocommit + WAL means no SQLite lock survives between statements,
+    so the only cost is a long-lived file descriptor (harmless in
+    single-user usage).
     """
     handle = normalize_handle(target_handle)
     if not target_recent_posts_text.strip():

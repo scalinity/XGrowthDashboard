@@ -484,6 +484,16 @@ def process(
     result fields land on the row. On failure ``status='failed'`` and
     ``BrainDumpError`` propagates to the caller (Streamlit click
     handler or agent tool dispatcher) so it can render the error.
+
+    Concurrency note (P510R-6): the API call runs while ``conn`` is
+    open but not while a lock is held. ``app.db.connect()`` uses
+    ``isolation_level=None`` (autocommit) + WAL mode, so between
+    individual statements no SQLite lock survives — the ``conn``
+    object is just a Python wrapper around a file descriptor during
+    the API call. WAL mode further means readers don't block writers
+    and vice versa; this is single-user anyway. The split-connection
+    pattern applied to the Coach view (P510R-3) is about atomic round-
+    trip persistence (user + assistant together), not lock contention.
     """
     row = _load_row(conn, brain_dump_id)
     raw_text = row["raw_text"]
