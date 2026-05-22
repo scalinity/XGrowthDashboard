@@ -271,12 +271,20 @@ Reply with exactly one of:
 """
 
 
-def _parse_reply_quality_response(body: str) -> ReplyQualityResult:
+def _parse_reply_quality_response(
+    body: str, *, reply_text: str | None = None
+) -> ReplyQualityResult:
     """Map the four-option Haiku response to a ReplyQualityResult.
 
     Tolerates leading whitespace and the model occasionally wrapping
     its answer in a code fence; the four expected verdict prefixes are
     matched case-insensitively.
+
+    P59A-W3: when the response is unparseable, fall back to the offline
+    pattern matcher (symmetric with the dark-pattern lint's outage
+    fallback). Soft-passing was an asymmetry that quietly created a
+    §28.18 enforcement gap: a Haiku that emitted 'unsure — could be
+    selfish' (no expected verdict prefix) was treated as a pass.
     """
     text = body.strip().lower()
     if text.startswith("no,") or text.startswith("no:") or text.startswith("no "):
@@ -299,9 +307,22 @@ def _parse_reply_quality_response(body: str) -> ReplyQualityResult:
             rationale=body.strip(),
             failure_mode="selfishly_self_promoting",
         )
-    # Defensive default — unparseable response treated as a soft pass
-    # so an outage doesn't block legitimate replies. The audit row
-    # records the response verbatim.
+    # Unparseable — route through the offline matcher so the dark-pattern
+    # and reply-quality lints have symmetric outage contracts. The
+    # caller's reply_text is needed for the offline scan; if not
+    # provided (legacy call sites) we still default-pass with the
+    # original rationale so we don't regress those.
+    if reply_text is not None:
+        offline = _offline_reply_quality(reply_text)
+        return ReplyQualityResult(
+            passed=offline.passed,
+            rationale=(
+                f"unparseable haiku response → offline fallback: "
+                f"{offline.rationale}. raw: {body[:200]!r}"
+            ),
+            failure_mode=offline.failure_mode,
+            model_used="offline-fallback",
+        )
     return ReplyQualityResult(
         passed=True,
         rationale=f"unparseable response — defaulted to pass: {body[:200]!r}",
@@ -404,12 +425,12 @@ def reply_quality_lint(
                 break
         if not body:
             return _offline_reply_quality(text)
-        parsed = _parse_reply_quality_response(body)
+        parsed = _parse_reply_quality_response(body, reply_text=text)
         return ReplyQualityResult(
             passed=parsed.passed,
             rationale=parsed.rationale,
             failure_mode=parsed.failure_mode,
-            model_used=model,
+            model_used=parsed.model_used or model,
         )
     except Exception as exc:
         result = _offline_reply_quality(text)
