@@ -11,6 +11,14 @@ from pathlib import Path
 
 from app.db import DEFAULT_DB_PATH, apply_migrations, connect
 
+__all__ = ["UNSELECTED", "open_connection"]
+
+# /review-2 🔵 #5 — single sentinel for "no filter selected" across the
+# Streamlit selectboxes that need a leading "none / any" option (Streamlit
+# lacks a true placeholder). Use the em-dash to read like an instrument-panel
+# dash. Import from app.pages so the convention has one home.
+UNSELECTED: str = "—"
+
 
 def open_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Open a sqlite3 connection scoped to the current page render.

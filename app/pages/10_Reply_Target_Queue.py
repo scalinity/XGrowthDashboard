@@ -55,7 +55,7 @@ from app.jobs.reply_target_maintenance import (
     expire_stale_candidates,
     stale_drafted_candidates,
 )
-from app.pages import open_connection
+from app.pages import UNSELECTED, open_connection
 
 
 # ---------------------------------------------------------------------------
@@ -221,23 +221,23 @@ status_options = ["all", "candidate", "drafted", "posted", "skipped", "expired",
 flt_status = f1.selectbox(
     "status", status_options, index=1, key="rtq_filter_status", label_visibility="visible"
 )
-pillar_options = ["—", "stir", "build", "self"]
+pillar_options = [UNSELECTED, "stir", "build", "self"]
 flt_pillar_raw = f2.selectbox(
     "pillar", pillar_options, index=0, key="rtq_filter_pillar"
 )
-intent_options = ["—", *REPLY_INTENT_ENUM]
+intent_options = [UNSELECTED, *REPLY_INTENT_ENUM]
 flt_intent_raw = f3.selectbox(
     "reply intent", intent_options, index=0, key="rtq_filter_intent"
 )
-action_options = ["—", "reply_now", "reply_if_time", "consider", "skip"]
+action_options = [UNSELECTED, "reply_now", "reply_if_time", "consider", "skip"]
 flt_action_raw = f4.selectbox(
     "recommended action", action_options, index=0, key="rtq_filter_action"
 )
 flt_author = f5.text_input("author handle", "", placeholder="@handle", key="rtq_filter_author")
 
-flt_pillar = None if flt_pillar_raw == "—" else flt_pillar_raw
-flt_intent = None if flt_intent_raw == "—" else flt_intent_raw
-flt_action = None if flt_action_raw == "—" else flt_action_raw
+flt_pillar = None if flt_pillar_raw == UNSELECTED else flt_pillar_raw
+flt_intent = None if flt_intent_raw == UNSELECTED else flt_intent_raw
+flt_action = None if flt_action_raw == UNSELECTED else flt_action_raw
 
 # ---------------------------------------------------------------------------
 # Add candidate — collapsible expander; the Queue is for review, not capture.
@@ -263,9 +263,11 @@ with st.expander("＋  add candidate (paste URL)", expanded=False):
         reply_count = m2.number_input("replies", min_value=0, value=0, step=1)
         repost_count = m3.number_input("reposts", min_value=0, value=0, step=1)
         p1, p2 = st.columns(2)
-        c_pillar = p1.selectbox("pillar (optional)", ["—", "stir", "build", "self"], index=0)
+        c_pillar = p1.selectbox(
+            "pillar (optional)", [UNSELECTED, "stir", "build", "self"], index=0
+        )
         c_intent = p2.selectbox(
-            "reply intent (optional)", ["—", *REPLY_INTENT_ENUM], index=0
+            "reply intent (optional)", [UNSELECTED, *REPLY_INTENT_ENUM], index=0
         )
 
         submitted = st.form_submit_button("Add to queue", width="stretch")
@@ -307,8 +309,8 @@ with st.expander("＋  add candidate (paste URL)", expanded=False):
                         like_count=int(like_count),
                         reply_count=int(reply_count),
                         repost_count=int(repost_count),
-                        pillar=None if c_pillar == "—" else c_pillar,
-                        reply_intent=None if c_intent == "—" else c_intent,
+                        pillar=None if c_pillar == UNSELECTED else c_pillar,
+                        reply_intent=None if c_intent == UNSELECTED else c_intent,
                         discovered_via="manual",
                     )
                     rt_id = rec.get("reply_target_id")
