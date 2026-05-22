@@ -67,13 +67,19 @@ class Citation:
     after the literal ``"row"`` token (e.g. ``"build/icp/value"``);
     ``record_id`` carries the same raw rest-of-bracket so the
     persistence format stays consistent.
+
+    P510R-22: removed the ``excerpt`` field — it was declared but never
+    populated, so the persisted ``evidence_citations_json`` never
+    carried it. When a future call site has a use for excerpt
+    provenance (Phase 5.11+ if it pans out), add it back together with
+    the parser code that populates it; don't carry empty contract
+    surface in the meantime.
     """
 
     raw: str
     record_type: str
     record_id: str
     filter_text: str | None = None
-    excerpt: str = ""
 
     def to_dict(self) -> dict[str, str]:
         d: dict[str, str] = {
@@ -82,8 +88,6 @@ class Citation:
         }
         if self.filter_text is not None:
             d["filter"] = self.filter_text
-        if self.excerpt:
-            d["excerpt"] = self.excerpt
         return d
 
 
