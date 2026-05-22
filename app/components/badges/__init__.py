@@ -7,13 +7,21 @@ from app.components.badges.confidence_label import (
     confidence_badge,
     ui_label_for_db_label,
 )
+from app.components.badges.prepublish_label import (
+    COMPOSITE_LABEL_PRESENTATION,
+    prepublish_chip,
+    render_score_panel,
+)
 from app.components.badges.sample_size import sample_size_badge
 
 __all__ = [
+    "COMPOSITE_LABEL_PRESENTATION",
     "DB_LABEL_TO_UI",
     "UI_LABEL_PRESENTATION",
     "SAMPLE_SIZE_TOOLTIP",
     "confidence_badge",
+    "prepublish_chip",
+    "render_score_panel",
     "sample_size_badge",
     "ui_label_for_db_label",
 ]

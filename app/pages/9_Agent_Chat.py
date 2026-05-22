@@ -37,6 +37,7 @@ from app.agent import (
     _internal_tools,
     confirmation,
     cost,
+    prepublish_scorer as _prepublish_scorer,
     recovery,
     session,
 )
@@ -44,6 +45,7 @@ from app.agent.client import (
     AgentClient,
     start_conversation,
 )
+from app.components.badges import prepublish_chip, render_score_panel
 from app.components.theme import (
     PALETTE,
     apply_theme,
@@ -277,7 +279,9 @@ def _render_history(conn, conversation_id: int) -> None:
     if last_assistant_message_id is not None:
         draft_row = conn.execute(
             """
-            SELECT id, text, iwh_attempt_index, status
+            SELECT id, text, iwh_attempt_index, status,
+                   prepublish_score_id, confidence_label,
+                   similarity_warning_json
             FROM agent_drafts
             WHERE conversation_id = ?
             ORDER BY id DESC LIMIT 1
@@ -318,6 +322,17 @@ def _render_draft_actions(conn, draft_row, message_id: int) -> None:
         f"{draft_row['text']}</div></div>",
         unsafe_allow_html=True,
     )
+
+    # Phase 5.8 / §28.11 — pre-publish chip + click-to-reveal score panel.
+    # The chip is informational; publish path is unchanged.
+    score_row = _prepublish_scorer.get_score_for_draft(
+        conn, agent_draft_id=int(draft_row["id"])
+    )
+    if score_row is not None:
+        prepublish_chip(score_row.get("composite_label"))
+        with st.expander("score breakdown (§28.11)", expanded=False):
+            render_score_panel(score_row)
+
     col_a, col_b, col_c = st.columns([2, 1, 1])
     with col_a:
         if st.button("publish to X", type="primary", key=f"pub_btn_{draft_row['id']}"):

@@ -218,6 +218,80 @@ st.plotly_chart(fig, width="stretch")
 
 hairline()
 
+# Pre-publish scorer calibration (Phase 5.8 / §28.11). Joins shipped agent
+# drafts to their pre-publish composite_label and the post's engagement;
+# lets Daniel see whether "strong" labels actually outperformed "weak"
+# over time. Empty rendering when no shipped agent drafts exist yet —
+# Calibration view earns its place once Daniel has ≥10 shipped drafts.
+_calibration_rows = conn.execute(
+    """
+    SELECT ps.composite_label,
+           COUNT(*) AS n,
+           AVG(plm.impressions) AS avg_impressions,
+           AVG(plm.engagement_rate) AS avg_engagement_rate
+    FROM agent_drafts ad
+    JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
+    JOIN posts p ON p.id = ad.final_post_id
+    JOIN v_post_latest_metrics plm ON plm.post_id = p.id
+    WHERE p.manual_confirmation_status = 'confirmed'
+      AND plm.impressions IS NOT NULL
+    GROUP BY ps.composite_label
+    ORDER BY CASE ps.composite_label
+      WHEN 'strong' THEN 0 WHEN 'viable' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END
+    """
+).fetchall()
+st.markdown("## Pre-publish scorer calibration")
+st.caption(
+    "Shipped agent drafts grouped by their §28.11 pre-publish "
+    "composite_label, paired with what actually happened. The scorer is "
+    "well-calibrated when 'strong' rows average above 'viable' above "
+    "'weak'. When the order inverts, tune the score thresholds in "
+    "`app/agent/prepublish_scorer.py` and bump SCORER_VERSION."
+)
+if not _calibration_rows:
+    st.markdown(
+        f"<div class='faint' style='font-size: 0.85rem; color: "
+        f"{PALETTE['bone_dim']};'>"
+        f"No shipped agent drafts with impressions yet. The calibration "
+        f"table fills in as you ship agent-assisted posts."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    rows_html: list[str] = [
+        f"<tr style='border-bottom: 1px solid {PALETTE['hairline']};'>"
+        f"<th style='text-align:left; padding:0.4rem 0.6rem 0.4rem 0; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>label</th>"
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>n</th>"
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>avg impressions</th>"
+        f"<th style='text-align:right; padding:0.4rem 0; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;'>avg engagement rate</th>"
+        f"</tr>"
+    ]
+    for _r in _calibration_rows:
+        _imp = f"{int(_r['avg_impressions']):,}" if _r["avg_impressions"] is not None else "—"
+        _er = f"{_r['avg_engagement_rate']:.3f}" if _r["avg_engagement_rate"] is not None else "—"
+        rows_html.append(
+            f"<tr><td style='padding:0.3rem 0.6rem 0.3rem 0; color:{PALETTE['bone']};'>"
+            f"{_r['composite_label']}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{int(_r['n'])}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{_imp}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0; "
+            f"color:{PALETTE['bone']};'>{_er}</td></tr>"
+        )
+    st.markdown(
+        "<table style='border-collapse: collapse; font-family: IBM Plex Sans, sans-serif;'>"
+        + "".join(rows_html)
+        + "</table>",
+        unsafe_allow_html=True,
+    )
+
+hairline()
+
 # What we can and can't learn — reinforces §13.
 st.markdown("## What this view can and can't tell you")
 st.markdown(

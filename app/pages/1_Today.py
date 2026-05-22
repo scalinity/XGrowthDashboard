@@ -256,6 +256,46 @@ else:
 
 hairline()
 
+# 3.5 Pending agent drafts (today) — Phase 5.8 / §28.11. Surfaces any
+# agent_drafts proposed today with their pre-publish composite_label chip.
+# Empty rendering when there are none — informational only, never gates.
+_pending_drafts = conn.execute(
+    """
+    SELECT ad.id, ad.text, ad.draft_kind, ad.created_at,
+           ps.composite_label
+    FROM agent_drafts ad
+    LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
+    WHERE date(ad.created_at) = date('now')
+      AND ad.status = 'proposed'
+    ORDER BY ad.id DESC
+    LIMIT 5
+    """
+).fetchall()
+if _pending_drafts:
+    from app.components.badges import prepublish_chip as _today_prepublish_chip
+    st.markdown("## Pending agent drafts")
+    st.caption(
+        "Agent-generated drafts from today's sessions that haven't been "
+        "accepted, rejected, or shipped yet. The chip is the §28.11 "
+        "pre-publish read — informational, never gates Publish."
+    )
+    for _d in _pending_drafts:
+        _preview = (_d["text"] or "").strip().replace("\n", " ")
+        if len(_preview) > 160:
+            _preview = _preview[:157] + "…"
+        st.markdown(
+            f"<div style='padding: 0.5rem 0; border-bottom: 1px solid "
+            f"{PALETTE['hairline']};'>"
+            f"<div class='numeric' style='font-size: 0.78rem; color: "
+            f"{PALETTE['bone_dim']};'>draft #{_d['id']} · "
+            f"{_d['draft_kind']}</div>"
+            f"<div style='margin-top: 0.25rem; color: {PALETTE['bone']};'>"
+            f"{_preview}</div></div>",
+            unsafe_allow_html=True,
+        )
+        _today_prepublish_chip(_d["composite_label"])
+    hairline()
+
 # 4. Recent activity.
 st.markdown("## Recent activity")
 recent = _recent_posts(conn)

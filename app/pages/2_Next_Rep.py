@@ -346,6 +346,45 @@ if _agent_target_accounts_available(conn):
             unsafe_allow_html=True,
         )
 
+# Pending agent drafts (Phase 5.8 / §28.11) — surfaces composite_label chips
+# for any agent_drafts that are still 'proposed', so Daniel can see read
+# quality for each lane-related draft without leaving Next Rep.
+_pending = conn.execute(
+    """
+    SELECT ad.id, ad.text, ad.draft_kind, ad.pillar,
+           ps.composite_label
+    FROM agent_drafts ad
+    LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
+    WHERE ad.status = 'proposed'
+    ORDER BY ad.id DESC
+    LIMIT 5
+    """
+).fetchall()
+if _pending:
+    from app.components.badges import prepublish_chip as _next_rep_prepublish_chip
+    hairline()
+    st.markdown("### Pending agent drafts")
+    st.caption(
+        "Drafts the agent has proposed but you haven't shipped or rejected. "
+        "Chip is the §28.11 pre-publish read; click into Agent Chat to "
+        "publish or revise."
+    )
+    for _d in _pending:
+        _text = (_d["text"] or "").strip().replace("\n", " ")
+        if len(_text) > 140:
+            _text = _text[:137] + "…"
+        st.markdown(
+            f"<div style='padding: 0.4rem 0; border-bottom: 1px solid "
+            f"{PALETTE['hairline']};'>"
+            f"<span class='numeric' style='font-size: 0.78rem; color: "
+            f"{PALETTE['bone_dim']};'>draft #{_d['id']} · "
+            f"{_d['draft_kind']} · {_d['pillar'] or '—'}</span>"
+            f"<div style='margin-top: 0.25rem; color: {PALETTE['bone']};'>"
+            f"{_text}</div></div>",
+            unsafe_allow_html=True,
+        )
+        _next_rep_prepublish_chip(_d["composite_label"])
+
 # Agent integration (§14.2 + §28.7).
 hairline()
 st.markdown("### Ask the agent")

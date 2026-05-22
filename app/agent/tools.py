@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.db import transaction
+from app.agent import prepublish_scorer as _prepublish_scorer
+from app.agent import voice_profile as _voice_profile
 from app.agent.reply_targets import (
     ACTION_TO_SCORE,
     REPLY_INTENT_ENUM,
@@ -777,11 +779,29 @@ def _save_draft_post(
             (post_id, pillar, audience, cta, hypothesis),
         )
 
+        # Phase 5.8 / §28.11 — pre-publish heuristic scorer. Deterministic,
+        # never blocks. Writes a prepublish_scores row and wires the
+        # cyclical FK on agent_drafts. Lives inside the transaction so a
+        # scorer crash rolls back the draft alongside.
+        score_row = _prepublish_scorer.score(
+            draft_text=text,
+            draft_kind="standalone",
+            pillar=pillar,
+            audience=audience,
+            cta=cta,
+            target_post_text=None,
+            active_voice_profile=_voice_profile.get_active(conn),
+        )
+        _prepublish_scorer.insert_score_row(
+            conn, agent_draft_id=draft_id, row=score_row
+        )
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
         "iwh_attempt_index": int(iwh_attempt_index),
         "draft_url": f"/?draft_id={draft_id}",
+        "prepublish_label": score_row.composite_label,
     }
 
 
@@ -842,11 +862,27 @@ def _save_draft_reply(
             (post_id, draft_id),
         )
 
+        # Phase 5.8 / §28.11 — same scoring pass for replies. Includes
+        # the reply_substance dimension keyed off target_post_text.
+        score_row = _prepublish_scorer.score(
+            draft_text=text,
+            draft_kind="reply",
+            pillar=pillar,
+            audience=None,
+            cta=None,
+            target_post_text=target_post_text,
+            active_voice_profile=_voice_profile.get_active(conn),
+        )
+        _prepublish_scorer.insert_score_row(
+            conn, agent_draft_id=draft_id, row=score_row
+        )
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
         "iwh_attempt_index": int(iwh_attempt_index),
         "target_post_url": target_post_url,
+        "prepublish_label": score_row.composite_label,
     }
 
 
