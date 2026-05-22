@@ -62,6 +62,49 @@ def test_compute_auto_filled_fields_returns_documented_shape(
     assert isinstance(parsed, list)
 
 
+def test_p511r4_completed_at_space_separated_picks_up_first_of_month(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """SQLite datetime('now') writes space-separated timestamps; the previous
+    T-separated bounds comparison silently dropped first-of-month
+    completions. Pin the format-agnostic behavior."""
+    cid = _campaigns.create_campaign(
+        db_conn,
+        name="first of month",
+        theme="t",
+        hypothesis="h",
+        start_date="2026-05-01",
+        end_date="2026-05-28",
+        success_criteria={
+            "distribution": [{"metric": "impressions", "target": "10000"}],
+            "validation": [{"metric": "downloads", "target": "5"}],
+        },
+    )
+    _campaigns.activate_campaign(db_conn, campaign_id=cid)
+    _campaigns.complete_campaign(
+        db_conn,
+        campaign_id=cid,
+        success_criteria_actuals={
+            "distribution": [{"metric": "impressions", "actual": "1"}],
+            "validation": [{"metric": "downloads", "actual": "1"}],
+        },
+        lesson="x",
+        counterfactual_note="y",
+    )
+    # Force SPACE-separated completed_at_utc on the FIRST of the month
+    # — exactly the input the previous query dropped.
+    db_conn.execute(
+        "UPDATE campaigns SET completed_at_utc = ? WHERE id = ?",
+        ("2026-05-01 00:30:00", cid),
+    )
+    auto = _mr.compute_auto_filled_fields(db_conn, "2026-05")
+    parsed = json.loads(auto.campaigns_completed_json)
+    assert any(p["campaign_id"] == cid for p in parsed), (
+        "campaign completed at '2026-05-01 00:30:00' (space-separated, "
+        "first-of-month) must appear in the May rollup"
+    )
+
+
 def test_compute_auto_filled_campaigns_completed_picks_up_in_month(
     db_conn: sqlite3.Connection,
 ) -> None:

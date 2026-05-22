@@ -193,19 +193,22 @@ def compute_auto_filled_fields(
 
     # Campaigns that COMPLETED in this month — payload feeds the agent's
     # campaigns_retro section.
+    #
+    # P511R-4: SQLite's datetime('now') writes space-separated timestamps
+    # ('2026-05-15 14:30:00'); the previous WHERE compared against
+    # T-separated bounds ('2026-05-15T00:00:00'), and at position 10
+    # ' ' (0x20) < 'T' (0x54) so campaigns completed on the FIRST of
+    # the month silently dropped out of campaigns_completed_json.
+    # Switch to date() on the LHS + date-only ISO params — format-agnostic.
     completed_rows = conn.execute(
         """
         SELECT id, name, success_criteria_json, completed_at_utc, lesson
         FROM campaigns
         WHERE status = 'completed'
-          AND completed_at_utc >= ?
-          AND completed_at_utc <= ?
+          AND date(completed_at_utc) BETWEEN date(?) AND date(?)
         ORDER BY completed_at_utc ASC
         """,
-        (
-            f"{month_start.isoformat()}T00:00:00",
-            f"{month_end.isoformat()}T23:59:59",
-        ),
+        (month_start.isoformat(), month_end.isoformat()),
     ).fetchall()
     campaigns_completed = []
     for r in completed_rows:
