@@ -21,6 +21,7 @@ delegates the persistence to the existing ``reply_targets`` machinery.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -31,6 +32,19 @@ from app.agent.reply_targets import (
     ACTION_TO_SCORE,
     resolve_recommended_action,
 )
+
+_LOG = logging.getLogger(__name__)
+
+# Module-scope compiled patterns — used inside parse_replier_paste.
+# Previously rebuilt every loop iteration.
+_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_]{1,15}(?:\s*[:\-—]|\s*$)")
+_HANDLE_GROUPS_RE = re.compile(r"^@([A-Za-z0-9_]{1,15})\s*[:\-—]?\s*(.*)$")
+_FIRST_LINE_RE = re.compile(r"^@?([A-Za-z0-9_]{1,15})\s*[:\-—]\s*(.*)$")
+# P59A-S4: detect "looks-handle-shaped but exceeds the 15-char X-handle
+# cap." When this matches on a line that _HANDLE_RE rejected, we log
+# a warning so Daniel sees that an excerpt was misclassified rather
+# than silently swallowed into a multi-line-body branch.
+_LONG_HANDLE_RE = re.compile(r"^@([A-Za-z0-9_]{16,})\s*[:\-—]?\s*")
 
 
 # Same alpha-token regex shape personality_lore uses — len >=3 keeps
@@ -88,15 +102,26 @@ def parse_replier_paste(payload: str) -> list[ReplierExcerpt]:
         lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
         if not lines:
             continue
+        # P59A-S4: emit a warning for any line that looks handle-shaped
+        # but exceeds the 15-char X-handle cap. Otherwise the long line
+        # silently falls through into the multi-line-excerpt branch and
+        # the handle is dropped.
+        for ln in lines:
+            if _LONG_HANDLE_RE.match(ln) and not _HANDLE_RE.match(ln):
+                _LOG.warning(
+                    "replier-pool paste: line %r begins with @ followed "
+                    "by >15 alphanumeric chars (X handle cap is 15) — "
+                    "treating as excerpt body, handle dropped.",
+                    ln[:60],
+                )
         # If every line in this block independently starts with @, treat
         # each line as its own record (handles both '@handle' and
         # '@handle: excerpt' shapes). This is the common case Daniel
         # produces by pasting from X's reply list without blank-line
         # separators.
-        handle_re = re.compile(r"^@[A-Za-z0-9_]{1,15}(?:\s*[:\-—]|\s*$)")
-        if all(handle_re.match(ln) for ln in lines):
+        if all(_HANDLE_RE.match(ln) for ln in lines):
             for ln in lines:
-                m = re.match(r"^@([A-Za-z0-9_]{1,15})\s*[:\-—]?\s*(.*)$", ln)
+                m = _HANDLE_GROUPS_RE.match(ln)
                 if m:
                     h = m.group(1)
                     t = m.group(2).strip() or None
@@ -107,7 +132,7 @@ def parse_replier_paste(payload: str) -> list[ReplierExcerpt]:
         first = lines[0]
         handle: str | None = None
         body_lines = list(lines)
-        m = re.match(r"^@?([A-Za-z0-9_]{1,15})\s*[:\-—]\s*(.*)$", first)
+        m = _FIRST_LINE_RE.match(first)
         if m:
             handle = m.group(1)
             remainder = m.group(2).strip()
