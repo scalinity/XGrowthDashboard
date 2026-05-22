@@ -58,6 +58,11 @@ _ALLOWED_CONFIDENCE_LABELS: frozenset[str] = frozenset(
     {"fact", "inference", "speculation", "mixed"}
 )
 
+# P510R-7: cap Coach history sent to the model so long sessions don't
+# blow past max_tokens on the input side. Daniel can reset via "+ new
+# conversation" if older context matters.
+_COACH_HISTORY_WINDOW: int = 20
+
 
 # ---------------------------------------------------------------------------
 # Session-state bootstrap.
@@ -311,14 +316,20 @@ def _handle_user_turn(user_text: str) -> None:
             conn, "coach_refuse_without_evidence", default=True
         )
 
-    # API call OUTSIDE the connection scope: holding a SQLite writer
-    # lock across a multi-second model round-trip blocks other pages
-    # (P510R-6 motivation). The historical state we need for the
-    # request is already in `history`.
+    # API call OUTSIDE the connection scope. The conn-hold is itself
+    # benign under autocommit+WAL (see P510R-6 note in account_research.
+    # analyze), but separating the scopes keeps the atomic-round-trip
+    # write (P510R-3) cleanly bounded.
+    #
+    # P510R-7: cap history window to keep input tokens bounded. Mirrors
+    # the §14.8 Agent Chat convention. Daniel can start a fresh
+    # conversation via the rail's "+ new conversation" button when he
+    # wants a clean slate.
+    api_history = [m for m in history if m["role"] in ("user", "assistant")]
+    if len(api_history) > _COACH_HISTORY_WINDOW:
+        api_history = api_history[-_COACH_HISTORY_WINDOW:]
     api_messages = [
-        {"role": m["role"], "content": m["content"]}
-        for m in history
-        if m["role"] in ("user", "assistant")
+        {"role": m["role"], "content": m["content"]} for m in api_history
     ]
     api_messages.append({"role": "user", "content": user_text})
     try:
