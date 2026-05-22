@@ -143,13 +143,20 @@ def get_calendar_window(
     cells: list[CalendarCell] = []
 
     # ----- 1. POSTED -----
+    # P511R-16 + P511R-17: consolidate the three near-identical
+    # correlated-subquery + Python-side filter patterns. Each provenance
+    # now does a LEFT JOIN on campaign_items + optional SQL-side
+    # campaign_id filter, replacing the per-row Python `continue` skip.
+    # Reduces drift hazard (the linkage rule lives in ONE place per
+    # provenance) and aligns with the PLANNED branch which was already
+    # SQL-filtered.
     posted_sql = """
         SELECT p.id, p.text, p.content_type, p.published_to_x_at,
                v.pillar AS metric_pillar,
-               (SELECT campaign_id FROM campaign_items
-                WHERE post_id = p.id LIMIT 1) AS campaign_id
+               ci.campaign_id AS campaign_id
         FROM posts p
         LEFT JOIN v_post_latest_metrics v ON v.post_id = p.id
+        LEFT JOIN campaign_items ci ON ci.post_id = p.id
         WHERE p.published_to_x_at IS NOT NULL
           AND date(p.published_to_x_at) BETWEEN ? AND ?
     """
@@ -160,10 +167,10 @@ def get_calendar_window(
     if content_type is not None:
         posted_sql += " AND p.content_type = ?"
         posted_params.append(content_type)
+    if campaign_id is not None:
+        posted_sql += " AND ci.campaign_id = ?"
+        posted_params.append(int(campaign_id))
     for r in conn.execute(posted_sql, posted_params):
-        cid = r["campaign_id"]
-        if campaign_id is not None and cid != campaign_id:
-            continue
         cells.append(
             CalendarCell(
                 provenance="posted",
@@ -173,7 +180,7 @@ def get_calendar_window(
                 pillar=r["metric_pillar"],
                 content_type=r["content_type"],
                 title=_short(r["text"]),
-                campaign_id=cid,
+                campaign_id=r["campaign_id"],
             )
         )
 
@@ -183,49 +190,47 @@ def get_calendar_window(
     # when its created_in_app_at falls in the window. The view's "+
     # schedule slot" inline form lands rows here when Daniel picks the
     # ad-hoc path.
-    drafted_sql = """
-        SELECT p.id, p.text, p.content_type, p.created_in_app_at,
-               (SELECT campaign_id FROM campaign_items
-                WHERE post_id = p.id LIMIT 1) AS campaign_id
-        FROM posts p
-        WHERE p.manual_confirmation_status = 'draft'
-          AND p.published_to_x_at IS NULL
-          AND date(p.created_in_app_at) BETWEEN ? AND ?
-    """
-    drafted_params: list[object] = [start_iso, end_iso]
-    if content_type is not None:
-        drafted_sql += " AND p.content_type = ?"
-        drafted_params.append(content_type)
-    for r in conn.execute(drafted_sql, drafted_params):
-        cid = r["campaign_id"]
-        if campaign_id is not None and cid != campaign_id:
-            continue
-        # Posts-table drafts don't carry pillar directly — pillar lives
-        # on post_classifications joined via v_post_latest_metrics which
-        # requires a published row; future-drafts skip the pillar filter
-        # (pillar is None on the cell) since the classification doesn't
-        # exist yet.
-        if pillar is not None:
-            continue
-        cells.append(
-            CalendarCell(
-                provenance="drafted_for_future",
-                source_id=int(r["id"]),
-                date=_date_only(r["created_in_app_at"]),
-                slot=_classify_slot(r["created_in_app_at"], cutoff),
-                pillar=None,
-                content_type=r["content_type"],
-                title=_short(r["text"]),
-                campaign_id=cid,
+    #
+    # Pillar lives on post_classifications joined via v_post_latest_metrics
+    # which requires a published row; future-drafts have NULL pillar, so
+    # when a pillar filter is requested we short-circuit to an empty result.
+    if pillar is None:
+        drafted_sql = """
+            SELECT p.id, p.text, p.content_type, p.created_in_app_at,
+                   ci.campaign_id AS campaign_id
+            FROM posts p
+            LEFT JOIN campaign_items ci ON ci.post_id = p.id
+            WHERE p.manual_confirmation_status = 'draft'
+              AND p.published_to_x_at IS NULL
+              AND date(p.created_in_app_at) BETWEEN ? AND ?
+        """
+        drafted_params: list[object] = [start_iso, end_iso]
+        if content_type is not None:
+            drafted_sql += " AND p.content_type = ?"
+            drafted_params.append(content_type)
+        if campaign_id is not None:
+            drafted_sql += " AND ci.campaign_id = ?"
+            drafted_params.append(int(campaign_id))
+        for r in conn.execute(drafted_sql, drafted_params):
+            cells.append(
+                CalendarCell(
+                    provenance="drafted_for_future",
+                    source_id=int(r["id"]),
+                    date=_date_only(r["created_in_app_at"]),
+                    slot=_classify_slot(r["created_in_app_at"], cutoff),
+                    pillar=None,
+                    content_type=r["content_type"],
+                    title=_short(r["text"]),
+                    campaign_id=r["campaign_id"],
+                )
             )
-        )
 
     # ----- 3. AGENT-DRAFTED -----
     agent_sql = """
         SELECT ad.id, ad.text, ad.content_type, ad.pillar, ad.created_at,
-               (SELECT campaign_id FROM campaign_items
-                WHERE agent_draft_id = ad.id LIMIT 1) AS campaign_id
+               ci.campaign_id AS campaign_id
         FROM agent_drafts ad
+        LEFT JOIN campaign_items ci ON ci.agent_draft_id = ad.id
         WHERE ad.status IN ('proposed', 'accepted_with_edits')
           AND ad.final_post_id IS NULL
           AND date(ad.created_at) BETWEEN ? AND ?
@@ -237,10 +242,10 @@ def get_calendar_window(
     if content_type is not None:
         agent_sql += " AND ad.content_type = ?"
         agent_params.append(content_type)
+    if campaign_id is not None:
+        agent_sql += " AND ci.campaign_id = ?"
+        agent_params.append(int(campaign_id))
     for r in conn.execute(agent_sql, agent_params):
-        cid = r["campaign_id"]
-        if campaign_id is not None and cid != campaign_id:
-            continue
         cells.append(
             CalendarCell(
                 provenance="agent_drafted",
@@ -250,7 +255,7 @@ def get_calendar_window(
                 pillar=r["pillar"],
                 content_type=r["content_type"],
                 title=_short(r["text"]),
-                campaign_id=cid,
+                campaign_id=r["campaign_id"],
             )
         )
 
