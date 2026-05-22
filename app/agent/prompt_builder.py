@@ -190,9 +190,14 @@ def extract_reply_intent_enum_from_spec(spec_path: Path | None = None) -> list[s
 
 
 def extract_reply_intent_enum_from_prompt(prompt_text: str | None = None) -> list[str]:
-    """Pull the reply_intent values from Section 6 of the template."""
+    """Pull the reply_intent values from Section 6 of the template.
+
+    /review-2 🔵 #2 — anchored to the start of the line so a future prose
+    line elsewhere in the template (e.g. "When the user mentions their
+    Reply intent: take it seriously") can't silently steal the match.
+    """
     text = prompt_text if prompt_text is not None else _read_template()
-    m = re.search(r"Reply intent[^\n]*:\s*([^\n]+)", text)
+    m = re.search(r"^Reply intent[^\n]*:\s*([^\n]+)", text, flags=re.MULTILINE)
     if not m:
         return []
     raw = m.group(1)
