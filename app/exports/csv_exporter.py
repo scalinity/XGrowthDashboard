@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.exports._audit import EXPORT_KIND_CSV, record_export
 from app.exports._sql import quote_identifier
 from app.exports.allowlists import (
     ALLOWLISTS,
@@ -48,60 +49,8 @@ def _anchor_on_project_root(path: Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def _record_export(
-    conn: sqlite3.Connection,
-    *,
-    kind: str,
-    table_name: str | None,
-    output_path: Path,
-    row_count: int | None,
-    include_opt_in: bool | None,
-    notes: str | None = None,
-) -> None:
-    """Insert one row into ``data_exports``.
-
-    Best-effort: failures here are non-fatal (the export itself succeeded).
-    Surface the failure in a log line rather than rolling back the user's
-    file. We DO surface it as a ``RuntimeWarning`` so a misconfigured DB
-    doesn't silently lose audit rows in tests.
-    """
-    try:
-        conn.execute(
-            """
-            INSERT INTO data_exports
-                (exported_at_utc, kind, table_name, output_path, row_count, include_opt_in, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                _now_utc_iso(),
-                kind,
-                table_name,
-                str(output_path),
-                row_count,
-                None if include_opt_in is None else int(include_opt_in),
-                notes,
-            ),
-        )
-    except sqlite3.Error as exc:
-        import warnings
-
-        warnings.warn(
-            f"Failed to record data_exports row for {kind}/{table_name!r}: {exc}. "
-            "Run `uv run python -m scripts.init_db` to ensure migration 004 has applied.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-
 def _quote_identifier(name: str) -> str:
-    """Backward-compatible alias for :func:`app.exports._sql.quote_identifier`.
-
-    The exporter originally defined this helper inline; /review-2
-    promoted it to a shared module so the JSON exporter could reuse it.
-    Kept as a thin alias so any in-repo grep for ``_quote_identifier``
-    still resolves and so existing imports inside this file (the SELECT
-    builder) continue to work without ceremony.
-    """
+    """Backward-compatible alias for :func:`app.exports._sql.quote_identifier`."""
     return quote_identifier(name)
 
 
@@ -191,9 +140,9 @@ def export_table_to_csv(
                 # matches the header order.
                 writer.writerow([row[col] for col in columns])
 
-        _record_export(
+        record_export(
             active,
-            kind="csv",
+            kind=EXPORT_KIND_CSV,
             table_name=table_name,
             output_path=target,
             row_count=row_count,

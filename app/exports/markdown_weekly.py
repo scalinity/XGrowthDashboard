@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.exports._audit import EXPORT_KIND_MARKDOWN_WEEKLY, record_export
 
 
 class CounterfactualMissingError(RuntimeError):
@@ -68,10 +69,6 @@ class MarkdownWeeklyExportResult:
 # Strict regex; rejects "2026-W5" and "2026W21" — must be 4-digit year, "-W",
 # zero-padded ISO week. ISO 8601 weeks are 01..53 inclusive.
 _ISO_WEEK_RE: re.Pattern[str] = re.compile(r"^(\d{4})-W(\d{2})$")
-
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _anchor_on_project_root(path: Path) -> Path:
@@ -337,7 +334,8 @@ def _format_report(
 
     sections.append(f"# X Growth Weekly Review — {week_iso} ({week_start_date} → {week_end_date})")
     sections.append("")
-    sections.append(f"*Exported {_now_utc_iso()} from spec.md §14.6 / §16 / §24.*")
+    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sections.append(f"*Exported {exported_at} from spec.md §14.6 / §16 / §24.*")
     sections.append("")
 
     sections.append("## 1. Summary")
@@ -496,8 +494,9 @@ def export_weekly_report(
             (str(target), review["id"]),
         )
 
-        _record_export(
+        record_export(
             active,
+            kind=EXPORT_KIND_MARKDOWN_WEEKLY,
             output_path=target,
             row_count=1,
             notes=f"week={week_iso}",
@@ -528,32 +527,6 @@ def _resolve_output_path(
     base = Path(seeded) if seeded else Path("data/exports")
     base = _anchor_on_project_root(base)
     return base / f"weekly_report_{week_iso}.md"
-
-
-def _record_export(
-    conn: sqlite3.Connection,
-    *,
-    output_path: Path,
-    row_count: int,
-    notes: str | None,
-) -> None:
-    try:
-        conn.execute(
-            """
-            INSERT INTO data_exports
-                (exported_at_utc, kind, table_name, output_path, row_count, include_opt_in, notes)
-            VALUES (?, 'markdown_weekly', NULL, ?, ?, NULL, ?)
-            """,
-            (_now_utc_iso(), str(output_path), row_count, notes),
-        )
-    except sqlite3.Error as exc:
-        import warnings
-
-        warnings.warn(
-            f"Failed to record data_exports row for Markdown weekly: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
 
 def _resolve_default_week(today: date | None = None) -> str:

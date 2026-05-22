@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, apply_migrations, connect
+from app.exports._audit import EXPORT_KIND_JSON, record_export
 from app.exports._sql import quote_identifier
 
 JSON_SCHEMA_VERSION: int = 1
@@ -132,10 +133,6 @@ class JsonExportResult:
     path: Path
     table_row_counts: dict[str, int]
     redactions: dict[str, str] = field(default_factory=dict)
-
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _anchor_on_project_root(path: Path) -> Path:
@@ -361,7 +358,7 @@ def export_database_to_json(
 
         document: dict[str, object] = {
             "schema_version": JSON_SCHEMA_VERSION,
-            "exported_at_utc": _now_utc_iso(),
+            "exported_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "db_schema_migrations_applied": applied,
             "redactions": redactions,
             "tables": tables_payload,
@@ -375,8 +372,9 @@ def export_database_to_json(
         )
         target.write_text(encoded, encoding="utf-8")
 
-        _record_export(
+        record_export(
             active,
+            kind=EXPORT_KIND_JSON,
             output_path=target,
             row_count=sum(row_counts.values()),
         )
@@ -389,31 +387,6 @@ def export_database_to_json(
         table_row_counts=row_counts,
         redactions=redactions,
     )
-
-
-def _record_export(
-    conn: sqlite3.Connection,
-    *,
-    output_path: Path,
-    row_count: int,
-) -> None:
-    try:
-        conn.execute(
-            """
-            INSERT INTO data_exports
-                (exported_at_utc, kind, table_name, output_path, row_count, include_opt_in, notes)
-            VALUES (?, 'json', NULL, ?, ?, NULL, NULL)
-            """,
-            (_now_utc_iso(), str(output_path), row_count),
-        )
-    except sqlite3.Error as exc:
-        import warnings
-
-        warnings.warn(
-            f"Failed to record data_exports row for JSON dump: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
 
 def main(argv: list[str] | None = None) -> int:
