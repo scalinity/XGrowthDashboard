@@ -186,7 +186,17 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "thread_url": "https://x.com/foo/status/1",
             "replier_handles_or_excerpts_json": "@bar: aligned text\n@baz",
         },
+        # Phase 5.10 / §28.22 — Brain Dump processing. brain_dump_id is
+        # filled in below after a brain_dumps row is created. The handler
+        # surfaces failure as a dict (not an exception) so the smoke test
+        # holds even when ANTHROPIC_API_KEY is absent in CI.
+        "process_brain_dump": {"brain_dump_id": None},
     }
+    # Seed a brain_dumps row for the smoke test invocation.
+    from app.agent import brain_dump as _brain_dump
+    sample_kwargs["process_brain_dump"]["brain_dump_id"] = _brain_dump.create_dump(
+        db_conn, raw_text="smoke-test dump"
+    )
 
     from app.agent.tools import AGENT_TOOLS
     saved_draft_id: int | None = None

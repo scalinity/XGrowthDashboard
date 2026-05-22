@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.db import transaction
+from app.agent import brain_dump as _brain_dump
 from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
 from app.agent import prepublish_scorer as _prepublish_scorer
@@ -1185,7 +1186,31 @@ def _record_reply_target(
 
 
 # ===========================================================================
-# AGENT_TOOLS — the registered tool catalog (15 entries).
+# Brain Dump tool wrapper — converts BrainDumpResult to a JSON-serializable
+# dict for the agent's tool-result message (§28.22).
+# ===========================================================================
+def _brain_dump_process_to_dict(
+    conn: sqlite3.Connection, brain_dump_id: int
+) -> dict[str, Any]:
+    try:
+        result = _brain_dump.process(conn, brain_dump_id)
+    except _brain_dump.BrainDumpError as exc:
+        return {"status": "failed", "brain_dump_id": brain_dump_id, "error": str(exc)}
+    return {
+        "status": "processed",
+        "brain_dump_id": result.brain_dump_id,
+        "clarifying_questions": result.clarifying_questions,
+        "candidate_drafts": [c.to_dict() for c in result.candidate_drafts],
+        "tokens_used": result.tokens_used,
+        "note": (
+            "candidate_drafts are NOT auto-promoted. Daniel must click "
+            "'Send to drafts' on each candidate in §14.9 to invoke "
+            "_save_draft_post (§28.22)."
+        ),
+    }
+
+
+# AGENT_TOOLS — the registered tool catalog (19 entries after Phase 5.10).
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -1610,6 +1635,28 @@ AGENT_TOOLS: list[ToolDef] = [
             "required": ["target_post_url"],
         },
         handler=_record_reply_target,
+    ),
+    ToolDef(
+        name="process_brain_dump",
+        description=(
+            "Process a brain_dumps row (raw_text → clarifying_questions "
+            "+ ≤N candidate_drafts). Writes results back to the same "
+            "row; raw_text is NEVER modified. Used by both the §14.9 "
+            "Brain Dump view's Process button AND chat-driven invocation "
+            "('process my last brain dump'). Candidates are NOT auto-"
+            "saved as agent_drafts — promotion is an explicit Daniel "
+            "click that runs the full Phase 5.8 pipeline (§28.22)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "brain_dump_id": {"type": "integer"},
+            },
+            "required": ["brain_dump_id"],
+        },
+        handler=lambda conn, *, brain_dump_id: _brain_dump_process_to_dict(
+            conn, int(brain_dump_id)
+        ),
     ),
 ]
 
