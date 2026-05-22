@@ -229,6 +229,29 @@ def test_restore_with_confirm_moves_old_to_sidecar(
 # 6. Retention prunes files older than the window (mtime-based).
 # ---------------------------------------------------------------------------
 
+def test_retention_zero_keeps_the_freshly_created_backup(
+    db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
+) -> None:
+    """W2 regression — retention_days=0 must NOT delete the just-created
+    backup, regardless of whether the prune threshold makes it appear old.
+    The previous implementation treated 0 as "prune everything older than
+    now()", which would unlink the file VACUUM INTO had just produced.
+    """
+    db_conn.close()
+    backups_dir = tmp_path / "backups"
+
+    result = backup_database(
+        source_path=db_path,
+        backups_dir=backups_dir,
+        retention_days=0,
+    )
+
+    assert result.path.exists(), (
+        "retention_days=0 must not delete the freshly-created backup"
+    )
+    assert result.pruned == [], "retention_days=0 should be a no-op prune"
+
+
 def test_retention_prunes_old_backups(
     db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
 ) -> None:

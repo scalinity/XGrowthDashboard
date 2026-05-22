@@ -76,13 +76,30 @@ def _open_backup_for_integrity_check(backup_path: Path) -> str:
         check_conn.close()
 
 
-def _prune_old_backups(backups_dir: Path, retention_days: int) -> list[Path]:
-    """Delete ``x_growth_*.db`` files older than ``retention_days`` by mtime."""
-    if retention_days < 0:
+def _prune_old_backups(
+    backups_dir: Path,
+    retention_days: int,
+    keep: Path | None = None,
+) -> list[Path]:
+    """Delete ``x_growth_*.db`` files older than ``retention_days`` by mtime.
+
+    ``retention_days <= 0`` is treated as "keep forever" and is a no-op.
+    This prevents a hand-edited settings value or a stray ``--retention-days
+    0`` CLI flag from deleting the just-created backup: the prune sweep
+    runs *after* VACUUM INTO, with a threshold captured at prune time
+    (strictly later than the new file's mtime), so the fresh file would
+    otherwise satisfy ``mtime < threshold`` and get unlinked.
+
+    ``keep`` is also exempted from the sweep regardless of mtime —
+    defensive against clock drift that could make the new file look "old".
+    """
+    if retention_days <= 0:
         return []
     threshold = time.time() - (retention_days * 86400)
     pruned: list[Path] = []
     for path in sorted(backups_dir.glob(BACKUP_FILENAME_GLOB)):
+        if keep is not None and path == keep:
+            continue
         try:
             if path.stat().st_mtime < threshold:
                 path.unlink()
@@ -153,7 +170,7 @@ def backup_database(
             )
 
         set_setting(conn, "last_backup_at_utc", _now_utc_iso())
-        pruned = _prune_old_backups(backups_path, retention)
+        pruned = _prune_old_backups(backups_path, retention, keep=target)
 
         return BackupResult(
             path=target,
