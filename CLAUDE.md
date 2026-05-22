@@ -89,6 +89,23 @@ Documentation lookup happens **before** "let me try a thing" — when working wi
 
 ---
 
+## Implementation status doc
+
+Day-to-day implementation status lives in **`docs/index.html`** — an interactive dark "instrument-panel" dashboard styled to match `app/components/theme.py`. The legacy `docs/IMPLEMENTATION_STATUS.md` is frozen at the end of Phase 5.8 and kept only as a historical record. **Don't append to the .md.**
+
+When a phase ships, append a new phase block to `docs/index.html`:
+
+1. Open `docs/index.html` and find the HTML-comment template at the bottom of `<main>` (search for `TEMPLATE FOR THE NEXT PHASE`). Copy the entire `<section class="phase" id="phase-X-X" …>` block out of the comment.
+2. Paste it before the `<!-- TEMPLATE … -->` comment and fill in:
+   - `id="phase-N-N"`, `data-phase-id="N.N"`, `data-phase-title="…"`.
+   - The four counter tiles (migrations / tests passing / acceptance gates / fix commits).
+   - One `<details class="subsection" data-section-type="…">` per subsection. Allowed `data-section-type` values: `completed | gates | limitations | lessons | remediation | ambiguity | next`. The filter chips and per-section keyline colors are wired to these — anything else won't render correctly.
+3. Add a matching `<li>` to `<ul id="phase-list">` in the sidebar (copy a prior entry, swap the anchor and label).
+
+Verification: `open docs/index.html` on macOS. Confirm the new phase appears in the sidebar nav, the four counter tiles render with mono numerals, every filter chip (Completed / Gates / Limits / Lessons / Remediation) correctly shows/hides its sections, and the search input matches against the new content. Deep links work: `docs/index.html#phase-N-N-gates` should scroll-to-and-expand the right `<details>` block. Per the verification matrix below this is a docs-only change — no `pytest`/`ruff` gate required, but Conventional Commits subject still applies (e.g. `docs(status): Phase N.N — <one-line summary>`).
+
+---
+
 ## Issue tracking and review-fix workflow
 
 This project does **not** use Linear or GitHub Issues. It tracks fixes locally via the Claude Code Task tools (`TaskCreate` / `TaskUpdate` / `TaskList`). The `/address` skill (and any skill that "files a Linear parent + sub-issues") must adapt as follows on this repo:
@@ -109,4 +126,4 @@ The point of the per-sub-task push is the same point Linear would serve: an exte
 
 ## What this file is not
 
-This file is project-specific operational rules. Architecture decisions and product reasoning live in `spec.md`. Day-to-day status lives in `docs/IMPLEMENTATION_STATUS.md`. Don't duplicate them here.
+This file is project-specific operational rules. Architecture decisions and product reasoning live in `spec.md`. Day-to-day status lives in `docs/index.html` (interactive). `docs/IMPLEMENTATION_STATUS.md` is frozen at Phase 5.8 — don't append to it. Don't duplicate any of this here.

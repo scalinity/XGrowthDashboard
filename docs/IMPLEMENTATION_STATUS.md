@@ -1,3 +1,7 @@
+> **FROZEN at end of Phase 5.8 (2026-05-22).** Live implementation status now lives in [`docs/index.html`](index.html). This file is preserved as a historical record and is not appended to going forward.
+
+---
+
 # Implementation status — X Growth Dashboard
 
 | Field          | Value                                  |
