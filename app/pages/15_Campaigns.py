@@ -172,6 +172,69 @@ def _transition_item_cb(*, item_id: int, new_status: str) -> None:
             st.toast(f"transition refused: {exc}", icon="⚠")
 
 
+def _complete_campaign_cb(*, campaign_id: int) -> None:
+    """P511R-2: wire §28.26 active → completed transition into the UI.
+
+    Builds the success_criteria_actuals payload from one widget per metric
+    keyed by the campaign id, plus the required lesson + counterfactual_note
+    + optional lesson_lands_in. Errors surface inline rather than via toast
+    so Daniel sees exactly which retro field is missing.
+    """
+    error_key = f"complete_form_error_{campaign_id}"
+    st.session_state[error_key] = None
+    with open_connection() as conn:
+        camp = _campaigns.get_campaign(conn, campaign_id=campaign_id)
+        actuals: dict[str, list[dict[str, str]]] = {
+            "distribution": [],
+            "validation": [],
+        }
+        for stream in ("distribution", "validation"):
+            for entry in camp.success_criteria.get(stream, []):
+                metric = entry.get("metric")
+                widget_key = f"complete_actual_{campaign_id}_{stream}_{metric}"
+                value = st.session_state.get(widget_key, "").strip()
+                actuals[stream].append({"metric": metric, "actual": value})
+        lesson = st.session_state.get(f"complete_lesson_{campaign_id}", "").strip()
+        cf = st.session_state.get(
+            f"complete_counterfactual_{campaign_id}", ""
+        ).strip()
+        lands = st.session_state.get(
+            f"complete_lesson_lands_in_{campaign_id}", ""
+        ).strip() or None
+        try:
+            _campaigns.complete_campaign(
+                conn,
+                campaign_id=campaign_id,
+                success_criteria_actuals=actuals,
+                lesson=lesson,
+                counterfactual_note=cf,
+                lesson_lands_in=lands,
+            )
+        except _campaigns.RetroIncompleteError as exc:
+            st.session_state[error_key] = str(exc)
+        except _campaigns.InvalidStatusTransitionError as exc:
+            st.session_state[error_key] = str(exc)
+
+
+def _abandon_campaign_cb(*, campaign_id: int) -> None:
+    """P511R-2: wire §28.26 → abandoned transition with required reason."""
+    error_key = f"abandon_form_error_{campaign_id}"
+    st.session_state[error_key] = None
+    reason = st.session_state.get(
+        f"abandon_reason_{campaign_id}", ""
+    ).strip()
+    if not reason:
+        st.session_state[error_key] = "abandon reason is required."
+        return
+    with open_connection() as conn:
+        try:
+            _campaigns.abandon_campaign(
+                conn, campaign_id=campaign_id, reason=reason
+            )
+        except _campaigns.CampaignError as exc:
+            st.session_state[error_key] = str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Render — per-campaign card.
 # ---------------------------------------------------------------------------
@@ -307,6 +370,64 @@ def _render_campaign_card(camp: _campaigns.Campaign) -> None:
                 on_click=_activate_campaign_cb,
                 kwargs={"campaign_id": camp.id},
             )
+
+        # P511R-2: active campaigns get retro form (complete) + abandon
+        # control. §28.26 acceptance: "campaign can be moved active →
+        # completed via the §14.12 view" — was previously unreachable
+        # from the UI even though the backend enforced retro discipline.
+        if camp.status == "active":
+            complete_error = st.session_state.get(
+                f"complete_form_error_{camp.id}"
+            )
+            with st.expander("complete campaign (retro)", expanded=False):
+                if complete_error:
+                    st.error(complete_error)
+                with st.form(key=f"complete_form_{camp.id}"):
+                    kicker("Success-criteria actuals (required per metric)")
+                    for stream in ("distribution", "validation"):
+                        for entry in camp.success_criteria.get(stream, []):
+                            metric = entry.get("metric")
+                            target = entry.get("target")
+                            st.text_input(
+                                f"[{stream}] {metric} (target {target})",
+                                key=f"complete_actual_{camp.id}_{stream}_{metric}",
+                            )
+                    st.text_area(
+                        "lesson (required)",
+                        key=f"complete_lesson_{camp.id}",
+                        height=80,
+                    )
+                    st.text_area(
+                        "counterfactual note (required) — what could explain "
+                        "this campaign's results other than your actions?",
+                        key=f"complete_counterfactual_{camp.id}",
+                        height=80,
+                    )
+                    st.text_input(
+                        "lesson lands in (optional, e.g. 'weekly review 2026-05-25')",
+                        key=f"complete_lesson_lands_in_{camp.id}",
+                    )
+                    st.form_submit_button(
+                        "complete campaign",
+                        on_click=_complete_campaign_cb,
+                        kwargs={"campaign_id": camp.id},
+                    )
+            abandon_error = st.session_state.get(f"abandon_form_error_{camp.id}")
+            with st.expander("abandon campaign", expanded=False):
+                if abandon_error:
+                    st.error(abandon_error)
+                with st.form(key=f"abandon_form_{camp.id}"):
+                    st.text_area(
+                        "abandon reason (required)",
+                        key=f"abandon_reason_{camp.id}",
+                        height=60,
+                    )
+                    st.form_submit_button(
+                        "abandon campaign",
+                        on_click=_abandon_campaign_cb,
+                        kwargs={"campaign_id": camp.id},
+                    )
+
         if camp.status == "completed":
             kicker("Retro")
             if camp.lesson:
