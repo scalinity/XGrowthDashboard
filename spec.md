@@ -1470,6 +1470,218 @@ Notes:
 
 ---
 
+### `campaigns`
+
+Multi-week themed pushes. A campaign is a hypothesis + a date range + a set of planned items. Distinct from `experiments` (which is hypothesis-only, no item planning) and from `weekly_reviews` (which is retrospective, not prospective). See §28.26.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `name` | text | short label — e.g. "founder-zero push", "first 5 downloads week", "neuro-oncology long-arc establishment" |
+| `theme` | text | one-paragraph description of what this campaign is about |
+| `hypothesis` | text | what Daniel believes the campaign will demonstrate — referenced at retro time |
+| `start_date` | date | |
+| `end_date` | date | |
+| `status` | enum | `planning`, `active`, `completed`, `abandoned` |
+| `success_criteria_json` | text | JSON. `{"distribution": [{"metric": str, "target": str, "actual": str|null}], "validation": [{"metric": str, "target": str, "actual": str|null}]}`. Targets set at planning; actuals filled at completion. |
+| `parent_experiment_id` | int nullable | FK to `experiments.id` if this campaign is the execution arm of a registered experiment; ON DELETE SET NULL |
+| `pillar` | text nullable | if the campaign is single-pillar, name it; multi-pillar campaigns leave NULL |
+| `content_type` | text nullable | if the campaign is single-content-type per §28.17, name it; multi-type campaigns leave NULL |
+| `notes` | text nullable | |
+| `created_at_utc` | datetime | |
+| `completed_at_utc` | datetime nullable | when status transitioned to `completed` or `abandoned` |
+
+Indexes:
+
+```text
+index(status, start_date)
+index(start_date, end_date)
+index(parent_experiment_id) where parent_experiment_id is not null
+```
+
+Notes:
+- A campaign is `active` if `start_date <= today <= end_date` AND `status = 'active'`. The Campaigns view (§14.12) highlights active campaigns prominently and surfaces "starting soon" / "ending soon" badges.
+- `success_criteria_json` is structured to enforce the §1 dual-stream discipline: at least one distribution metric AND at least one validation metric per campaign. Schema validation in `app/agent/campaigns.py` refuses to save a campaign that has zero of either.
+- Hypothesis is referenced at retro time by the agent's `analyze_campaign_progress` tool (§28.26) — without a written hypothesis, the retro can't say whether the campaign succeeded.
+
+---
+
+### `campaign_items`
+
+Items planned (or shipped) under a campaign. Generic enough to carry posts, replies, events (e.g. a launch milestone), and reminders.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `campaign_id` | integer fk | ON DELETE CASCADE |
+| `item_type` | enum | `post`, `reply`, `event`, `milestone`, `reminder` |
+| `planned_for_date` | date nullable | when Daniel intends to ship this item; nullable for unscheduled-but-tracked items |
+| `post_id` | int nullable | FK to `posts.id` once shipped (or pre-shipped for drafts); ON DELETE SET NULL |
+| `agent_draft_id` | int nullable | FK to `agent_drafts.id` if this item is tied to a specific draft; ON DELETE SET NULL |
+| `reply_target_id` | int nullable | FK to `reply_targets.id` if `item_type = reply`; ON DELETE SET NULL |
+| `planned_text` | text nullable | pre-draft prose Daniel jotted; promoted to a real draft later via "Send to drafts" affordance |
+| `status` | enum | `planned`, `drafted`, `shipped`, `skipped` |
+| `notes` | text nullable | |
+| `sort_order` | integer | display order within the campaign; lower = earlier |
+| `created_at_utc` | datetime | |
+| `completed_at_utc` | datetime nullable | when status transitioned to `shipped` or `skipped` |
+
+Indexes:
+
+```text
+index(campaign_id, sort_order)
+index(planned_for_date) where planned_for_date is not null
+index(status)
+```
+
+Notes:
+- `status` transitions: `planned → drafted` (when `agent_draft_id` is populated), `drafted → shipped` (when `post_id` is populated AND `posts.published_to_x_at IS NOT NULL`), `planned → skipped` (Daniel-decided).
+- An item can be shipped without ever being a draft (Daniel writes manually, marks shipped, links to `post_id`). The state machine permits `planned → shipped` directly.
+- Bidirectional linkage: `posts` rows don't have a direct `campaign_item_id` FK — the query goes through `campaign_items.post_id`. This avoids polluting `posts` with campaign-specific columns.
+
+---
+
+### `monthly_reviews`
+
+Monthly retro mirror of `weekly_reviews`. Same epistemic discipline: counterfactual-note required before export, agent-drafted sections carry `<confidence>` tags per §28.14, blocked-export rules. See §28.27.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `iso_month` | text unique | `YYYY-MM` (e.g. `2026-05`) |
+| `created_at_utc` | datetime | |
+| `summary` | text nullable | one-paragraph month summary |
+| `key_movements` | text nullable | what moved — followers, lanes, content types, validation events |
+| `what_got_stuck` | text nullable | |
+| `best_post_id` | int nullable | FK to `posts.id`; ON DELETE SET NULL |
+| `worst_post_id` | int nullable | FK to `posts.id`; ON DELETE SET NULL |
+| `strongest_pillar` | text nullable | |
+| `weakest_pillar` | text nullable | |
+| `strongest_content_type` | text nullable | per §28.17 axis |
+| `weakest_content_type` | text nullable | |
+| `follower_delta` | integer nullable | computed at retro time from `v_account_daily` |
+| `stir_validation_summary` | text nullable | |
+| `campaigns_completed_json` | text nullable | JSON array of `campaign_id`s that completed in this month, with their `success_criteria_json` actuals |
+| `next_month_experiment` | text nullable | |
+| `counterfactual_note` | text | REQUIRED before export (same rule as `weekly_reviews`) |
+| `lesson` | text nullable | one-sentence lesson |
+| `confidence_label` | enum nullable | `fact \| inference \| speculation \| mixed` — dominant label of the agent-drafted sections per §28.14. Export of a `speculation`-labeled review is blocked until acknowledged. |
+| `exported_at_utc` | datetime nullable | when this review was last exported |
+| `daniel_notes` | text nullable | |
+
+Indexes:
+
+```text
+unique(iso_month)
+index(created_at_utc desc)
+```
+
+Notes:
+- Same export-blocked rule as `weekly_reviews`: if `counterfactual_note` is empty OR `confidence_label = 'speculation'`, export refuses with the canonical message.
+- `iso_month` is the canonical identifier. The §14.6 Weekly Review view extension (§28.27) lets Daniel toggle weekly ↔ monthly cadence; the schema supports both side-by-side.
+- The retro can reference `campaigns_completed_json` to discuss which campaigns landed; the agent's `draft_monthly_review_section` tool consumes this when drafting.
+
+---
+
+### `saved_inspiration_posts`
+
+External X posts Daniel saved as inspiration — content he liked, hooks that worked, structures he wants to study. Distinct from `reply_targets` (those are posts to *engage with*); inspiration is posts to *learn from*. See §28.29.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `source_url` | text nullable | X post URL if known |
+| `source_author` | text nullable | handle |
+| `source_post_text` | text | the post body Daniel pasted; immutable after insert |
+| `source_text_hash` | text | sha256(source_post_text) — for the plagiarism guard |
+| `tags_json` | text nullable | JSON array of Daniel's tags (e.g. `["hook", "list-format", "neuro"]`) |
+| `saved_at_utc` | datetime | |
+| `notes` | text nullable | why Daniel saved it |
+| `status` | enum | `active`, `archived` |
+
+Indexes:
+
+```text
+unique(source_text_hash)
+index(saved_at_utc desc)
+index(source_author)
+```
+
+Notes:
+- `unique(source_text_hash)` prevents accidental duplicate saves of the same text. Different paraphrases hash differently — that's expected, but exact dupes are blocked.
+- The inspiration library is paste-driven. No scraping. Daniel pastes from X; the row is created.
+- `status = 'archived'` keeps the row but excludes from the §14.13 default view.
+
+---
+
+### `inspiration_transforms`
+
+The output of running a transform mode against a `saved_inspiration_posts` row. Each transform is one Claude invocation producing an `output_text` plus a plagiarism risk read. See §28.29 for the transform-mode catalog.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `saved_inspiration_id` | integer fk | ON DELETE CASCADE |
+| `transform_mode` | enum | `structure`, `hook_pattern`, `counterpoint`, `original_version`, `voice_profile_version`, `expand`, `compress`. New modes added by extending the enum AND `app/agent/inspiration.py::TRANSFORM_MODES` together. |
+| `output_text` | text | the transformed text the agent produced |
+| `output_text_hash` | text | sha256(output_text) — for plagiarism guard recomputation |
+| `jaccard_similarity` | real | 0-1, computed against `source_post_text` tokens. Deterministic Jaccard set similarity. |
+| `longest_shared_ngram_length` | integer | longest contiguous n-gram (in words) shared between source and output. Deterministic. |
+| `ai_reported_risk_label` | enum | `low`, `medium`, `high` — what the model itself reported in structured output |
+| `plagiarism_risk_label` | enum | `low`, `medium`, `high` — FINAL label = `max(ai_reported_risk_label, deterministic_label)` per §28.29. AI cannot underreport when token overlap is high. |
+| `model_used` | text | |
+| `tokens_used` | integer | |
+| `created_at_utc` | datetime | |
+| `used_for_post_id` | int nullable | FK to `posts.id` if this transform was later promoted to a draft and shipped; ON DELETE SET NULL |
+| `notes` | text nullable | |
+
+Indexes:
+
+```text
+index(saved_inspiration_id, created_at_utc desc)
+index(plagiarism_risk_label)
+```
+
+Notes:
+- The plagiarism guard's `plagiarism_risk_label` is the COMBINATION of deterministic + AI-reported risk. The deterministic floor is what makes this trustworthy — an LLM can't undersell high token overlap because the Jaccard score is computed in Python.
+- A `high` plagiarism_risk_label BLOCKS the "Send to drafts" affordance in §14.13 until Daniel checks an "I've reviewed and this is fine" box (audit-logged with the override reason). `medium` shows a yellow warning. `low` ships freely.
+- Multiple transforms per source row are normal — Daniel may run `structure` + `hook_pattern` + `voice_profile_version` against the same source to see different angles.
+
+---
+
+### `audit_logs`
+
+Comprehensive append-only log of state-changing events. Distinct from `agent_tool_calls` (which logs every agent tool invocation, including read-only) — `audit_logs` is the canonical record of what *changed*. See §28.30.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `occurred_at_utc` | datetime | |
+| `event_category` | enum | `auth`, `x_op`, `publish`, `settings`, `export`, `data`, `admin`, `migration` |
+| `event_type` | text | specific event within the category — e.g. `x_oauth_connected`, `publish_succeeded`, `settings_changed_niche_problem`, `export_csv_posts`, `data_deleted_post`, `migration_applied_014` |
+| `actor` | text | always `'daniel'` for this single-user app; column present for forward-compat / audit-tool consistency |
+| `target_type` | text nullable | e.g. `post`, `voice_profile`, `setting`, `campaign`, `agent_draft` |
+| `target_id` | text nullable | id of the target as a string (because settings and views use non-int keys); NULL when the event doesn't reference a single row |
+| `details_json` | text nullable | JSON with event-specific context. For settings changes: `{"setting_key": str, "old_value": str, "new_value": str}`. For publish: `{"post_id": int, "x_post_id": str}`. For data deletion: `{"snapshot_of_deleted_row": dict}` so deletes are recoverable from the audit log alone. |
+| `success` | boolean | false on failed attempts (e.g. publish failure, export failure) |
+| `error_message` | text nullable | populated when `success = false` |
+
+Indexes:
+
+```text
+index(occurred_at_utc desc)
+index(event_category, occurred_at_utc desc)
+index(target_type, target_id)
+```
+
+Notes:
+- Append-only. No UPDATE, no DELETE — even pruning is a Daniel-action that itself audit-logs as `event_category = 'admin', event_type = 'audit_logs_pruned'`.
+- For settings changes, the diff is structured in `details_json` so a future "what changed in my niche definition over time?" view is just a query.
+- For data deletion, `details_json.snapshot_of_deleted_row` preserves the row contents so the audit log itself is a recovery option (no separate soft-delete needed for this purpose).
+- Comprehensive — covers `auth` events (OAuth connect/disconnect), `x_op` events (publish attempts whether successful or not), `settings` events (niche edits, voice profile regenerations, lore changes), `export` events (CSV/Markdown/JSON exports), `data` events (deletions, corrections), `admin` events (backup runs, vacuum runs, audit-log prunes), `migration` events (each applied migration logs one row).
+
+---
+
 ## 11. Computed views
 
 ### `v_account_daily`
@@ -1681,6 +1893,37 @@ days_until_milestone_at_30d_pace          # NULL on same conditions
 A parametric helper `daily_followers_needed_to_hit_milestone_by_date(target_date)` lives in `app/db.py` (not the view) — pure SQLite function call: `ceil((current_milestone_target - followers_count) / max((julianday(target_date) - julianday('now')), 1))`. Returns NULL if the milestone is already met or the date is in the past.
 
 **Hard rule (carried from §13):** all projection columns are suppressed in the UI when `abs(delta_7d) < noise_floor`. The UI shows "trend not yet measurable — projections suppressed" in that state. Do not display a precise-looking date when the input is noise.
+
+---
+
+### `v_campaign_progress`
+
+Per-campaign rollup of `campaign_items`. Powers the §14.12 Campaigns view's at-a-glance progress bars and the `analyze_campaign_progress` agent tool (§28.26).
+
+Fields:
+
+```text
+campaign_id
+campaign_name
+status
+start_date
+end_date
+days_until_start                    # negative when campaign already started
+days_until_end                      # negative when campaign already ended
+items_total
+items_planned
+items_drafted
+items_shipped
+items_skipped
+percent_shipped                     # items_shipped / items_total; NULL when items_total = 0
+percent_planned_shipped             # items_shipped / (items_planned + items_drafted + items_shipped); excludes skipped
+latest_shipped_post_id              # most recent post_id with status='shipped' for this campaign
+latest_shipped_at_utc
+```
+
+Notes:
+- `percent_shipped` and `percent_planned_shipped` are NULL when `items_total = 0` (a campaign with no items planned yet — common at `status = 'planning'`). UI handles the NULL state with "no items planned yet."
+- The view is read-only; campaign progress changes are driven by `campaign_items.status` transitions which fire from the manual-mode "Mark posted" click-handler + agent-draft promotion paths.
 
 ---
 
@@ -2348,11 +2591,13 @@ Do **not** combine these into one success number.
 
 ---
 
-# 14.6 Weekly Review
+# 14.6 Weekly Review (+ Monthly Review tab)
 
 ### Purpose
 
-Turn raw activity into learning.
+Turn raw activity into learning. The view supports two cadences — **Weekly** (default, `weekly_reviews` table) and **Monthly** (`monthly_reviews` table). Both share the same UI shell with cadence-aware questions and auto-filled fields; toggle via the cadence selector at the top.
+
+Monthly reviews are the longer-arc counterpart to weekly: they reference completed campaigns from the period (per §28.27), use month-granularity follower deltas, and surface the strongest/weakest **content type** alongside the strongest/weakest **pillar**. Same export-blocked discipline as weekly — `counterfactual_note` required, `confidence_label = speculation` blocks export until acknowledged.
 
 ### Weekly review questions
 
@@ -2783,6 +3028,175 @@ post 998 doesn't exist in your DB.]
 - `coach_refuse_without_evidence = true` produces refusals instead of un-cited claims.
 - The coach uses the SAME conversation infra as §14.8 (`agent_messages`, `agent_tool_calls`) — the discipline is a post-filter, not a separate model. `evidence_citations_json` persists the surviving citations on the `agent_messages` row.
 - The coach NEVER reads `stir_testers` or `stir_conversion_events.qualitative_feedback` (existing §28 read-scope rule applies).
+
+---
+
+# 14.11 Content Calendar — NEW
+
+### Purpose
+
+Visual upcoming + recent posts in a calendar grid. The existing §14.1 Today and §14.2 Next Rep views answer "what should I do *now*?" The Content Calendar answers "what does my distribution surface look like over the next 2 weeks and the past 2 weeks?" Distinct cognitive mode — planning vs. doing.
+
+Pairs with §19 Should-ship item 11 ("Scheduled publish drafts") and §14.12 Campaigns — campaign items with `planned_for_date` populate the calendar automatically.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Content Calendar          [< prev week]  Week of May 18-24  [next week >] │
+│ View: [Week] [Two weeks] [Month]    Filter: [all]    [+ schedule slot] │
+└─────────────────────────────────────────────────────────────┘
+
+         Mon 18    Tue 19    Wed 20    Thu 21    Fri 22    Sat 23    Sun 24
+ ┌─────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐
+ │ AM  │ stir    │         │ build   │         │ stir    │         │ self    │
+ │     │ value   │         │ proof   │         │ growth  │         │ pers.   │
+ │     │ POSTED  │         │ DRAFTED │         │ PLANNED │         │ PLANNED │
+ ├─────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┤
+ │ PM  │         │ self    │         │ build   │         │         │         │
+ │     │         │ pers.   │         │ value   │         │         │         │
+ │     │         │ POSTED  │         │ POSTED  │         │         │         │
+ └─────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
+
+[Active campaigns running through this window:]
+- "first 5 downloads push" (May 14 - May 28) — 3 items shipped, 2 planned
+- "neuro-oncology long arc" (May 1 - Jul 1) — 1 item this window
+```
+
+### Required components
+
+1. **Week / two-week / month toggle.** Default Week. Persisted in `st.session_state` per Daniel.
+2. **Cell content.** Each cell shows `pillar × content_type × status` for any posts/drafts/planned items in that AM/PM slot. Status chip color matches the rest of the dashboard's status conventions (POSTED = filled bone, DRAFTED = outline, PLANNED = dashed outline, SKIPPED = struck-through gray).
+3. **Click-through.** Click a cell → opens the source row (a `posts` row for POSTED/DRAFTED, a `campaign_items` row for PLANNED).
+4. **+ schedule slot.** Adds a new `campaign_items` row (with `item_type = 'post'`, `status = 'planned'`, `planned_for_date` = the selected day) OR a standalone `posts` row with `manual_confirmation_status = 'draft'` and a `created_in_app_at` future date — Daniel picks. The "Schedule" toggle uses §19 item 11 (scheduled publish drafts) once Phase 5.11 wires it.
+5. **Active campaigns strip.** Lists currently-active campaigns whose `[start_date, end_date]` overlaps the visible window. Click → opens the campaign in §14.12.
+6. **Filter dropdown.** All / pillar / content_type / campaign. Filters which items render in cells.
+
+### Acceptance criteria
+
+- Cells render correctly for all four item provenances: shipped posts, agent drafts, manual drafts, campaign-planned items.
+- "+ schedule slot" opens an inline form, not a modal, so Daniel doesn't lose calendar context.
+- Switching weeks via prev/next keeps the AM/PM grid stable (no layout shift).
+- AM = before noon local time, PM = noon onward. Times come from `created_at_utc` for shipped, `planned_for_date` for planned (with a configurable default-AM rule).
+- Calendar respects active filters across all visible weeks (e.g. filter by "build" pillar persists across week navigation).
+
+---
+
+# 14.12 Campaigns — NEW
+
+### Purpose
+
+Plan and track multi-week themed pushes. A campaign is a hypothesis + a date range + a set of planned items + success criteria. This is the strategic layer between §14.6 Weekly Review (retrospective, one week) and the milestone ladders (long-arc). Campaigns are typically 2–8 weeks; the schema doesn't enforce duration.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Campaigns                                  [+ new campaign] │
+│ Active: 2    Planning: 1    Completed: 5    Abandoned: 1   │
+└─────────────────────────────────────────────────────────────┘
+
+Active campaigns
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▼ "first 5 downloads push"               May 14 - May 28  ●●●●●●●○○○ 60%
+  Hypothesis: a one-week explicit ask, threaded daily, will produce ≥5 downloads
+  Success: 5 downloads / 1 working-parent tester / ≥3 quality replies
+  Items: 7 shipped, 3 planned, 0 skipped         [Open campaign]
+
+▼ "neuro-oncology long arc"              May 1 - Jul 1   ●○○○○○○○○○ 12%
+  ...
+
+Planning
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▷ "founder zero push"                     starts Jun 1
+  ...
+
+Completed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▷ "build-in-public week"                  Apr 7 - Apr 14    ●●●●●●●●●● 100%
+  [Show retrospective ↓]
+```
+
+### Required components
+
+1. **Status sections.** Active, Planning, Completed, Abandoned. Active campaigns expanded by default; others collapsed.
+2. **Campaign detail expansion.** Hypothesis, success criteria (with actuals populated for completed campaigns), item list (with status chips), notes.
+3. **"+ new campaign" form.** Required fields: name, theme, hypothesis, start_date, end_date, success_criteria (must include ≥1 distribution metric AND ≥1 validation metric — schema validation rejects otherwise).
+4. **Item management.** Per-campaign, add/edit/remove items. Each item has `item_type`, `planned_for_date`, optional `planned_text` or link to `agent_draft_id` / `post_id` / `reply_target_id`. Drag-to-reorder updates `sort_order`.
+5. **Agent integration.** Per-campaign "Ask the agent for ideas" button → opens §14.8 Agent Chat with a prefilled prompt: "Given this campaign's hypothesis + success criteria, suggest 3 items to add." The agent reads the campaign via the new `analyze_campaign_progress` tool (§28.26) and proposes items as `campaign_items` rows with `status = 'planned'`.
+6. **Retrospective on completion.** When a campaign transitions to `completed`, an inline retrospective form opens: success_criteria actuals + lesson + counterfactual_note. The lesson lands in `weekly_reviews` or `monthly_reviews` (Daniel picks) as a campaign-scoped insight.
+
+### Acceptance criteria
+
+- Cannot save a campaign without ≥1 distribution metric AND ≥1 validation metric in `success_criteria_json` (schema validation in `app/agent/campaigns.py`).
+- Transitioning to `completed` blocks until success_criteria actuals + lesson + counterfactual_note are filled.
+- "Active" status auto-derives from `start_date <= today <= end_date` AND `status = 'active'` (not just `status` alone).
+- Per-campaign progress bar uses `v_campaign_progress.percent_shipped`; NULL when no items planned shows "no items planned yet."
+- Items can be linked to existing posts/drafts/reply-targets — no duplicate state; the campaign is a *grouping*, not a parallel content table.
+
+---
+
+# 14.13 Inspiration Library — NEW
+
+### Purpose
+
+A capture-then-remix workflow for external X content. Daniel saves posts he liked (paste-driven) and runs transform modes against them — `structure`, `hook_pattern`, `counterpoint`, `original_version`, `voice_profile_version`, `expand`, `compress`. Each transform produces text + a deterministic plagiarism risk read. The output flows into the regular drafts pipeline if Daniel chooses.
+
+Distinct from §14.9 Brain Dump (which captures Daniel's own raw thinking) and §29.7 Reply Target Queue (which captures posts to *engage with*). Inspiration is posts to *learn from* — pattern, hook, structure, counter-argument.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Inspiration Library                       [+ save inspiration] │
+│ 47 saved    7 transforms this week    1 flagged high-risk   │
+└─────────────────────────────────────────────────────────────┘
+
+[ Sidebar: saved inspirations list, newest first, with tag filter ]
+[ Main: selected inspiration's source + transforms ]
+
+Source post (saved Apr 30):
+@some_account · "Three failed dinner attempts before 7pm taught me more
+about UX than any course."
+
+Tags: [hook] [self-deprecation] [concrete-numbers]
+
+Transforms:
+▼ structure                                      Risk: low
+  An opener that names a specific small failure + a learning frame.
+  Pattern: "[N] [concrete failure events] taught me more about
+  [topic] than [conventional source]."
+  [Send to drafts]
+
+▼ counterpoint                                   Risk: low
+  Failure stories that don't tie to a takeaway are still worth
+  posting — not every post needs to be a lesson...
+  [Send to drafts]
+
+▼ voice_profile_version                          Risk: medium
+  Three ginger→soap misreads this week taught me more about
+  kitchen-scanner UX than any spec document.
+  ⚠ medium risk — n-gram overlap with source. Review carefully.
+  [Send to drafts]
+```
+
+### Required components
+
+1. **+ save inspiration form.** `source_url` (optional), `source_author` (optional), `source_post_text` (required), `tags` (comma-separated), `notes`. Saving inserts to `saved_inspiration_posts`; duplicate `source_text_hash` is rejected.
+2. **Inspiration sidebar.** Newest first. Tag filter (multi-select). Status filter (`active` / `archived`).
+3. **Transform panel.** Buttons for each transform mode. Click → runs `app/agent/inspiration.py::transform(saved_inspiration_id, mode)`. Each transform persists as a row in `inspiration_transforms`. Display all prior transforms for the selected inspiration.
+4. **Plagiarism risk chip.** Each transform shows `plagiarism_risk_label` (green=low, yellow=medium, red=high). For `medium`, a one-line warning. For `high`, the "Send to drafts" button is DISABLED until Daniel checks an "I've reviewed this and the overlap is acceptable" box; checking that box logs the override to `audit_logs`.
+5. **Send to drafts.** Inherits niche + content type + voice profile context from the active settings; calls `_save_draft_post` with the transformed text. Full Phase 5.8 pipeline downstream.
+6. **Archive / unarchive.** Per-row affordance; archived inspirations hidden by default but searchable.
+
+### Acceptance criteria
+
+- Duplicate text saves are rejected by `unique(source_text_hash)`; UI shows "you already saved this on YYYY-MM-DD, here's the existing entry."
+- Transform modes match `app/agent/inspiration.py::TRANSFORM_MODES` exactly; new modes require schema enum extension + code update together.
+- `plagiarism_risk_label` is the MAX of deterministic Jaccard/n-gram + AI-reported; the AI cannot underreport. This is non-negotiable and unit-tested.
+- High-risk transforms block "Send to drafts" until override; override is audit-logged with reason.
+- Transforms are independent rows — multiple transforms per source are normal and explicitly supported.
+- The library NEVER reads `stir_testers` / `stir_conversion_events.qualitative_feedback`.
 
 ---
 
@@ -3217,6 +3631,14 @@ No push notification required. A "Weekly review due" banner in the app is enough
     * Coach with citation allowlist (extension to `agent_messages.evidence_citations_json` + new §14.10 Coach view + `app/agent/coach.py` citation-allowlist post-filter + `coach_refuse_without_evidence` setting) (§28.23).
     * Account Researcher (`account_research_reports` table + new agent tool `analyze_account` + Account Researcher tab in §29.7 Reply Target Queue + linkage to `reply_targets`) (§28.24).
     * Profile Audit (`profile_audits` table + new agent tool `audit_profile` + Settings → Growth Agent → Profile Audit panel + compare-to-previous diff view) (§28.25).
+
+15. **Growth Layer + Quality-of-Life Pack (Phase 5.11 — see §28.26 through §28.30):**
+
+    * Campaigns + campaign items (`campaigns` + `campaign_items` tables + `v_campaign_progress` view + new §14.12 Campaigns view + new tool `analyze_campaign_progress`) (§28.26).
+    * Monthly AI reviews (`monthly_reviews` table + §14.6 Weekly Review cadence toggle + new tool `draft_monthly_review_section`) (§28.27).
+    * Content Calendar (new §14.11 view + integration with `campaign_items.planned_for_date` + scheduled-drafts surface) (§28.28).
+    * Inspiration library (`saved_inspiration_posts` + `inspiration_transforms` tables + new §14.13 Inspiration Library view + `app/agent/inspiration.py` with seven transform modes + deterministic plagiarism guard + new tools `transform_inspiration` and `score_inspiration_plagiarism_risk`) (§28.29).
+    * Comprehensive audit logs (`audit_logs` table + write-through from every state-changing path + Settings → Audit log viewer) (§28.30).
 
 ### Can wait — V1.1+
 
@@ -4159,6 +4581,104 @@ Four features distilled from CreatorOS's strategic-analysis surfaces, ported int
 
 * [ ] Update `docs/IMPLEMENTATION_STATUS.md` with Phase 5.10 features.
 * [ ] README addition: short Phase 5.10 section — what Brain Dump, Coach, Account Researcher, and Profile Audit each do; how this closes the CreatorOS consolidation gap.
+
+### Phase 5.11 — Growth Layer + Quality-of-Life Pack (see §28.26 through §28.30 for full spec)
+
+Five features: Campaigns (with items + retrospective), Monthly AI reviews (alongside weekly), Content Calendar (visual planning grid), Inspiration Library (saved posts + 7 transform modes + deterministic plagiarism guard), and a comprehensive audit log table. Three new top-level views (§14.11, §14.12, §14.13), one extension to §14.6, six new tables, one new computed view. After Phase 5.11, the consolidation surface is wide enough that the only remaining CreatorOS capability is blogs (deferred to Phase 6 with explicit scope rewrite).
+
+**Migration:**
+
+* [ ] Migration `migrations/014_growth_layer_qol.sql`:
+
+  * [ ] Create `campaigns` table per §10 schema. FK `parent_experiment_id` ON DELETE SET NULL.
+  * [ ] Create `campaign_items` table per §10 schema. FK `campaign_id` ON DELETE CASCADE; other FKs ON DELETE SET NULL.
+  * [ ] Create `monthly_reviews` table per §10 schema. Unique on `iso_month`.
+  * [ ] Create `saved_inspiration_posts` table per §10 schema. Unique on `source_text_hash`.
+  * [ ] Create `inspiration_transforms` table per §10 schema. FK `saved_inspiration_id` ON DELETE CASCADE.
+  * [ ] Create `audit_logs` table per §10 schema. Append-only; no ALTER paths for UPDATE/DELETE in this migration.
+  * [ ] Create `v_campaign_progress` view per §11.
+  * [ ] Add settings rows: `inspiration_plagiarism_jaccard_high_threshold = 0.65`, `inspiration_plagiarism_jaccard_medium_threshold = 0.35`, `inspiration_plagiarism_ngram_high_threshold = 8`, `inspiration_plagiarism_ngram_medium_threshold = 5`, `monthly_review_auto_draft_enabled = false`, `audit_log_retention_days = 365`, `calendar_default_view = 'week'`. Documented `note` per row.
+  * [ ] Log a `migration_applied_014` row to `audit_logs` as the migration's final step (audit log writes-through from day one).
+
+**Campaigns (§28.26):**
+
+* [ ] Implement `app/agent/campaigns.py`:
+
+  * [ ] `create_campaign(name, theme, hypothesis, start_date, end_date, success_criteria_json)` with schema validation: ≥1 distribution metric AND ≥1 validation metric in `success_criteria_json`. Raises if either is missing.
+  * [ ] `add_item(campaign_id, item_type, planned_for_date, **fk_kwargs)` — supports all five item types.
+  * [ ] `transition_item_status(item_id, new_status)` — enforces valid transitions (`planned → drafted → shipped` etc.); writes `completed_at_utc` on terminal states.
+  * [ ] `complete_campaign(campaign_id, success_criteria_actuals, lesson, counterfactual_note)` — blocks if any actuals missing; copies the lesson to the user's current weekly or monthly review (Daniel picks at completion time).
+  * [ ] `analyze_progress(campaign_id) -> dict` — reads `v_campaign_progress` + item statuses + linked posts' metrics; returns structured analysis for the agent.
+* [ ] New agent tool `#21 analyze_campaign_progress(campaign_id)` — read-only, used by the "Ask the agent for ideas" affordance.
+* [ ] Build §14.12 Campaigns view per the spec: status sections, expandable campaign details, "+ new campaign" form with success-criteria validation, item management (add/edit/remove/reorder), "Ask the agent for ideas" integration, retrospective form on completion.
+* [ ] Wire `campaign_items.status` transitions into existing draft/publish handlers: when an `agent_drafts` row is created and an item links to it, set the item to `drafted`; when a `posts` row's `published_to_x_at` populates, set linked items to `shipped`.
+* [ ] Tests: cannot save campaign without dual-stream success criteria; transition `completed` requires all retro fields; `v_campaign_progress` math is correct on a seeded campaign.
+
+**Monthly AI reviews (§28.27):**
+
+* [ ] Implement `app/agent/monthly_review.py`:
+
+  * [ ] `compute_auto_filled_fields(iso_month) -> dict` — mirror of weekly auto-fill, with `strongest_content_type` / `weakest_content_type` added per §28.17, and `campaigns_completed_json` populated.
+  * [ ] Same export-blocked rule: `counterfactual_note` required, `confidence_label = speculation` blocks export.
+* [ ] Extend §14.6 view with cadence toggle (Weekly / Monthly). Each cadence reads/writes its own table; UI shell shared.
+* [ ] New agent tool `#22 draft_monthly_review_section(section_name, iso_month)` — mirror of the weekly tool. Emits `<confidence>` tags per §28.14.
+* [ ] Tests: cadence toggle persists view state; monthly auto-fill correctly computes campaigns completed in the month; export blocker fires on speculation label.
+
+**Content Calendar (§28.28):**
+
+* [ ] Implement `app/agent/calendar.py`:
+
+  * [ ] `get_calendar_window(start_date, end_date) -> list[CalendarCell]` — returns shipped posts + drafted posts + planned campaign items in the window, AM/PM-bucketed.
+  * [ ] Filter support (pillar, content_type, campaign).
+* [ ] Build §14.11 Content Calendar view per the spec: week / two-week / month toggle, AM/PM grid, click-through to source rows, "+ schedule slot" inline form, active-campaigns strip.
+* [ ] Wire the "+ schedule slot" to create either a `campaign_items` row (if Daniel picks "campaign-scoped") or a standalone draft (if "ad-hoc").
+* [ ] Integration with §19 item 11 (Scheduled publish drafts): a scheduled draft renders in the calendar at its scheduled time.
+* [ ] Tests: cells render correctly for all four provenances; week navigation keeps the AM/PM grid stable; filters persist across navigation.
+
+**Inspiration Library (§28.29):**
+
+* [ ] Implement `app/agent/inspiration.py`:
+
+  * [ ] `TRANSFORM_MODES = ('structure', 'hook_pattern', 'counterpoint', 'original_version', 'voice_profile_version', 'expand', 'compress')`. Module docstring with one-paragraph definition each.
+  * [ ] `transform(saved_inspiration_id, mode) -> InspirationTransformRow` — single Claude call against `config/inspiration_transform_prompt.md` (mode-parameterized). Returns `output_text` + `ai_reported_risk_label`.
+  * [ ] `compute_plagiarism_risk(source_text, output_text) -> dict` — pure Python. Returns `{jaccard_similarity, longest_shared_ngram_length, deterministic_risk_label}`. Deterministic, unit-testable.
+  * [ ] `final_risk(ai_label, deterministic_label) -> str` — returns `max(ai_label, deterministic_label)` using the ordering `low < medium < high`. AI cannot underreport.
+* [ ] Create `config/inspiration_transform_prompt.md` — mode-parameterized structured-output prompt. External content wrapped per §28.2 convention.
+* [ ] New agent tools `#23 transform_inspiration(saved_inspiration_id, mode)` and `#24 score_inspiration_plagiarism_risk(source_text, output_text)` (the second exposed as a pure read-only sanity-check tool the agent can call independently).
+* [ ] Build §14.13 Inspiration Library view per the spec: + save inspiration form, sidebar with tag filter, transform panel with per-mode buttons, plagiarism risk chips, high-risk gating with override + audit log, "Send to drafts" inheriting context.
+* [ ] Tests: deterministic plagiarism is correctly computed (golden inputs); final risk is correctly the max; high-risk override is audit-logged; duplicate save is rejected.
+
+**Audit logs (§28.30):**
+
+* [ ] Implement `app/agent/audit_log.py`:
+
+  * [ ] `log(event_category, event_type, target_type=None, target_id=None, details=None, success=True, error_message=None)` — single canonical write-through.
+  * [ ] `query(category=None, since=None, target=None) -> list[AuditRow]` — for the Settings viewer.
+* [ ] Wire `audit_log.log(...)` from every state-changing path:
+
+  * [ ] OAuth connect/disconnect (Phase 5.5 X client).
+  * [ ] Every publish attempt (in addition to existing `agent_tool_calls` row — `audit_logs` is the canonical state-change record).
+  * [ ] Every settings change (intercept the settings UPDATE path).
+  * [ ] Every export (CSV, Markdown, JSON).
+  * [ ] Every data deletion / correction (preserve `snapshot_of_deleted_row` in `details_json`).
+  * [ ] Every backup run (existing `scripts/backup_db.py`).
+  * [ ] Every migration applied.
+  * [ ] Every inspiration plagiarism override.
+* [ ] Add Settings → Audit log viewer panel: filter by category + date range + target; expand row for full `details_json`.
+* [ ] Implement retention: when `audit_log_retention_days > 0`, a daily job (in `scripts/backup_db.py` or a new `scripts/prune_audit_log.py`) deletes rows older than the retention window; the deletion itself audit-logs as `event_category = 'admin', event_type = 'audit_logs_pruned'` with the pruned count in `details_json`.
+* [ ] Tests: every state-change path produces an audit row; pruning works correctly and self-audits; the Settings viewer renders correctly with filters.
+
+**QA across the pack:**
+
+* [ ] All existing tests pass (target ≥250 by end of Phase 5.11).
+* [ ] Ruff clean across all new modules.
+* [ ] Boot smoke: §14.11 Calendar, §14.12 Campaigns, §14.13 Inspiration Library all render; §14.6 cadence toggle works; Settings → Audit log viewer renders with seeded events.
+* [ ] End-to-end: create a campaign with dual-stream success criteria → add three items → ship two → assert `v_campaign_progress` reflects 67% shipped → complete the campaign → assert lesson lands in the chosen review. Save an inspiration → run all seven transforms → assert high-risk transform blocks "Send to drafts" until override → override → assert audit row. Run a settings change → assert `audit_logs` row with old/new values in `details_json`.
+
+**Documentation:**
+
+* [ ] Append a new phase block to `docs/index.html` for Phase 5.11 per the CLAUDE.md "Implementation status doc" instructions (do NOT append to `docs/IMPLEMENTATION_STATUS.md` — it's frozen at Phase 5.8).
+* [ ] README addition: short Phase 5.11 section — what Campaigns, Monthly Reviews, Calendar, Inspiration Library, and Audit Logs each do; how this leaves only blogs (Phase 6) as the final consolidation step.
 
 ### Phase 6 — V1.1: Data collection (deferred from MVP)
 
@@ -5184,6 +5704,231 @@ Profile Audit prompt sees: `bio_snapshot`, `pinned_post_text`, post text from `r
 - No auto-cadence. The cadence reminder banner surfaces; the audit itself is always Daniel-triggered.
 - No auto-acted-on suggestions. Audits produce `top_three_actions`; what Daniel does with them is Daniel's call. The audit never edits the bio or the pinned post or settings.
 
+### 28.26 Campaigns + Campaign items
+
+Multi-week themed pushes. A campaign carries a hypothesis + date range + dual-stream success criteria + a set of items (planned, drafted, shipped, skipped). Distinct from `experiments` (hypothesis-only, no item planning) and from `weekly_reviews` (retrospective, one week).
+
+**Why campaigns are the right granularity:**
+
+XGrowth already has three time horizons: daily reps (§14.1), weekly reviews (§14.6), and milestone ladders (§14.3). Campaigns slot between weekly and milestone — typically 2–8 weeks, themed, hypothesis-driven, item-planned. They give Daniel a way to organize *a deliberate push* without committing to a milestone-sized arc.
+
+**Schema discipline (load-bearing):**
+
+- `success_criteria_json` MUST contain ≥1 distribution metric AND ≥1 validation metric. Schema validation in `app/agent/campaigns.py` rejects otherwise. This enforces §1's dual-stream discipline at campaign granularity — a "follower-focused campaign" with no validation lever is exactly what §1 was written to prevent.
+- A campaign cannot be `completed` without all success-criteria actuals + a lesson + a counterfactual_note. Same epistemic discipline as `weekly_reviews`.
+
+**State machine:**
+
+```
+campaigns.status:
+  planning → active        (when start_date <= today AND Daniel clicks "Activate")
+  active → completed       (when Daniel clicks "Complete" + retro form filled)
+  active → abandoned       (when Daniel clicks "Abandon" + abandon_reason required)
+  planning → abandoned     (planning a campaign you decide not to run is fine)
+
+campaign_items.status:
+  planned → drafted        (when agent_draft_id is populated)
+  planned → shipped        (manual; when a post is published directly without a draft)
+  drafted → shipped        (when linked posts.published_to_x_at populates)
+  planned → skipped        (Daniel-decided)
+  drafted → skipped        (Daniel-decided)
+```
+
+**Agent integration (new tool `#21 analyze_campaign_progress(campaign_id)`):**
+
+Read-only. Returns:
+
+```json
+{
+  "campaign_id": int,
+  "name": str,
+  "status": str,
+  "days_remaining": int | null,
+  "progress": {"shipped": int, "planned": int, "drafted": int, "skipped": int, "percent_shipped": float | null},
+  "linked_posts_summary": {"impressions_total": int, "engagement_rate_median": float, "by_pillar": {...}, "by_content_type": {...}},
+  "success_criteria_progress": [{"metric": str, "target": str, "current_actual": str | null, "on_track": bool}],
+  "interpretation": "agent-generated structured interpretation with <confidence> tags per §28.14"
+}
+```
+
+The "Ask the agent for ideas" affordance in §14.12 prefills an Agent Chat session with the campaign's hypothesis + this tool's output, and asks the agent for 3 candidate items as `campaign_items.status = 'planned'` rows.
+
+**Linkage to existing tables:**
+
+Campaign items don't duplicate state. An item is a *grouping* over an existing `posts` / `agent_drafts` / `reply_targets` row. The `campaign_items.{post_id, agent_draft_id, reply_target_id}` columns are nullable FKs; bidirectional joining is the query path.
+
+**Anti-feature:**
+
+- No auto-status-transitions based on time alone. Active campaigns whose `end_date` has passed do NOT auto-`completed` — they show "ended N days ago, complete now or extend?" Daniel decides. Auto-completion would let campaigns close without retros, defeating the point.
+- No "campaign of campaigns" / nesting. A campaign is one level deep. Multi-campaign strategy lives in the milestone ladders.
+
+### 28.27 Monthly AI reviews
+
+Cadence companion to `weekly_reviews`. Same epistemic discipline (counterfactual required, speculation blocks export, agent sections emit `<confidence>` tags per §28.14), with month-granularity auto-fill and additional `content_type` axis fields per §28.17.
+
+**New auto-filled fields vs. weekly:**
+
+- `strongest_content_type` / `weakest_content_type` — per §28.17 V/G/P/P axis, with graduated-confidence labels carried from `v_content_type_performance`.
+- `campaigns_completed_json` — JSON array of campaigns that completed in this month, with their success-criteria actuals.
+- `follower_delta` over the month rather than week (computed from `v_account_daily`).
+
+**New agent tool `#22 draft_monthly_review_section(section_name, iso_month)`:**
+
+Mirror of the existing `draft_weekly_review_section` tool. `section_name` accepts `interpretation`, `lesson`, `counterfactual`, `next_month_experiment`, `campaigns_retro` (new — pulls from `campaigns_completed_json`).
+
+**Cadence selector in §14.6:**
+
+The Weekly Review view gains a Weekly / Monthly toggle at the top. Switching toggles the underlying table; the UI shell (auto-filled fields display, user-filled forms, agent-draft buttons, export blockers) is shared. Daniel can run both cadences in parallel; the schema permits a weekly review and a monthly review in the same week.
+
+**Why not collapse weekly + monthly into one table:**
+
+Considered. Rejected. Different cadences imply different auto-fill semantics, different sample-size confidence thresholds (a "monthly strongest pillar" needs n ≥ 30; weekly is n ≥ 15 per §11), different retro questions. A single table with a `cadence` enum would carry mode-aware logic in every consumer. Two tables, one shared UI shell — cleaner.
+
+**`monthly_review_auto_draft_enabled = false` default:**
+
+A future setting could auto-draft the monthly review at the start of each month. Default OFF — same anti-anxiety stance as the profile audit (§28.25). The reminder banner surfaces; Daniel clicks "Draft now" when he wants it.
+
+### 28.28 Content Calendar
+
+Visual planning grid. §14.11 view. The first XGrowth surface that's purely *planning*-oriented; everything else is doing or reviewing.
+
+**Calendar's input sources:**
+
+1. `posts` with `published_to_x_at` populated → POSTED.
+2. `posts` with `manual_confirmation_status = 'draft'` and a `created_in_app_at` in the future → DRAFTED-FOR-FUTURE (paired with §19 item 11 scheduled drafts).
+3. `agent_drafts` with `status = 'proposed'` or `'accepted_with_edits'` and no linked `posts.id` yet → DRAFTED.
+4. `campaign_items` with `status = 'planned'` and a non-NULL `planned_for_date` → PLANNED.
+
+The calendar reads from all four; the cell's status chip indicates which provenance.
+
+**AM/PM split:**
+
+Default rule: a row is AM if its time-of-day < `calendar_am_cutoff_hour` (default 12 local time), PM otherwise. Planned items without a time-of-day default to PM unless Daniel overrides.
+
+**"+ schedule slot" inline form:**
+
+Two paths:
+1. **Campaign-scoped:** picks an existing campaign (or creates a new one) → adds a `campaign_items` row with `planned_for_date` = the selected day, `item_type = 'post'`, optional `planned_text`.
+2. **Ad-hoc:** creates a `posts` row with `manual_confirmation_status = 'draft'`, `created_in_app_at` = selected day's noon, no campaign linkage.
+
+Daniel picks. Both paths flow through the same `audit_logs` write-through.
+
+**Filter dropdown:**
+
+Persisted in `st.session_state['calendar_filter']`. Options: `all`, per-pillar, per-content-type, per-campaign. Filters apply across all visible weeks during navigation.
+
+**No automation:**
+
+- No "AI suggests when to schedule." The calendar is a Daniel tool; the agent doesn't write to it directly.
+- No "auto-publish at scheduled time." §19 item 11's scheduled-drafts flow still requires fresh confirmation at publish time (§28.10 contract is non-negotiable). The calendar shows the schedule; the publish moment is still gated by Daniel's two-step confirm.
+
+### 28.29 Inspiration library + transforms + plagiarism guard
+
+Capture-then-remix for external content. Daniel saves posts he liked (paste-driven, no scraping), runs transform modes against them, and chooses whether to promote outputs to the drafts pipeline. The plagiarism guard is the load-bearing piece — without it, this becomes a copy-paste machine.
+
+**Transform modes (load-bearing — spec'd here, mirrored in `app/agent/inspiration.py::TRANSFORM_MODES`):**
+
+| Mode | Output |
+| --- | --- |
+| `structure` | The abstract structural pattern of the source — "an opener that names a specific small failure + a learning frame." Pattern, not wording. |
+| `hook_pattern` | Just the hook style isolated: how the first sentence works, what it promises, what tension it creates. |
+| `counterpoint` | An honest counterpoint to the source's argument — what it gets wrong, what it understates, what context it skips. |
+| `original_version` | A Daniel-authored take on the same topic from his actual experience. Voice profile + niche definition + personality lore all spliced in. |
+| `voice_profile_version` | The source's idea rendered in Daniel's voice. Higher plagiarism-risk surface (more retained structure); the guard handles this. |
+| `expand` | The source's hook expanded into a longer thread structure. |
+| `compress` | The source's longer point compressed into a single tight standalone. |
+
+Adding a new mode requires updating both `TRANSFORM_MODES` AND the spec's table here AND the CHECK constraint on `inspiration_transforms.transform_mode` together.
+
+**Plagiarism guard (deterministic-first, AI-cannot-underreport):**
+
+The guard combines two reads:
+
+1. **Deterministic**: Jaccard token similarity + longest contiguous n-gram shared between source and output.
+2. **AI-reported**: the structured-output prompt asks the model to self-report its plagiarism risk as `low | medium | high`.
+
+Final `plagiarism_risk_label = max(ai_reported, deterministic)` using the ordering `low < medium < high`. This is the load-bearing rule: the AI cannot undersell high token overlap because the deterministic score is computed in Python and the max function favors caution.
+
+**Threshold tuning (settings):**
+
+- `inspiration_plagiarism_jaccard_high_threshold` (default 0.65) — Jaccard ≥ this → deterministic `high`.
+- `inspiration_plagiarism_jaccard_medium_threshold` (default 0.35) — Jaccard ≥ this (and < high) → deterministic `medium`.
+- `inspiration_plagiarism_ngram_high_threshold` (default 8) — longest shared n-gram ≥ this words → deterministic `high`.
+- `inspiration_plagiarism_ngram_medium_threshold` (default 5) — same logic.
+- The final deterministic label is the worst of the two (`max(jaccard_label, ngram_label)`).
+
+**UI gating (§14.13):**
+
+- `low` → "Send to drafts" works freely.
+- `medium` → "Send to drafts" works, with a yellow warning under the button.
+- `high` → "Send to drafts" is DISABLED until Daniel checks "I've reviewed the overlap, this is intentional." Checking the box logs an `audit_logs` row with `event_category = 'data', event_type = 'inspiration_plagiarism_override'` and the override reason.
+
+**Read scope:**
+
+Inspiration prompts see: pasted `source_post_text` (wrapped per §28.2 untrusted-data convention), the active voice profile, niche definition, personality lore. They do NOT see `stir_testers` / `stir_conversion_events.qualitative_feedback` / other inspirations / `agent_messages`.
+
+**Anti-feature:**
+
+- No scraping of X posts. Daniel pastes; that's the loop.
+- No "auto-transform on save." Each transform is an explicit Daniel-click — costs (token + cognitive) are predictable.
+- No retro-attribution. If Daniel ships a post derived from an inspiration, the `inspiration_transforms.used_for_post_id` linkage is informational; the post itself doesn't carry "this was inspired by @other_account" — that's a workflow record, not a public attribution.
+
+### 28.30 Comprehensive audit logs
+
+Append-only canonical record of state-changing events. Distinct from `agent_tool_calls` (logs every tool invocation, including read-only) — `audit_logs` is what *changed*. Together they cover the full audit surface: what the agent looked at + what changed in the system.
+
+**Why two tables and not one:**
+
+- `agent_tool_calls` is high-volume (every read tool call is a row); pruning it eventually is fine.
+- `audit_logs` is low-volume (only state-changes); long retention is reasonable.
+- Different access patterns. The Settings → Audit log viewer queries `audit_logs`; the agent's own debugging surface queries `agent_tool_calls`.
+
+**Categories (load-bearing):**
+
+| Category | What it covers |
+| --- | --- |
+| `auth` | OAuth connect/disconnect events for X (Phase 5.5+). |
+| `x_op` | X API operations: publish attempts (success + failure), token refreshes, rate-limit hits. |
+| `publish` | Publish lifecycle events — every confirmation token mint, every publish-tool invocation, every reconciliation event (§28.10 crash recovery). |
+| `settings` | Settings row UPDATEs. `details_json` carries `{setting_key, old_value, new_value}`. |
+| `export` | CSV / Markdown / JSON exports — what was exported, where to, by which export action. |
+| `data` | Data mutations: row deletions (with `snapshot_of_deleted_row`), corrections, inspiration plagiarism overrides. |
+| `admin` | Backup runs, vacuum runs, audit-log prunes, manual data-integrity actions. |
+| `migration` | Each applied migration logs one row at migration end. |
+
+**Write-through points (every state-changing path must call `audit_log.log(...)`):**
+
+- §28.5 voice sample mark/unmark.
+- §28.10 every publish attempt — succeeded and failed.
+- §28.12 voice profile regeneration.
+- §28.16 niche setting change.
+- §28.20 replier-pool entry created.
+- §28.21 personality lore add/edit/disable.
+- §28.25 profile audit run.
+- §28.26 campaign create / item add / status transition.
+- §28.27 monthly review draft / export.
+- §28.29 inspiration save / transform / plagiarism override.
+- §16 every export action.
+- `scripts/backup_db.py` every backup run.
+- Every migration application.
+
+**Retention:**
+
+`audit_log_retention_days` (default 365). A daily prune job in `scripts/prune_audit_log.py` deletes rows older than the retention window. The prune itself audit-logs as `event_category = 'admin', event_type = 'audit_logs_pruned'` with the pruned count in `details_json`. Pruning is opt-in by setting; default 365 keeps a year of state-changes (Daniel's whole MVP+1 horizon).
+
+**Recovery via audit log:**
+
+For `event_category = 'data', event_type = 'row_deleted'`, the `details_json.snapshot_of_deleted_row` preserves the full row contents so the audit log itself is a recovery option. A "Restore from audit log" Settings affordance reads the snapshot and re-INSERTs the row (with a new `id`; the old `id` is preserved in `details_json` for reference). This means the audit log doubles as a soft-delete mechanism without polluting every table with `deleted_at` columns.
+
+**Read scope:**
+
+The Settings → Audit log viewer renders `details_json` for Daniel-only viewing. The agent does NOT have read access to `audit_logs` — no tool registry entry references the table. This is the same access discipline as `publish_confirmation_tokens` per §28.10: state-change logs are Daniel's debugging surface, not the agent's context.
+
+**Anti-feature:**
+
+- No append from agent context. The agent can trigger state changes via its existing tools; those tools call `audit_log.log(...)` from the server-side code path. The agent never has a "write an audit row" tool.
+- No structured-deletion-of-audit-rows. Pruning by retention is the only path that removes rows; even that self-audits.
+
 ---
 
 ## 29. Reply Target Discovery
@@ -5859,6 +6604,30 @@ Deliberately rejected from CreatorOS for this phase:
 - **Account Researcher auto-pull via scraping.** Already prohibited by §5; manual paste is the MVP path, X API direct is V1.1+.
 - **Profile Audit cadence as a cron.** §28.25 carves this out — Daniel-triggered only; cron would import the "anxiety dashboard" failure mode the spec exists to prevent.
 - **Coach allowed to call write tools.** §28.23 carves this out — the Coach is advice-only; it never calls `save_draft_*` or any state-changing tool. Different cognitive contract from §14.8 Agent Chat.
+
+### Growth Layer + Quality-of-Life Pack addition (2026-05-22) — §28.26 through §28.30
+
+Phase 5.11. Ports CreatorOS's strategic-layer surfaces (campaigns, monthly reviews) and quality-of-life capabilities (content calendar, inspiration library, audit logs) into XGrowth's discipline. Three new views (§14.11 Content Calendar, §14.12 Campaigns, §14.13 Inspiration Library), one cadence-toggle extension to §14.6, six new tables, one new computed view. After Phase 5.11, the only remaining CreatorOS capability is blogs (Phase 6 with explicit scope rewrite).
+
+88. **Campaigns + campaign items (§28.26).** New `campaigns` and `campaign_items` tables + `v_campaign_progress` view + §14.12 view + tool `#21 analyze_campaign_progress`. Multi-week themed pushes with hypothesis + dual-stream success criteria (≥1 distribution metric + ≥1 validation metric — schema-enforced). Retro on completion requires actuals + lesson + counterfactual_note. No nested campaigns; no auto-status-transitions on time. (§10 `campaigns`, §10 `campaign_items`, §11 `v_campaign_progress`, §14.12, §28.26, §25 Phase 5.11)
+
+89. **Monthly AI reviews (§28.27).** New `monthly_reviews` table + cadence toggle in §14.6 + tool `#22 draft_monthly_review_section`. Mirror of weekly review with month-granularity auto-fill, `strongest_content_type` / `weakest_content_type` per §28.17, and `campaigns_completed_json` populated. Same export-blocked rules. Default `monthly_review_auto_draft_enabled = false` — Daniel-triggered, no cron. (§10 `monthly_reviews`, §14.6 cadence toggle, §28.27, §25 Phase 5.11)
+
+90. **Content Calendar (§28.28).** New §14.11 view — visual AM/PM grid over shipped/drafted/planned items. Reads from `posts`, `agent_drafts`, `campaign_items`, and scheduled-drafts (§19 item 11). "+ schedule slot" inline form picks campaign-scoped or ad-hoc. No automation of publish; scheduling does not bypass §28.10's two-step confirmation. (§14.11, §28.28, §25 Phase 5.11)
+
+91. **Inspiration Library + 7 transform modes + deterministic plagiarism guard (§28.29).** New `saved_inspiration_posts` and `inspiration_transforms` tables + §14.13 view + tools `#23 transform_inspiration` and `#24 score_inspiration_plagiarism_risk` + `app/agent/inspiration.py`. Seven transform modes (structure, hook_pattern, counterpoint, original_version, voice_profile_version, expand, compress). Plagiarism guard combines deterministic Jaccard + n-gram with AI-reported risk via `max(...)` — AI cannot underreport. High-risk transforms gate "Send to drafts" until override; override is audit-logged. (§10 `saved_inspiration_posts`, §10 `inspiration_transforms`, §14.13, §28.29, §25 Phase 5.11)
+
+92. **Comprehensive audit logs (§28.30).** New append-only `audit_logs` table. Write-through from every state-changing path (publish, settings change, voice profile regenerate, inspiration override, campaign transition, export, migration, etc.). Eight categories spec'd. Configurable retention default 365 days; pruning self-audits. Recovery via `details_json.snapshot_of_deleted_row` — audit log doubles as soft-delete mechanism. Agent has no read or write access to this table. (§10 `audit_logs`, §28.30, §14.7 Settings audit-log viewer, §25 Phase 5.11)
+
+Deliberately rejected from CreatorOS for this phase:
+
+- **Nested campaigns / multi-campaign hierarchies.** §28.26 carves this out — campaign-of-campaigns gets ambiguous fast; milestone ladders are the level above.
+- **Auto-completion of campaigns whose end_date has passed.** Would let campaigns close without retros, defeating the retrospective discipline.
+- **Auto-draft of monthly reviews on a cron.** Anti-anxiety stance carried from §28.25 profile audit; reminder banners surface, Daniel triggers.
+- **Auto-publishing on the calendar's scheduled times.** §28.10's two-step confirmation is non-negotiable; the calendar shows the schedule, the publish moment is still gated.
+- **Auto-transform of inspiration on save.** Costs (token + cognitive) need to be predictable; explicit click is the loop.
+- **AI/agent write access to `audit_logs`.** State-change logs are Daniel's debugging surface, not the agent's context. Same discipline as `publish_confirmation_tokens` per §28.10.
+- **`agent_tool_calls`/`audit_logs` merger.** Considered, rejected — different volumes, different access patterns, different pruning policies. Two tables, clear contract.
 
 [1]: https://docs.x.com/x-api/fundamentals/data-dictionary "Data Dictionary - X"
 [2]: https://docs.x.com/x-api/getting-started/about-x-api "About the X API - X"
