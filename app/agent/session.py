@@ -26,7 +26,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Literal
 
-from app.agent import lint
+from app.agent import lint, niche
 from app.agent.confidence_patterns import (
     ANALYTICAL_PATTERNS,
     find_analytical_claim_spans,
@@ -231,6 +231,41 @@ def humility_penalty_for_untagged(untagged_count: int) -> int:
     return int(untagged_count) if untagged_count > 0 else 0
 
 
+# ---------------------------------------------------------------------------
+# Phase 5.9 / §28.2 rule #15 — niche must be defined before drafting.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class NicheGateResult:
+    """Outcome of the §28.2 rule #15 orchestrator check.
+
+    ``passed`` is True when both ``niche_problem`` and ``niche_person``
+    settings are non-empty. ``rationale`` is the canonical refusal
+    message the dispatcher echoes back to the conversation.
+    """
+
+    passed: bool
+    rationale: str
+
+
+def niche_gate(conn: sqlite3.Connection) -> NicheGateResult:
+    """Run the §28.2 rule #15 check.
+
+    Per spec §28.16 + spec §25 Phase 5.9: this gate is the orchestrator-
+    owned enforcement of rule #15. The check consults only the settings
+    rows — it does NOT read ``assistant_text``. A prompt-injected request
+    to "skip the niche check" cannot bypass it.
+
+    Returns a ``NicheGateResult``. The dispatcher
+    (``app.agent.client.dispatch_tool_call``) calls this BEFORE
+    ``decide_save_or_revise`` for any ``save_draft_*`` tool name; on
+    ``passed=False`` it refuses without touching the handler.
+    """
+    nd = niche.get_niche(conn)
+    if nd.is_defined():
+        return NicheGateResult(passed=True, rationale="niche defined")
+    return NicheGateResult(passed=False, rationale=niche.CANONICAL_REFUSAL)
+
+
 # Re-export ANALYTICAL_PATTERNS so callers don't have to import from two
 # modules. Pattern definitions still live in confidence_patterns.py.
 __all__ = [
@@ -238,6 +273,7 @@ __all__ = [
     "CONFIDENCE_LABELS",
     "Decision",
     "IwhScore",
+    "NicheGateResult",
     "SessionState",
     "decide_save_or_revise",
     "detect_untagged_claims",
@@ -246,6 +282,7 @@ __all__ = [
     "get_iwh_max_revision_attempts",
     "get_iwh_self_score_minimum",
     "humility_penalty_for_untagged",
+    "niche_gate",
     "parse_iwh_self_score",
 ]
 

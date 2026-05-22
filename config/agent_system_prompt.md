@@ -13,6 +13,8 @@ and sees the through-line from kitchen scanning to surgical AI.
 (Voice details, vocabulary, and rhythm are carried by the Voice samples
 section, not duplicated here.)
 
+<!-- {{ NICHE_DEFINITION_PLACEHOLDER }} -->
+
 <!-- {{ VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER }} -->
 
 # Section 2 — Tone: intelligence, wisdom, humility

@@ -22,7 +22,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from app.agent import tools, voice, voice_profile
+from app.agent import niche, tools, voice, voice_profile
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 PROMPT_TEMPLATE_PATH: Path = PROJECT_ROOT / "config" / "agent_system_prompt.md"
@@ -38,6 +38,8 @@ VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER = (
 VOICE_PROFILE_STRUCTURAL_PLACEHOLDER = (
     "<!-- {{ VOICE_PROFILE_STRUCTURAL_PLACEHOLDER }} -->"
 )
+# Phase 5.9 / §28.16 — structured niche definition splice point.
+NICHE_DEFINITION_PLACEHOLDER = "<!-- {{ NICHE_DEFINITION_PLACEHOLDER }} -->"
 
 
 def _read_template() -> str:
@@ -197,6 +199,25 @@ def render_voice_profile_structural(
     return "\n".join(lines)
 
 
+def render_niche_definition(nd: niche.NicheDefinition) -> str:
+    """Section 1 splice for the §28.16 structured niche definition.
+
+    Two states:
+      * BOTH fields set → load-bearing line, verbatim per §28.16:
+        "You help **{niche_person}** solve **{niche_problem}**."
+      * EITHER empty → the disabled-state stub. Drafting is also refused
+        by the orchestrator (rule #15), but the agent sees the prompt
+        line so it can echo a sensible "fill out your niche first"
+        response when asked.
+    """
+    if nd.is_defined():
+        return f"You help **{nd.person}** solve **{nd.problem}**."
+    return (
+        "(niche not yet defined — drafting is disabled until Daniel fills "
+        "Settings → Growth Agent → Niche)"
+    )
+
+
 def build_system_prompt(conn: sqlite3.Connection) -> str:
     """Assemble the runtime system prompt from the template + DB."""
     template = _read_template()
@@ -215,11 +236,15 @@ def build_system_prompt(conn: sqlite3.Connection) -> str:
     profile_self_desc = render_voice_profile_self_description(active_profile)
     profile_structural = render_voice_profile_structural(active_profile)
 
+    nd = niche.get_niche(conn)
+    niche_block = render_niche_definition(nd)
+
     out = template.replace(NON_NEGOTIABLE_PLACEHOLDER, rules_block)
     out = out.replace(VOICE_SAMPLES_PLACEHOLDER, voice_block)
     out = out.replace(TOOL_CATALOG_PLACEHOLDER, tool_block)
     out = out.replace(VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER, profile_self_desc)
     out = out.replace(VOICE_PROFILE_STRUCTURAL_PLACEHOLDER, profile_structural)
+    out = out.replace(NICHE_DEFINITION_PLACEHOLDER, niche_block)
     return out
 
 

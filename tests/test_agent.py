@@ -199,6 +199,10 @@ def test_dispatch_tool_call_refuses_save_draft_with_low_iwh(db_conn, monkeypatch
     """
     monkeypatch.setenv("LINT_OFFLINE", "1")
     from app.agent.client import dispatch_tool_call
+    # Phase 5.9 / §28.2 rule #15 — niche must be defined for the dispatcher
+    # to reach the IWH gate this test is exercising.
+    from app.agent import niche as _niche
+    _niche.set_niche(db_conn, problem="growing on X", person="builders")
 
     # Bootstrap a conversation + message to anchor the audit row.
     conv = db_conn.execute(
@@ -251,6 +255,10 @@ def test_dispatch_tool_call_blocks_engagement_bait_via_lint(db_conn, monkeypatch
     engagement-bait drafts."""
     monkeypatch.setenv("LINT_OFFLINE", "1")
     from app.agent.client import dispatch_tool_call
+    # Phase 5.9 / §28.2 rule #15 — niche must be defined for the dispatcher
+    # to reach the lint gate this test is exercising.
+    from app.agent import niche as _niche
+    _niche.set_niche(db_conn, problem="growing on X", person="builders")
 
     conv = db_conn.execute(
         "INSERT INTO agent_conversations (status) VALUES ('active')"

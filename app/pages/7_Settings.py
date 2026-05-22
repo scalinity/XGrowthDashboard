@@ -850,6 +850,119 @@ for key, editable, helptext in [
 ]:
     _render_setting(conn, key, editable, helptext)
 
+# ---------------------------------------------------------------------------
+# Niche definition (§28.16, Phase 5.9) — load-bearing identity anchor.
+# Two settings rows spliced into Section 1 of the system prompt; empty
+# values BLOCK drafting via §28.2 rule #15 (orchestrator-enforced).
+# ---------------------------------------------------------------------------
+from app.agent import niche as _agent_niche  # noqa: E402 — keep panel-local
+st.markdown("### Niche definition")
+st.caption(
+    "Two sentences that tell the agent who it's helping and what it's "
+    "helping with. Spliced verbatim into Section 1 of the system prompt "
+    "(§28.16). When either field is empty the orchestrator REFUSES every "
+    "save_draft_* call — the agent will return a structured 'fill out "
+    "your niche first' message (§28.2 rule #15)."
+)
+
+_current_niche = _agent_niche.get_niche(conn)
+if not _current_niche.is_defined():
+    st.markdown(
+        f"<div style='border-left: 2px solid {PALETTE['warn_amber']}; "
+        f"padding: 0.55rem 0.85rem; margin: 0.4rem 0; "
+        f"background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['warn_amber']}; "
+        f"letter-spacing: 0.08em; text-transform: uppercase;'>"
+        f"LOW-POWER MODE · drafting disabled"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; color: {PALETTE['bone']}; "
+        f"margin-top: 0.35rem;'>"
+        f"Your agent is in low-power mode — define your niche to unlock drafting."
+        f"</div>"
+        f"<div class='faint' style='font-size: 0.85rem; color: {PALETTE['bone_dim']}; "
+        f"margin-top: 0.4rem;'>"
+        f"Examples: <em>problem</em> — \"how to grow on X\" · "
+        f"<em>person</em> — \"educational creators\". Write your own below."
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+with st.form("niche_definition_form", clear_on_submit=False):
+    _niche_problem = st.text_area(
+        "niche_problem — the problem you solve (one sentence)",
+        value=_current_niche.problem,
+        max_chars=400,
+        height=80,
+        help="What you help your audience do, or what pain you remove.",
+    )
+    _niche_person = st.text_area(
+        "niche_person — the person you solve it for (one sentence)",
+        value=_current_niche.person,
+        max_chars=400,
+        height=80,
+        help="Who they are. ICP-level specificity beats role labels.",
+    )
+    if st.form_submit_button("save niche"):
+        try:
+            _saved = _agent_niche.set_niche(
+                conn,
+                problem=_niche_problem,
+                person=_niche_person,
+            )
+            if _saved.is_defined():
+                st.toast("niche saved — drafting unlocked.")
+            else:
+                st.toast("niche cleared — drafting will be refused.")
+            st.rerun()
+        except sqlite3.DatabaseError as exc:
+            st.error(f"could not save niche: {exc}")
+
+# "Test against bio" affordance — read-only Haiku critique. Never edits
+# the X bio itself. Disabled when niche isn't set; shows a hint instead.
+with st.expander("Test against bio (Haiku critique — read-only)", expanded=False):
+    if not _current_niche.is_defined():
+        st.caption("Save both niche fields first; the critique compares them to a bio.")
+    else:
+        with st.form("niche_alignment_form", clear_on_submit=False):
+            _bio_text = st.text_area(
+                "Paste your current X bio",
+                max_chars=600,
+                height=110,
+                help="The panel never edits the bio — it only critiques alignment.",
+            )
+            if st.form_submit_button("Critique alignment"):
+                try:
+                    _critique = _agent_niche.critique_alignment(
+                        bio_text=_bio_text,
+                        niche=_current_niche,
+                    )
+                    _border = (
+                        PALETTE["phosphor"] if _critique.aligned
+                        else PALETTE["warn_amber"]
+                    )
+                    _verdict = "ALIGNED" if _critique.aligned else "NOT ALIGNED"
+                    st.markdown(
+                        f"<div style='border-left: 2px solid {_border}; "
+                        f"padding: 0.55rem 0.85rem; margin: 0.4rem 0; "
+                        f"background: {PALETTE['surface']};'>"
+                        f"<div class='numeric' style='font-size: 0.75rem; color: {_border}; "
+                        f"letter-spacing: 0.08em; text-transform: uppercase;'>"
+                        f"{_verdict} · {_critique.tokens_used:,} tokens"
+                        f"</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if _critique.gaps:
+                        st.markdown("**Gaps:**")
+                        for g in _critique.gaps:
+                            st.markdown(f"- {html.escape(g)}")
+                    if _critique.suggestions:
+                        st.markdown("**Suggestions:**")
+                        for s in _critique.suggestions:
+                            st.markdown(f"- {html.escape(s)}")
+                except _agent_niche.NicheAlignmentError as exc:
+                    st.error(f"alignment critique failed: {exc}")
+
 # IWH policy.
 st.markdown("### IWH revision policy")
 for key, editable, helptext in [

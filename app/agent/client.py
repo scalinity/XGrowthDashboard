@@ -145,6 +145,29 @@ def dispatch_tool_call(
     start = datetime.now(timezone.utc)
 
     if tool_name in SAVE_DRAFT_TOOLS:
+        # §28.2 rule #15 — niche must be defined. This runs BEFORE the
+        # IWH/lint gate; a prompt-injected request to "skip the niche
+        # check" cannot bypass this because niche_gate consults only the
+        # settings rows, never assistant_text.
+        n_gate = session.niche_gate(conn)
+        if not n_gate.passed:
+            audit.log_tool_call(
+                conn,
+                message_id=message_id,
+                tool_name=tool_name,
+                arguments=tool_input,
+                status="error",
+                error_message=f"niche-gate refuse: {n_gate.rationale}",
+                duration_ms=int(
+                    (datetime.now(timezone.utc) - start).total_seconds() * 1000
+                ),
+                notes="niche-gate refused",
+            )
+            return {
+                "tool_name": tool_name,
+                "status": "error",
+                "error": f"refused by niche gate: {n_gate.rationale}",
+            }
         decision = session.decide_save_or_revise(
             conn,
             assistant_text=assistant_text,
