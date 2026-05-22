@@ -25,7 +25,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
-from app.components.theme import PALETTE, apply_theme, hairline, kicker
+from app.components.theme import PALETTE, apply_theme, hairline, kicker, readout_card
 from app.db import DEFAULT_DB_PATH
 from app.forms import get_setting, set_setting
 from app.pages import open_connection
@@ -309,44 +309,18 @@ if _last_backup:
         )
 
 if _last_backup:
-    st.markdown(
-        f"""<div style='padding:0.6rem 0.9rem; margin:0.4rem 0 0.8rem 0;
-                       background:{PALETTE['surface']}; border-left:2px solid {PALETTE['phosphor']};
-                       border-radius:2px;'>
-            <div class='faint' style='font-size:0.72rem; letter-spacing:0.08em;
-                                       text-transform:uppercase; color:{PALETTE['bone_faint']};'>
-                Last backup
-            </div>
-            <div class='numeric' style='font-size:1.25rem; color:{PALETTE['bone']};
-                                          margin-top:0.15rem;'>
-                {_last_backup}
-            </div>
-            <div class='faint' style='font-size:0.78rem; color:{PALETTE['bone_dim']};
-                                       margin-top:0.1rem;'>
-                {_age_caption}
-            </div>
-        </div>""",
-        unsafe_allow_html=True,
+    readout_card(
+        label="Last backup",
+        value=_last_backup,
+        caption=_age_caption,
+        accent="phosphor",
     )
 else:
-    st.markdown(
-        f"""<div style='padding:0.6rem 0.9rem; margin:0.4rem 0 0.8rem 0;
-                       background:{PALETTE['surface']}; border-left:2px dashed {PALETTE['hairline']};
-                       border-radius:2px;'>
-            <div class='faint' style='font-size:0.72rem; letter-spacing:0.08em;
-                                       text-transform:uppercase; color:{PALETTE['bone_faint']};'>
-                Last backup
-            </div>
-            <div class='numeric' style='font-size:1.25rem; color:{PALETTE['bone_dim']};
-                                          margin-top:0.15rem;'>
-                —
-            </div>
-            <div class='faint' style='font-size:0.78rem; color:{PALETTE['bone_faint']};
-                                       margin-top:0.1rem;'>
-                No backups yet · click below to run the first one.
-            </div>
-        </div>""",
-        unsafe_allow_html=True,
+    readout_card(
+        label="Last backup",
+        value="—",
+        caption="No backups yet · click below to run the first one.",
+        empty=True,
     )
 
 # --- Action + parameter row: button (primary) | retention dial (parameter).

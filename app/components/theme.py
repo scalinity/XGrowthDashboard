@@ -310,3 +310,80 @@ def dim(text: str) -> str:
 def numeric(text: str) -> str:
     """Inline tabular-figures span for use inside larger markdown blocks."""
     return f"<span class='numeric'>{text}</span>"
+
+
+def readout_card(
+    label: str,
+    value: str,
+    caption: str | None = None,
+    accent: str = "phosphor",
+    empty: bool = False,
+) -> None:
+    """Render an instrument-panel "readout" card.
+
+    The shape: a 2px left-keyline (solid when populated, dashed when
+    ``empty=True``), a small ALL-CAPS label, a big mono value, and an
+    optional caption beneath. Used by the Backups subsection in
+    Settings; intentionally generic so future sub-panels (exports,
+    agent, etc.) can reuse the same surface.
+
+    Parameters
+    ----------
+    label
+        Short ALL-CAPS-styled label rendered above the value. Plain text.
+    value
+        The headline value — rendered in JetBrains Mono at 1.25rem. Plain
+        text. For numeric values, the caller should already have formatted
+        them (this helper does not coerce).
+    caption
+        Optional secondary line beneath the value (e.g. "5m ago" or
+        "(unparseable timestamp)"). Falsy values render no caption line.
+    accent
+        PALETTE key for the left keyline color. Defaults to ``"phosphor"``.
+        Pass another existing key (e.g. ``"bone_dim"``) — do NOT pass a
+        raw hex literal; new color tokens belong in PALETTE.
+    empty
+        Renders the dashed-border + dimmed-value variant for "no data
+        yet" states.
+    """
+    if accent not in PALETTE:
+        raise ValueError(
+            f"Unknown PALETTE accent {accent!r}. Add new color tokens to "
+            f"PALETTE in app/components/theme.py — do not pass raw hex."
+        )
+
+    if empty:
+        border_style = "dashed"
+        border_color = PALETTE["hairline"]
+        value_color = PALETTE["bone_dim"]
+        caption_color = PALETTE["bone_faint"]
+    else:
+        border_style = "solid"
+        border_color = PALETTE[accent]
+        value_color = PALETTE["bone"]
+        caption_color = PALETTE["bone_dim"]
+
+    caption_html = (
+        f"""<div class='faint' style='font-size:0.78rem; color:{caption_color};
+                                       margin-top:0.1rem;'>{caption}</div>"""
+        if caption
+        else ""
+    )
+
+    st.markdown(
+        f"""<div style='padding:0.6rem 0.9rem; margin:0.4rem 0 0.8rem 0;
+                       background:{PALETTE['surface']};
+                       border-left:2px {border_style} {border_color};
+                       border-radius:2px;'>
+            <div class='faint' style='font-size:0.72rem; letter-spacing:0.08em;
+                                       text-transform:uppercase; color:{PALETTE['bone_faint']};'>
+                {label}
+            </div>
+            <div class='numeric' style='font-size:1.25rem; color:{value_color};
+                                          margin-top:0.15rem;'>
+                {value}
+            </div>
+            {caption_html}
+        </div>""",
+        unsafe_allow_html=True,
+    )
