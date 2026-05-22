@@ -307,17 +307,19 @@ def _render_top_lanes(lanes: list[sqlite3.Row]) -> str:
             "Per §13, `insufficient sample` means *we don't know yet*, "
             "not *nothing is working*."
         )
-    lines = ["| # | Pillar | Audience | CTA | Posts | Days | Median impressions | Confidence |", "|---|---|---|---|---|---|---|---|"]
+    lines: list[str] = []
+    lines.append("| # | Pillar | Audience | CTA | Posts | Days | Median impressions | Confidence |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for i, row in enumerate(lanes, start=1):
         lines.append(
-            f"| {i} "
-            f"| {_fmt_str(row['pillar'])} "
-            f"| {_fmt_str(row['audience'])} "
-            f"| {_fmt_str(row['cta'])} "
-            f"| {_fmt_int(row['post_count'])} "
-            f"| {_fmt_int(row['days_covered'])} "
-            f"| {_fmt_int(row['median_impressions'])} "
-            f"| {_fmt_str(row['confidence_label'])} |"
+            f"| {i}"
+            f" | {_fmt_str(row['pillar'])}"
+            f" | {_fmt_str(row['audience'])}"
+            f" | {_fmt_str(row['cta'])}"
+            f" | {_fmt_int(row['post_count'])}"
+            f" | {_fmt_int(row['days_covered'])}"
+            f" | {_fmt_int(row['median_impressions'])}"
+            f" | {_fmt_str(row['confidence_label'])} |"
         )
     return "\n".join(lines)
 
@@ -325,20 +327,28 @@ def _render_top_lanes(lanes: list[sqlite3.Row]) -> str:
 def _render_open_hypotheses(rows: list[sqlite3.Row]) -> str:
     if not rows:
         return "No open hypotheses. Consider seeding next week's experiment in the Weekly Review form."
-    blocks = []
+    lines: list[str] = []
     for r in rows:
-        blocks.append(
+        end_segment = f" → {_fmt_str(r['end_date'])}" if r["end_date"] else ""
+        lines.append(
             f"- **{_fmt_str(r['name'])}** "
-            f"(started {_fmt_str(r['start_date'])}"
-            + (f" → {_fmt_str(r['end_date'])}" if r["end_date"] else "")
-            + ")\n"
-            f"  *Hypothesis:* {_fmt_str(r['hypothesis'])}  \n"
+            f"(started {_fmt_str(r['start_date'])}{end_segment})"
+        )
+        lines.append(f"  *Hypothesis:* {_fmt_str(r['hypothesis'])}  ")
+        lines.append(
             f"  *Lane:* {_fmt_str(r['content_lane'])} · "
-            f"*Audience:* {_fmt_str(r['target_audience'])}  \n"
+            f"*Audience:* {_fmt_str(r['target_audience'])}  "
+        )
+        lines.append(
             f"  *Success metric:* {_fmt_str(r['success_metric'])} · "
             f"*Min sample size:* {_fmt_int(r['minimum_sample_size'])}"
         )
-    return "\n".join(blocks)
+        lines.append("")
+    # Trim the trailing empty separator added after the last block so the
+    # caller's section boundary isn't doubled.
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _render_hard_rules() -> str:
