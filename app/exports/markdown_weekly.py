@@ -581,14 +581,20 @@ def export_weekly_report(
             open_hypotheses=hypotheses,
         )
 
-        # /review-2 W1: atomic file + UPDATE + audit-INSERT.
-        # Three-phase write so a DB failure can never leave an orphan
-        # markdown file on disk:
+        # /review-2 W1 + P58R-14: rename runs INSIDE the transaction so
+        # the audit row can never point at a missing file. Ordering:
         #   1. write the document to target.tmp (durable but invisible)
-        #   2. BEGIN IMMEDIATE + UPDATE weekly_reviews + record_export + COMMIT
-        #   3. os.replace(tmp, target) — atomic on POSIX
-        # If any step fails before the rename, the tmp file is removed.
-        # If the rename succeeds, the audit row's output_path is valid.
+        #   2. BEGIN IMMEDIATE
+        #   3. UPDATE weekly_reviews + record_export
+        #   4. os.replace(tmp, target) — atomic on POSIX
+        #   5. COMMIT
+        # If the rename fails (permission denied, no space, etc.),
+        # ROLLBACK kicks in and no audit row is written — the operator
+        # can re-run cleanly. If the COMMIT fails after a successful
+        # rename, the file exists with no audit row — re-running the
+        # export overwrites both sides; that's a recoverable state,
+        # unlike the prior "audit row exists, file is missing" state
+        # that needed manual SQL surgery to fix.
         tmp_target = target.with_suffix(target.suffix + ".tmp")
         tmp_target.write_text(document, encoding="utf-8")
         try:
@@ -610,18 +616,18 @@ def export_weekly_report(
                     row_count=1,
                     notes=f"week={week_iso}",
                 )
+                os.replace(tmp_target, target)
                 active.execute("COMMIT")
             except Exception:
-                # Any failure between BEGIN and COMMIT — including the
-                # IntegrityError re-raise from record_export — rolls back
-                # both writes so the DB stays consistent with disk.
+                # Any failure between BEGIN and COMMIT — including
+                # record_export's IntegrityError or os.replace's
+                # OSError — rolls back both writes so the DB stays
+                # consistent with disk.
                 active.execute("ROLLBACK")
                 raise
-            os.replace(tmp_target, target)
         except Exception:
-            # File-write or rename failure after a successful commit is
-            # rare (mkdir already ran, parent exists), but if it happens
-            # we still want the orphan tmp gone.
+            # File-write failure before BEGIN or rollback after BEGIN —
+            # either way we want the orphan tmp gone if it survived.
             try:
                 tmp_target.unlink()
             except FileNotFoundError:
