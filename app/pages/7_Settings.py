@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -26,8 +27,15 @@ import streamlit as st
 
 from app.components.theme import PALETTE, apply_theme, hairline, kicker
 from app.db import DEFAULT_DB_PATH
-from app.forms import set_setting
+from app.forms import get_setting, set_setting
 from app.pages import open_connection
+from scripts.backup_db import (
+    BACKUP_FILENAME_GLOB,
+    BackupIntegrityError,
+    DEFAULT_BACKUPS_DIR,
+    DEFAULT_RETENTION_DAYS,
+    backup_database,
+)
 
 # ---------------------------------------------------------------------------
 # Group definitions. Each entry: (group label, [(key, editable, helptext)]).
@@ -190,6 +198,225 @@ for group_label, keys in _GROUPS:
     for key, editable, helptext in keys:
         _render_setting(conn, key, editable, helptext)
     hairline()
+
+# ---------------------------------------------------------------------------
+# Backups — instrument-panel sub-readout (Phase 4, §18 rule 10).
+#
+# Aesthetic discipline (per /frontend-design + project CLAUDE.md):
+#   - `kicker()` to brand the sub-panel with the spec anchor.
+#   - one tight readout block: big mono timestamp + de-emphasised caption.
+#   - action + parameter live as paired columns (button | dial), echoing a
+#     physical instrument console.
+#   - the on-disk list reads as a console manifest: mono columns, right-
+#     aligned size/mtime, hairline separators only.
+# No new PALETTE keys; no new fonts.
+# ---------------------------------------------------------------------------
+
+
+def _format_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.2f} MB"
+
+
+def _humanise_age(seconds: float) -> str:
+    """Compact `Nh Mm ago` / `Nd ago` caption for the last-backup readout."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        h, m = divmod(seconds // 60, 60)
+        return f"{h}h {m}m ago"
+    days = seconds // 86400
+    return f"{days}d ago"
+
+
+def _backups_dir_from_settings() -> Path:
+    seeded = get_setting(conn, "backup_dir", default=str(DEFAULT_BACKUPS_DIR))
+    return Path(seeded).resolve() if seeded else DEFAULT_BACKUPS_DIR.resolve()
+
+
+def _list_backups(backups_dir: Path) -> list[tuple[Path, int, float]]:
+    if not backups_dir.exists():
+        return []
+    items: list[tuple[Path, int, float]] = []
+    for path in backups_dir.glob(BACKUP_FILENAME_GLOB):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        items.append((path, stat.st_size, stat.st_mtime))
+    items.sort(key=lambda r: r[2], reverse=True)
+    return items
+
+
+kicker("DATA INTEGRITY · §18 RULE 10")
+st.markdown("## Backups")
+st.caption(
+    "VACUUM INTO snapshots of the SQLite DB — the only safe way to copy "
+    "an open SQLite file. Backups live next to the DB and prune themselves "
+    "per the retention dial."
+)
+
+# --- Status readout: big mono timestamp + caption (or dimmed placeholder).
+_last_backup = get_setting(conn, "last_backup_at_utc")
+_age_caption = ""
+if _last_backup:
+    try:
+        _parsed = datetime.strptime(_last_backup, "%Y-%m-%dT%H:%M:%SZ")
+        _age_caption = _humanise_age(
+            (datetime.utcnow() - _parsed).total_seconds()
+        )
+    except ValueError:
+        _age_caption = ""
+
+if _last_backup:
+    st.markdown(
+        f"""<div style='padding:0.6rem 0.9rem; margin:0.4rem 0 0.8rem 0;
+                       background:{PALETTE['surface']}; border-left:2px solid {PALETTE['phosphor']};
+                       border-radius:2px;'>
+            <div class='faint' style='font-size:0.72rem; letter-spacing:0.08em;
+                                       text-transform:uppercase; color:{PALETTE['bone_faint']};'>
+                Last backup
+            </div>
+            <div class='numeric' style='font-size:1.25rem; color:{PALETTE['bone']};
+                                          margin-top:0.15rem;'>
+                {_last_backup}
+            </div>
+            <div class='faint' style='font-size:0.78rem; color:{PALETTE['bone_dim']};
+                                       margin-top:0.1rem;'>
+                {_age_caption}
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        f"""<div style='padding:0.6rem 0.9rem; margin:0.4rem 0 0.8rem 0;
+                       background:{PALETTE['surface']}; border-left:2px dashed {PALETTE['hairline']};
+                       border-radius:2px;'>
+            <div class='faint' style='font-size:0.72rem; letter-spacing:0.08em;
+                                       text-transform:uppercase; color:{PALETTE['bone_faint']};'>
+                Last backup
+            </div>
+            <div class='numeric' style='font-size:1.25rem; color:{PALETTE['bone_dim']};
+                                          margin-top:0.15rem;'>
+                —
+            </div>
+            <div class='faint' style='font-size:0.78rem; color:{PALETTE['bone_faint']};
+                                       margin-top:0.1rem;'>
+                No backups yet · click below to run the first one.
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+# --- Action + parameter row: button (primary) | retention dial (parameter).
+_action_col, _retention_col = st.columns([1, 1], gap="large")
+
+with _action_col:
+    if st.button("Back up now", key="run_backup_now", type="primary"):
+        with st.spinner("VACUUM INTO + integrity check…"):
+            try:
+                result = backup_database()
+            except (BackupIntegrityError, RuntimeError, FileNotFoundError) as exc:
+                st.error(f"Backup failed: {exc}")
+            else:
+                st.toast(
+                    f"Backup written · {result.path.name} "
+                    f"({_format_bytes(result.size_bytes)}, {result.duration_ms} ms)",
+                    icon="✅",
+                )
+                st.rerun()
+
+with _retention_col:
+    _retention_row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'backup_retention_days'"
+    ).fetchone()
+    _current_retention = (
+        int(json.loads(_retention_row["value_json"])) if _retention_row else DEFAULT_RETENTION_DAYS
+    )
+    _new_retention = st.number_input(
+        "Retention · days",
+        min_value=1,
+        max_value=3650,
+        value=_current_retention,
+        step=1,
+        key="set_backup_retention_days",
+        help="Backups older than this many days are deleted at the end of each backup run.",
+    )
+    if st.button("Save retention", key="save_backup_retention_days"):
+        try:
+            set_setting(conn, "backup_retention_days", int(_new_retention))
+        except Exception as exc:  # noqa: BLE001 — surface to UI
+            st.error(f"Save failed: {exc}")
+        else:
+            st.toast("Retention saved.", icon="✅")
+            st.rerun()
+
+# --- On-disk manifest: console-log columns inside an expander.
+_backups_dir = _backups_dir_from_settings()
+_backups = _list_backups(_backups_dir)
+with st.expander(f"Manifest · {len(_backups)} on disk"):
+    if not _backups:
+        st.markdown(
+            f"<span class='faint' style='color:{PALETTE['bone_dim']};'>"
+            f"No files matching <code>{BACKUP_FILENAME_GLOB}</code> "
+            f"in <code>{_backups_dir}</code>.</span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""<div style='display:grid; grid-template-columns:1fr auto auto;
+                            gap:1.2rem; padding:0.3rem 0;
+                            border-bottom:1px solid {PALETTE['hairline']};'>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};'>
+                    file
+                </span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};
+                                            text-align:right;'>
+                    size
+                </span>
+                <span class='faint' style='font-size:0.7rem; letter-spacing:0.08em;
+                                            text-transform:uppercase; color:{PALETTE['bone_faint']};
+                                            text-align:right;'>
+                    written
+                </span>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        for path, size, mtime in _backups:
+            when = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d · %H:%M:%S")
+            st.markdown(
+                f"""<div style='display:grid; grid-template-columns:1fr auto auto;
+                                gap:1.2rem; padding:0.28rem 0;
+                                border-bottom:1px solid {PALETTE['hairline']};'>
+                    <span class='numeric' style='font-size:0.82rem;
+                                                  color:{PALETTE['bone']};
+                                                  overflow:hidden; text-overflow:ellipsis;'>
+                        {path.name}
+                    </span>
+                    <span class='numeric' style='font-size:0.78rem;
+                                                  color:{PALETTE['bone_dim']};
+                                                  text-align:right;'>
+                        {_format_bytes(size)}
+                    </span>
+                    <span class='numeric' style='font-size:0.78rem;
+                                                  color:{PALETTE['bone_dim']};
+                                                  text-align:right;'>
+                        {when}
+                    </span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+hairline()
 
 # Read-only environment surface.
 st.markdown("## Environment (read-only)")
