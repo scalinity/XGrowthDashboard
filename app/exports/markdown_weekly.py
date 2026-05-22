@@ -161,6 +161,15 @@ def _fetch_funnel_totals(
     The view returns ``COALESCE`` zeros for the per-event columns, so a
     week with no events still returns an all-zeros row. Returns a dict
     keyed by funnel stage name — caller renders.
+
+    /review-2 W4 (PRE-EXISTING): ``v_funnel_daily`` is anchored on
+    ``stir_conversion_events``, so a tester who downloaded on a date
+    with NO event row is silently absent from the view — and the
+    week's parent count drops to zero even when ``stir_testers`` has
+    matching rows. Rather than touching the immutable applied view
+    (Phase 1 surface), we query ``stir_testers`` independently here
+    and override the view-derived ``working_parent_home_cook_testers``
+    with the count from the testers table itself.
     """
     rows = conn.execute(
         """
@@ -182,7 +191,22 @@ def _fetch_funnel_totals(
         """,
         (week_start_date, week_end_date),
     ).fetchone()
-    return {k: int(rows[k] or 0) for k in rows.keys()}
+    totals = {k: int(rows[k] or 0) for k in rows.keys()}
+
+    # Override the view's parent count with a direct stir_testers query
+    # so event-less download dates are still counted.
+    parent_row = conn.execute(
+        """
+        SELECT COUNT(*) AS parents
+          FROM stir_testers
+         WHERE is_working_parent_home_cook = 1
+           AND downloaded_app_at IS NOT NULL
+           AND DATE(downloaded_app_at) BETWEEN ? AND ?
+        """,
+        (week_start_date, week_end_date),
+    ).fetchone()
+    totals["working_parent_home_cook_testers"] = int(parent_row["parents"] or 0)
+    return totals
 
 
 def _fetch_top_lanes(conn: sqlite3.Connection, limit: int = 3) -> list[sqlite3.Row]:
