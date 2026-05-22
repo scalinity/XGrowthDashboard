@@ -58,6 +58,59 @@ class CounterfactualMissingError(RuntimeError):
         self.week_start_date = week_start_date
 
 
+class SpeculationLabelBlocked(RuntimeError):
+    """Raised when an agent-drafted section carries confidence_label='speculation'
+    and Daniel hasn't acknowledged the speculation for this export (§28.14).
+
+    Caller acknowledges by setting the settings row
+    `weekly_review_speculation_ack_<week_iso>` to true via the Weekly Review
+    UI ("I'm publishing this speculation deliberately"). Once set, the
+    blocker stands down for that specific week.
+    """
+
+    def __init__(self, week_iso: str, count: int) -> None:
+        super().__init__(
+            f"Cannot export weekly report for {week_iso}: {count} agent message(s) "
+            f"tied to this week carry confidence_label='speculation' and haven't "
+            f"been acknowledged. In the Weekly Review UI, either edit the "
+            f"speculative sections or check 'I'm publishing this speculation "
+            f"deliberately' before re-running the export. (§28.14)"
+        )
+        self.week_iso = week_iso
+        self.count = count
+
+
+def _count_speculative_messages_for_week(
+    conn: sqlite3.Connection, *, week_start_date: str, week_end_date: str
+) -> int:
+    """Count agent_messages with confidence_label='speculation' whose
+    `created_at_utc` falls inside the ISO week.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM agent_messages
+        WHERE confidence_label = 'speculation'
+          AND date(created_at_utc) BETWEEN ? AND ?
+        """,
+        (week_start_date, week_end_date),
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _speculation_acknowledged(conn: sqlite3.Connection, week_iso: str) -> bool:
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?",
+        (f"weekly_review_speculation_ack_{week_iso}",),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        import json as _json
+        return bool(_json.loads(row["value_json"]))
+    except (Exception,):
+        return False
+
+
 @dataclass(frozen=True)
 class MarkdownWeeklyExportResult:
     path: Path
@@ -499,6 +552,17 @@ def export_weekly_report(
             raise CounterfactualMissingError(week_iso, None)
         if _is_blank(review["counterfactual_note"]):
             raise CounterfactualMissingError(week_iso, week_start_date)
+
+        # Phase 5.8 / §28.14 — speculation export blocker. If any
+        # agent_messages from this ISO week carry confidence_label =
+        # 'speculation' AND the per-week ack flag is unset, refuse.
+        speculation_count = _count_speculative_messages_for_week(
+            active,
+            week_start_date=week_start_date,
+            week_end_date=week_end_date,
+        )
+        if speculation_count > 0 and not _speculation_acknowledged(active, week_iso):
+            raise SpeculationLabelBlocked(week_iso, speculation_count)
 
         target = _resolve_output_path(active, output_path, week_iso)
         target.parent.mkdir(parents=True, exist_ok=True)

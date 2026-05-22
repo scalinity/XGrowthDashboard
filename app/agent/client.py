@@ -77,13 +77,15 @@ def append_message(
     rate_snapshot: dict | None = None,
     tool_calls: list[dict] | None = None,
     tool_call_id: str | None = None,
+    confidence_label: str | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO agent_messages
             (conversation_id, role, content, tool_calls_json, tool_call_id,
-             model, input_tokens, output_tokens, rate_snapshot_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             model, input_tokens, output_tokens, rate_snapshot_json,
+             confidence_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             conversation_id,
@@ -95,6 +97,7 @@ def append_message(
             input_tokens,
             output_tokens,
             json.dumps(rate_snapshot) if rate_snapshot else None,
+            confidence_label,
         ),
     )
     # Update conversation's denormalized counters.
@@ -320,6 +323,16 @@ class AgentClient:
         estimate = cost.estimate_cost(
             input_tokens=in_tok, output_tokens=out_tok, model=self.model
         )
+        # Phase 5.8 / §28.14 — parse confidence labels from the assistant
+        # message and persist the dominant one. Drafts inherit it via the
+        # tool-result wiring further down (search for "Phase 5.8 / §28.14").
+        from app.agent.session import (
+            dominant_confidence_label,
+            extract_confidence_labels,
+        )
+        _conf_labels = extract_confidence_labels(assistant_text)
+        _dominant_conf = dominant_confidence_label(_conf_labels)
+
         msg_id = append_message(
             conn,
             conversation_id=conversation_id,
@@ -330,6 +343,7 @@ class AgentClient:
             output_tokens=out_tok,
             rate_snapshot=estimate.rate_snapshot,
             tool_calls=tool_calls or None,
+            confidence_label=_dominant_conf,
         )
 
         # Dispatch each tool_use block locally.
@@ -362,6 +376,22 @@ class AgentClient:
                 current_attempt_index=current_attempt,
             )
             dispatched.append(result)
+            # Phase 5.8 / §28.14 — if this tool call produced a draft,
+            # propagate the message's dominant confidence label onto
+            # agent_drafts.confidence_label. The label captures whether
+            # the surrounding analytical claims (e.g. "lane X is the
+            # winner") were tagged as fact / inference / speculation.
+            if (
+                tc_name in SAVE_DRAFT_TOOLS
+                and _dominant_conf is not None
+                and isinstance(result.get("result"), dict)
+            ):
+                _draft_id = result["result"].get("draft_id")
+                if _draft_id is not None:
+                    conn.execute(
+                        "UPDATE agent_drafts SET confidence_label = ? WHERE id = ?",
+                        (_dominant_conf, int(_draft_id)),
+                    )
             # Persist tool_result message so the next turn has it in context.
             # Switch on `status` instead of truthy result — a legitimate empty
             # result ({} / []) is falsy and used to fall through to error,

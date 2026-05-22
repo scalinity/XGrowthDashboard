@@ -45,7 +45,12 @@ from app.agent.client import (
     AgentClient,
     start_conversation,
 )
-from app.components.badges import prepublish_chip, render_score_panel, repetition_banner
+from app.components.badges import (
+    claim_confidence_chip,
+    prepublish_chip,
+    render_score_panel,
+    repetition_banner,
+)
 from app.components.theme import (
     PALETTE,
     apply_theme,
@@ -337,6 +342,11 @@ def _render_draft_actions(conn, draft_row, message_id: int) -> None:
         prepublish_chip(score_row.get("composite_label"))
         with st.expander("score breakdown (§28.11)", expanded=False):
             render_score_panel(score_row)
+
+    # Phase 5.8 / §28.14 — claim-confidence chip showing the dominant
+    # confidence label parsed from the assistant message that produced
+    # this draft.
+    claim_confidence_chip(draft_row["confidence_label"])
 
     col_a, col_b, col_c = st.columns([2, 1, 1])
     with col_a:

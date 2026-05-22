@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from app.exports.markdown_weekly import (
         CounterfactualMissingError,
         MarkdownWeeklyExportResult,
+        SpeculationLabelBlocked,
         export_weekly_report,
     )
 
@@ -75,6 +76,7 @@ __all__ = [
     "JsonExportResult",
     "MarkdownWeeklyExportResult",
     "CounterfactualMissingError",
+    "SpeculationLabelBlocked",
     "export_table_to_csv",
     "export_database_to_json",
     "export_weekly_report",
@@ -88,6 +90,7 @@ _LAZY_SUBMODULES: dict[str, str] = {
     "export_database_to_json": "app.exports.json_exporter",
     "MarkdownWeeklyExportResult": "app.exports.markdown_weekly",
     "CounterfactualMissingError": "app.exports.markdown_weekly",
+    "SpeculationLabelBlocked": "app.exports.markdown_weekly",
     "export_weekly_report": "app.exports.markdown_weekly",
 }
 
