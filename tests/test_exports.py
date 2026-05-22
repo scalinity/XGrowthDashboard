@@ -1,0 +1,322 @@
+"""Phase 5 export tests — spec.md §16 / §14.6 / §18.
+
+Seven scenarios from the Phase 5 prompt, plus a few defensive guards.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from app.exports import (
+    CounterfactualMissingError,
+    UnknownTableError,
+    export_database_to_json,
+    export_table_to_csv,
+    export_weekly_report,
+)
+from app.exports.allowlists import (
+    ALLOWLISTS,
+    POSTS_ALLOWLIST,
+    columns_for_export,
+    excluded_columns,
+    opt_in_columns,
+)
+
+
+# ---------------------------------------------------------------------------
+# helpers — seed minimal rows so the SELECTs return data.
+# ---------------------------------------------------------------------------
+def _insert_post(
+    conn: sqlite3.Connection,
+    *,
+    pid: int = 1,
+    x_post_id: str = "x-1",
+    text: str = "hello world",
+    created_date: str = "2026-05-18",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO posts (
+            id, x_post_id, created_at_utc, created_date, text, url,
+            type, conversation_id, in_reply_to_post_id, in_reply_to_user,
+            posted_via, manual_confirmation_status, contains_link, expanded_urls_json,
+            utm_source, utm_medium, utm_campaign, utm_content, utm_term
+        ) VALUES (?, ?, '2026-05-18T12:00:00Z', ?, ?, 'https://x.com/dannyscalant/status/1',
+                  'standalone', 'conv-1', NULL, NULL,
+                  'manual', 'confirmed', 0, NULL,
+                  'x', 'organic', 'spring_2026', NULL, NULL)
+        """,
+        (pid, x_post_id, created_date, text),
+    )
+
+
+def _insert_weekly_review(
+    conn: sqlite3.Connection,
+    *,
+    week_start: str = "2026-05-18",
+    week_end: str = "2026-05-24",
+    counterfactual: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO weekly_reviews (
+            week_start_date, week_end_date,
+            followers_start, followers_end, follower_delta,
+            posts_shipped, replies_shipped, reply_sessions_completed,
+            daily_reps_days_completed, downloads, qualified_icp_testers,
+            strongest_pillar, weakest_pillar,
+            what_moved, what_got_stuck, lesson, next_week_experiment,
+            counterfactual_note
+        ) VALUES (?, ?, 61, 73, 12, 7, 30, 5, 6, 1, 0,
+                  'cooking-truths', 'tool-pitch',
+                  'replies → 3 follower bumps from working-parent accounts',
+                  'site visits flat',
+                  'reply quality matters more than count',
+                  'try a 7-post thread on the meal-plan failure mode',
+                  ?)
+        """,
+        (week_start, week_end, counterfactual),
+    )
+    return cur.lastrowid
+
+
+# ---------------------------------------------------------------------------
+# Test 1 — CSV export uses allowlist default columns
+# ---------------------------------------------------------------------------
+def test_csv_export_uses_allowlist_default_columns(db_conn, tmp_path: Path) -> None:
+    _insert_post(db_conn)
+    out = tmp_path / "posts.csv"
+
+    result = export_table_to_csv("posts", out, conn=db_conn)
+
+    with out.open(encoding="utf-8") as fh:
+        reader = csv.reader(fh)
+        header = next(reader)
+        rows = list(reader)
+
+    assert header == POSTS_ALLOWLIST["default_columns"]
+    assert len(rows) == 1
+    assert rows[0][header.index("x_post_id")] == "x-1"
+    assert result.row_count == 1
+    assert result.columns == header
+
+
+# ---------------------------------------------------------------------------
+# Test 2 — opt_in flag appends opt_in_columns (header still default+opt_in,
+#          even when opt_in_columns is empty at this phase).
+# ---------------------------------------------------------------------------
+def test_csv_export_opt_in_includes_opt_in_columns(db_conn, tmp_path: Path) -> None:
+    _insert_post(db_conn)
+    out = tmp_path / "posts_optin.csv"
+
+    export_table_to_csv("posts", out, include_opt_in=True, conn=db_conn)
+
+    with out.open(encoding="utf-8") as fh:
+        header = next(csv.reader(fh))
+
+    expected = POSTS_ALLOWLIST["default_columns"] + POSTS_ALLOWLIST["opt_in_columns"]
+    assert header == expected
+
+
+# ---------------------------------------------------------------------------
+# Test 3 — excluded columns never appear, opt-in or not.
+#
+# We synthesise an excluded column on an allowlist clone (the live posts
+# allowlist has none at Phase 5; this verifies the GUARANTEE, not just the
+# current data). Test patches a TableAllowlist into the registry, then
+# calls columns_for_export to confirm the guard fires when default/opt-in
+# leak an excluded column.
+# ---------------------------------------------------------------------------
+def test_csv_export_excludes_excluded_columns_even_with_opt_in(
+    db_conn, tmp_path: Path, monkeypatch
+) -> None:
+    # Sanity: no live allowlist currently has any excluded columns.
+    for table in ALLOWLISTS:
+        assert all(
+            c not in excluded_columns(table)
+            for c in ALLOWLISTS[table]["default_columns"] + ALLOWLISTS[table]["opt_in_columns"]
+        )
+
+    # Inject a misconfigured table to confirm the guard raises.
+    from app.exports import allowlists as al
+
+    bad = {"default_columns": ["a", "secret_col"], "opt_in_columns": [], "excluded_columns": ["secret_col"]}
+    monkeypatch.setitem(al.ALLOWLISTS, "__bad__", bad)
+    with pytest.raises(ValueError, match="internally inconsistent"):
+        columns_for_export("__bad__")
+
+    # And UnknownTableError fires for genuinely missing tables.
+    with pytest.raises(UnknownTableError):
+        export_table_to_csv("posts_DOES_NOT_EXIST", tmp_path / "x.csv", conn=db_conn)
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — Markdown weekly requires counterfactual
+# ---------------------------------------------------------------------------
+def test_markdown_weekly_requires_counterfactual(db_conn, tmp_path: Path) -> None:
+    # No row at all → raises with no week_start_date attribute.
+    with pytest.raises(CounterfactualMissingError) as exc_info_a:
+        export_weekly_report("2026-W21", tmp_path / "a.md", conn=db_conn)
+    assert exc_info_a.value.week_start_date is None
+
+    # Row exists but counterfactual is empty string → raises.
+    _insert_weekly_review(db_conn, counterfactual="")
+    with pytest.raises(CounterfactualMissingError) as exc_info_b:
+        export_weekly_report("2026-W21", tmp_path / "b.md", conn=db_conn)
+    assert exc_info_b.value.week_start_date == "2026-05-18"
+
+    # Whitespace-only also counts as empty.
+    db_conn.execute(
+        "UPDATE weekly_reviews SET counterfactual_note = '   \n  \t  ' WHERE week_start_date = '2026-05-18'"
+    )
+    with pytest.raises(CounterfactualMissingError):
+        export_weekly_report("2026-W21", tmp_path / "c.md", conn=db_conn)
+
+    # Filled in → succeeds and writes file.
+    db_conn.execute(
+        "UPDATE weekly_reviews SET counterfactual_note = ? WHERE week_start_date = '2026-05-18'",
+        ("Growth might have come from cohort drift, not my posts.",),
+    )
+    result = export_weekly_report("2026-W21", tmp_path / "d.md", conn=db_conn)
+    assert result.path.exists()
+    assert result.path.read_text(encoding="utf-8").strip().startswith("# X Growth Weekly Review")
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — generated Markdown includes the App-Store-gap label and the
+#          counterfactual note verbatim.
+# ---------------------------------------------------------------------------
+def test_markdown_weekly_includes_app_store_gap_label(db_conn, tmp_path: Path) -> None:
+    _insert_weekly_review(
+        db_conn,
+        counterfactual="Working-parent cohort discovered Stir via Reddit threads two weeks ago.",
+    )
+    out = tmp_path / "weekly.md"
+
+    export_weekly_report("2026-W21", out, conn=db_conn)
+
+    body = out.read_text(encoding="utf-8")
+    assert "App Store attribution gap" in body
+    assert "self-reported source" in body
+    assert "§14.5" in body
+    assert "Working-parent cohort discovered Stir via Reddit threads two weeks ago." in body
+    # §13 hard rules are surfaced verbatim.
+    assert "stock" in body and "flow" in body
+    # The counterfactual section appears before "what we know" so a future
+    # reader can't skim past it.
+    assert body.index("Counterfactual") < body.index("What we know")
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — JSON export redacts secret-like columns and Authorization headers.
+# ---------------------------------------------------------------------------
+def test_json_export_redacts_secret_columns(db_conn, tmp_path: Path) -> None:
+    # Seed a raw_api_responses row that carries an Authorization header
+    # inside response_json.
+    db_conn.execute(
+        """
+        INSERT INTO raw_api_responses (
+            source, endpoint_or_command, request_params_json, response_json,
+            status_code, collected_at_utc
+        ) VALUES (
+            'x_api', '/2/users/me',
+            ?, ?, 200, '2026-05-18T12:00:00Z'
+        )
+        """,
+        (
+            json.dumps({"headers": {"Authorization": "Bearer sk-live-DEADBEEF12345"}}),
+            json.dumps({
+                "data": {"id": "123", "username": "dannyscalant"},
+                "headers": {"Authorization": "Bearer sk-live-DEADBEEF12345"},
+                "access_token": "raw-secret-shouldnt-be-here-but-redact-anyway",
+            }),
+        ),
+    )
+
+    out = tmp_path / "dump.json"
+    result = export_database_to_json(out, conn=db_conn)
+    body = out.read_text(encoding="utf-8")
+
+    # The literal secret never appears anywhere.
+    assert "sk-live-DEADBEEF12345" not in body
+    assert "raw-secret-shouldnt-be-here-but-redact-anyway" not in body
+    # And "Authorization" appears only as a key — the value is the sentinel.
+    assert "[REDACTED]" in body
+    # PII gate is in effect by default.
+    assert "stir_testers" in result.redactions
+    # Schema metadata is present.
+    decoded = json.loads(body)
+    assert decoded["schema_version"] == 1
+    assert "raw_api_responses" in decoded["tables"]
+    assert decoded["tables"]["raw_api_responses"][0]["response_json"]["headers"]["Authorization"] == "[REDACTED]"
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — CSV round-trip preserves row count and key fields.
+# ---------------------------------------------------------------------------
+def test_csv_round_trip_preserves_data(db_conn, tmp_path: Path) -> None:
+    _insert_post(db_conn, pid=1, x_post_id="x-1", text="first post")
+    _insert_post(db_conn, pid=2, x_post_id="x-2", text="second post, with, commas")
+    _insert_post(db_conn, pid=3, x_post_id="x-3", text='third post with "quotes"')
+
+    out = tmp_path / "posts.csv"
+    result = export_table_to_csv("posts", out, conn=db_conn)
+
+    with out.open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    assert result.row_count == 3
+    assert len(rows) == 3
+    by_id = {r["x_post_id"]: r for r in rows}
+    assert by_id["x-1"]["text"] == "first post"
+    assert by_id["x-2"]["text"] == "second post, with, commas"
+    assert by_id["x-3"]["text"] == 'third post with "quotes"'
+
+
+# ---------------------------------------------------------------------------
+# Defensive guard — every registered allowlist refers to columns that exist
+# in the current schema. If Phase 5.5 adds new entries to ``default_columns``,
+# the migration MUST land BEFORE this test will pass.
+# ---------------------------------------------------------------------------
+def test_every_allowlist_column_exists_in_schema(db_conn) -> None:
+    for table, allowlist in ALLOWLISTS.items():
+        info = db_conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        existing = {row["name"] for row in info}
+        for col in allowlist["default_columns"] + allowlist["opt_in_columns"]:
+            assert col in existing, (
+                f"Allowlist for {table!r} references column {col!r} which "
+                f"does not exist in the current schema. Either the migration "
+                f"is missing or the allowlist entry was added too early."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Defensive guard — opt_in_columns and excluded_columns are mutually
+# exclusive within a single table.
+# ---------------------------------------------------------------------------
+def test_opt_in_and_excluded_columns_are_disjoint() -> None:
+    for table in ALLOWLISTS:
+        assert set(opt_in_columns(table)).isdisjoint(set(excluded_columns(table))), table
+
+
+# ---------------------------------------------------------------------------
+# Defensive guard — data_exports audit table receives a row per export.
+# ---------------------------------------------------------------------------
+def test_data_exports_audit_records_each_run(db_conn, tmp_path: Path) -> None:
+    _insert_post(db_conn)
+    export_table_to_csv("posts", tmp_path / "p.csv", conn=db_conn)
+    export_table_to_csv("posts", tmp_path / "p_opt.csv", include_opt_in=True, conn=db_conn)
+    export_database_to_json(tmp_path / "dump.json", conn=db_conn)
+
+    rows = db_conn.execute(
+        "SELECT kind, table_name, include_opt_in FROM data_exports ORDER BY id ASC"
+    ).fetchall()
+    kinds = [(r["kind"], r["table_name"], r["include_opt_in"]) for r in rows]
+    assert ("csv", "posts", 0) in kinds
+    assert ("csv", "posts", 1) in kinds
+    assert any(k == "json" for k, _t, _io in kinds)
