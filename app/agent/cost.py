@@ -95,30 +95,24 @@ def estimate_cost(
 def month_to_date_spend_usd(
     conn: sqlite3.Connection, *, now: datetime | None = None
 ) -> float:
-    """Sum ``agent_tool_calls.cost_usd`` + per-message cost for the current month.
+    """Sum per-message reconstructed cost for the current month.
 
-    The Phase 5.5 happy path logs per-call cost on ``agent_tool_calls.cost_usd``
-    AND aggregates per-message cost on ``agent_messages`` (input/output
-    tokens × rate snapshot). The MTD sum uses both surfaces.
+    Single source of truth: agent_messages.input_tokens/output_tokens ×
+    rate_snapshot_json. Rows without a snapshot fall back to model
+    default rates (defensive — same as get_model_rates).
+
+    The agent_tool_calls.cost_usd column is intentionally NOT summed in
+    here. It exists as a per-call cost stamp (e.g. for the future Haiku
+    lint pass which doesn't anchor to an agent_messages row), but the
+    lint cost is rounding against the §28.6 monthly cap and including
+    it here would silently double-count any future caller that anchors
+    a tool call to the same message that already recorded the round-
+    trip cost on agent_messages.
     """
     now = now or datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_start_iso = month_start.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Tool call costs (the explicit per-call surface).
-    tool_call_row = conn.execute(
-        """
-        SELECT COALESCE(SUM(cost_usd), 0.0) AS spend
-        FROM agent_tool_calls
-        WHERE created_at_utc >= ?
-        """,
-        (month_start_iso,),
-    ).fetchone()
-    tool_call_spend = float(tool_call_row["spend"] or 0.0)
-
-    # Per-message costs from rate_snapshot_json. Reconstruct cost from token
-    # counts × rate snapshot. Rows without a snapshot fall back to model
-    # default rates (defensive — same as get_model_rates).
     msg_rows = conn.execute(
         """
         SELECT input_tokens, output_tokens, model, rate_snapshot_json
@@ -146,7 +140,7 @@ def month_to_date_spend_usd(
         msg_spend += (in_tok / 1_000_000.0) * rate_in
         msg_spend += (out_tok / 1_000_000.0) * rate_out
 
-    return tool_call_spend + msg_spend
+    return msg_spend
 
 
 def get_monthly_ceiling_usd(conn: sqlite3.Connection) -> float:

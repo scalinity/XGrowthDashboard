@@ -84,43 +84,37 @@ class TestMonthlyCostCeiling:
     def test_under_ceiling_does_not_raise(self, db_conn):
         cost.check_ceiling_or_raise(db_conn, projected_call_cost_usd=0.05)
 
-    def test_over_ceiling_raises(self, db_conn):
-        # Pre-load tool calls totaling $26 in the current month.
+    def _preload_msg_spend_about(self, db_conn, target_usd: float) -> None:
+        """Insert one agent_messages row whose reconstructed cost ≈ target_usd.
+
+        Opus rates: input $15/M, output $75/M. We use input_tokens only
+        for a clean integer relationship: target_usd × 1M / 15 = tokens.
+        """
+        tokens = int(target_usd * 1_000_000 / 15.0)
         conv = db_conn.execute(
             "INSERT INTO agent_conversations (status) VALUES ('active')"
         ).lastrowid
-        msg = db_conn.execute(
-            "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'assistant', '')",
-            (conv,),
-        ).lastrowid
         db_conn.execute(
             """
-            INSERT INTO agent_tool_calls
-                (message_id, tool_name, arguments_json, status, cost_usd)
-            VALUES (?, 'analyze_post', '{}', 'success', 26.0)
+            INSERT INTO agent_messages
+                (conversation_id, role, content, model, input_tokens,
+                 output_tokens, rate_snapshot_json)
+            VALUES (?, 'assistant', '', 'claude-opus-4-7', ?, 0,
+                    '{"version":"test","input_per_million_usd":15.0,"output_per_million_usd":75.0}')
             """,
-            (msg,),
+            (conv, tokens),
         )
+
+    def test_over_ceiling_raises(self, db_conn):
+        # Pre-load per-message spend totaling ~$26 in the current month.
+        # Source of truth is agent_messages.input_tokens × rate_snapshot.
+        self._preload_msg_spend_about(db_conn, 26.0)
         with pytest.raises(cost.MonthlyCostCeilingExceeded):
             cost.check_ceiling_or_raise(db_conn, projected_call_cost_usd=0.01)
 
     def test_settings_override_lifts_ceiling(self, db_conn):
-        # Same $26 spend, but the settings override raises the cap to $50.
-        conv = db_conn.execute(
-            "INSERT INTO agent_conversations (status) VALUES ('active')"
-        ).lastrowid
-        msg = db_conn.execute(
-            "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'assistant', '')",
-            (conv,),
-        ).lastrowid
-        db_conn.execute(
-            """
-            INSERT INTO agent_tool_calls
-                (message_id, tool_name, arguments_json, status, cost_usd)
-            VALUES (?, 'analyze_post', '{}', 'success', 26.0)
-            """,
-            (msg,),
-        )
+        # Same ~$26 spend, but the settings override raises the cap to $50.
+        self._preload_msg_spend_about(db_conn, 26.0)
         db_conn.execute(
             """
             INSERT OR REPLACE INTO settings (key, value_json, note, updated_at)
@@ -128,6 +122,29 @@ class TestMonthlyCostCeiling:
             """
         )
         cost.check_ceiling_or_raise(db_conn, projected_call_cost_usd=0.01)
+
+    def test_tool_call_cost_usd_NOT_counted_in_mtd(self, db_conn):
+        """W3 regression: agent_tool_calls.cost_usd is intentionally NOT
+        summed into MTD anymore — it would silently double-count any
+        future caller that anchors a tool-call cost to the same message
+        whose round-trip already recorded the cost on agent_messages."""
+        conv = db_conn.execute(
+            "INSERT INTO agent_conversations (status) VALUES ('active')"
+        ).lastrowid
+        msg = db_conn.execute(
+            "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'assistant', '')",
+            (conv,),
+        ).lastrowid
+        # Stamp $100 on a tool-call row; MTD should still see $0.
+        db_conn.execute(
+            """
+            INSERT INTO agent_tool_calls
+                (message_id, tool_name, arguments_json, status, cost_usd)
+            VALUES (?, 'analyze_post', '{}', 'success', 100.0)
+            """,
+            (msg,),
+        )
+        assert cost.month_to_date_spend_usd(db_conn) == 0.0
 
 
 # ===========================================================================
