@@ -24,6 +24,8 @@ is opaque, but we hook a few well-known classes (`stMetric`, `stTitle`,
 
 from __future__ import annotations
 
+import html as _html
+
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -804,13 +806,21 @@ def citation_chip(
         bg = PALETTE["surface"]
         fg = PALETTE["phosphor"]
         extra = ""
+    # P510R-24: HTML-escape the agent-emitted record_type +
+    # id_or_filter before interpolating into the chip's innerHTML.
+    # Defense in depth: the agent's emit isn't user-controlled today,
+    # but stripping invalid record types or accepting future tool
+    # outputs (e.g., a view filter containing '<' or '&') would
+    # otherwise produce malformed HTML.
+    rt = _html.escape(record_type)
+    idf = _html.escape(id_or_filter)
     return (
         f"<span style='font-family: JetBrains Mono, monospace; "
         f"font-size:0.74rem; letter-spacing:0.06em; "
         f"background:{bg}; color:{fg}; padding:1px 7px; "
         f"border:1px solid {PALETTE['hairline']}; border-radius:2px; "
         f"margin: 0 0.15rem; {extra}'>"
-        f"〔{record_type} {id_or_filter}〕</span>"
+        f"〔{rt} {idf}〕</span>"
     )
 
 
