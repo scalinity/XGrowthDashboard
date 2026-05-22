@@ -172,6 +172,13 @@ def test_cta_question_with_substance_returns_three() -> None:
     assert ps.cta_strength_score(text, cta="ask") == 3
 
 
+def test_cta_one_word_generic_returns_zero() -> None:
+    """P58R-16: one-word generic CTAs ('thoughts?', 'agreed?') are 0."""
+    assert ps.cta_strength_score("Here's the thing.\nthoughts?", cta="ask") == 0
+    assert ps.cta_strength_score("Here's the thing.\nAgreed?", cta="ask") == 0
+    assert ps.cta_strength_score("Here's the thing.\nviews?", cta="ask") == 0
+
+
 def test_voice_fit_returns_none_when_no_profile() -> None:
     assert ps.voice_fit_score("anything", profile=None) is None
 

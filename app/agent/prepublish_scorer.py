@@ -365,6 +365,14 @@ def cta_strength_score(text: str, cta: str | None) -> int | None:
     # Question mark, imperative verb, or "let me know" / "DM me" pattern.
     if not last_line:
         return 0
+    # P58R-16 — a one- or two-word generic question ("thoughts?", "agreed?",
+    # "views?") is the textbook generic CTA. Treat as 0 rather than 1.
+    if re.search(
+        r"^(thoughts?|agreed|views?|opinions?|takes?)\??\.?$",
+        last_line.strip(),
+        re.IGNORECASE,
+    ):
+        return 0
     if "?" in last_line and len(last_line.split()) >= 3:
         return 3
     if re.search(r"\b(reply|dm|comment|share|book|join|sign up|grab)\b", last_line, re.IGNORECASE):
