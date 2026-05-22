@@ -84,6 +84,24 @@ def _assert_personality_lore_unreachable() -> None:
     )
 
 
+def _assert_coach_excludes_write_tools() -> None:
+    """Startup invariant (§28.23 Phase 5.10 access-control rule).
+
+    The §14.10 Coach is advice-only: it must NEVER call save_draft_*,
+    revise_draft, record_reply_target, score_replier_pool, process_
+    brain_dump, analyze_account, or audit_profile. The Coach tool
+    registry is the filtered copy ``coach.coach_tool_registry(AGENT_
+    TOOLS)``; this assertion verifies none of the forbidden names leak
+    through. If a future refactor adds a write tool to AGENT_TOOLS,
+    its name must be added to ``coach.COACH_FORBIDDEN_TOOLS`` in the
+    same commit so this assertion stays meaningful.
+    """
+    from app.agent import coach as _coach
+    from app.agent.tools import AGENT_TOOLS
+
+    _coach.assert_coach_excludes_write_tools(AGENT_TOOLS)
+
+
 def _bootstrap_session_state() -> None:
     if "db_initialized" not in st.session_state:
         conn = connect(DEFAULT_DB_PATH)
@@ -91,6 +109,7 @@ def _bootstrap_session_state() -> None:
         conn.close()
         _assert_publish_tools_unreachable()
         _assert_personality_lore_unreachable()
+        _assert_coach_excludes_write_tools()
         st.session_state.db_initialized = True
     st.session_state.setdefault("preselected_classify_post_id", None)
     st.session_state.setdefault("manual_entry_active_tab", None)
