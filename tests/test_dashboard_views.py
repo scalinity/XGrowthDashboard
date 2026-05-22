@@ -358,6 +358,8 @@ _PAGES = [
     ("7_Settings.py",               "Settings"),
     # Phase 5.10 / §14.9 — Brain Dump capture-first view.
     ("11_Brain_Dump.py",            "brain dump"),
+    # Phase 5.10 / §14.10 — Coach grounded-advice surface.
+    ("12_Coach.py",                 "coach"),
 ]
 
 
