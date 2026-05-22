@@ -1077,6 +1077,8 @@ Append-only message history per conversation.
 | `output_tokens`   | integer nullable    |                                                             |
 | `rate_snapshot_json` | text nullable    | per-token cost at time of generation, for retroactive cost auditing if pricing changes |
 | `resulted_in_published_post_id` | integer fk nullable | links to `posts.id` if this message led to a successful publish; ON DELETE SET NULL |
+| `confidence_label` | enum nullable     | `fact \| inference \| speculation \| mixed`. Dominant label parsed by §28.14 orchestrator from `<confidence>` tags in this message. NULL for non-analytical messages and `user`/`system` rows. Added in Phase 5.8 migration. |
+| `evidence_citations_json` | text nullable | JSON array of allowlisted `(record_type, record_id)` citations per §28.23 Coach citation discipline. Format: `[{"record_type": "post"|"v_lane_performance"|..., "record_id": int|str, "excerpt": str}]`. Citations that the agent emitted but failed allowlist validation are stripped before persistence; the count of stripped citations is logged to `agent_tool_calls.notes` of the message's parent tool call. NULL for messages that don't carry citations. |
 | `created_at_utc`  | datetime            |                                                             |
 
 ---
@@ -1364,6 +1366,107 @@ Notes:
 - Lore is hand-curated by Daniel via Settings → Growth Agent → Personality lore. Never auto-generated.
 - The agent CANNOT write to this table — no tool surface exposes it. Daniel-only edit.
 - A lore row with `invocation_count > personality_lore_overuse_threshold` (default 8) AND `last_invoked_at_utc > now() - 30 days` triggers a yellow "you're leaning hard on this bit" banner in the lore panel; doesn't disable the lore, just informs.
+
+---
+
+### `brain_dumps`
+
+Capture-first interface (distinct from conversational Agent Chat). Daniel pastes raw thinking; the agent processes into clarifying questions + structured candidate drafts. See §28.22.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `created_at_utc` | datetime | |
+| `raw_text` | text | the exact text Daniel pasted; immutable after insert |
+| `session_id` | text nullable | groups related dumps from one work session |
+| `status` | enum | `unprocessed`, `processing`, `processed`, `failed` |
+| `processed_at_utc` | datetime nullable | |
+| `clarifying_questions_json` | text nullable | JSON array of strings — questions the agent wants answered before drafting |
+| `candidate_drafts_json` | text nullable | JSON array of `{text, content_type, pillar, audience, cta, rationale}` — drafts the agent proposes from the dump |
+| `model_used` | text nullable | e.g. `claude-opus-4-7` |
+| `tokens_used` | integer nullable | |
+| `notes` | text nullable | Daniel's own annotations after processing |
+
+Indexes:
+
+```text
+index(status, created_at_utc desc)
+index(session_id) where session_id is not null
+```
+
+Notes:
+- `raw_text` is NEVER edited after insert. Daniel's annotations go in `notes`. If Daniel wants to refine the input, he creates a new row.
+- Failed processing (model returns bad JSON, Anthropic 5xx after bounded retry) sets `status = failed`; row is preserved; Daniel can re-run via the view's "Retry" button (creates a new processing attempt on the SAME row).
+- Drafts in `candidate_drafts_json` are NOT auto-saved to `agent_drafts`. Daniel reviews and explicitly promotes via the Brain Dump view → "Send to drafts" button, which calls `_save_draft_post` with the candidate's metadata.
+
+---
+
+### `account_research_reports`
+
+Strategic analysis of a target X account — posting patterns, positioning, reply-strategy entry points. Manual-paste workflow for MVP; V1.1+ adds X API auto-pull. See §28.24.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `target_handle` | text | e.g. `@some_user` (without the @ acceptable; normalize on insert) |
+| `target_url` | text nullable | full profile URL |
+| `target_display_name` | text nullable | |
+| `target_bio_snapshot` | text nullable | bio text at research time; manually pasted |
+| `target_recent_posts_text` | text nullable | concatenated recent post text Daniel pasted (one post per `---` separator); immutable after insert |
+| `created_at_utc` | datetime | |
+| `analysis_json` | text | JSON. Schema: `{"posting_patterns": {"cadence": str, "topics": [str], "common_hooks": [str]}, "positioning": {"primary_audience": str, "value_proposition": str, "voice_markers": [str]}, "reply_strategy": {"best_entry_topics": [str], "tone_to_match": str, "what_to_avoid": [str]}, "niche_alignment_with_daniel": {"overlap_score": 0-3, "rationale": str}}` |
+| `model_used` | text | |
+| `tokens_used` | integer | |
+| `session_id` | text nullable | groups research from same exploration session |
+| `linked_reply_target_id` | int nullable | FK to `reply_targets.id` if this research produced a queued reply target; ON DELETE SET NULL |
+| `notes` | text nullable | Daniel's annotations |
+
+Indexes:
+
+```text
+index(target_handle, created_at_utc desc)
+unique(target_handle, created_at_utc)
+```
+
+Notes:
+- A handle can have multiple reports over time — each is a point-in-time snapshot. Daniel can compare consecutive reports for the same handle to see how an account's positioning has shifted.
+- `target_recent_posts_text` is the only external content the analysis sees — wrapped in `--- BEGIN_UNTRUSTED_DATA ... ---` markers per the §28.2 prompt-injection-defense convention.
+- §28.20 replier-pool answers *who's worth replying to within this thread*. Account research answers *should I be in this account's orbit at all, and how*. Different questions, complementary tables.
+
+---
+
+### `profile_audits`
+
+Quarterly (or on-demand) comprehensive AI review of Daniel's X profile — bio + pinned post + recent posts + voice profile + niche definition — read as a unified surface. See §28.25.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `audited_at_utc` | datetime | |
+| `bio_snapshot` | text | bio at audit time, manually entered |
+| `pinned_post_id` | int nullable | FK to `posts.id` if the pinned post is tracked; else `pinned_post_text` carries it |
+| `pinned_post_text` | text nullable | text of pinned post at audit time; ground truth even if `posts` row drifts later |
+| `recent_posts_window_days` | integer | how many days of recent posts fed the audit (default `profile_audit_recent_posts_window_days = 30`) |
+| `recent_post_ids_json` | text | JSON array of `post_id` values that fed the audit |
+| `active_voice_profile_id` | int nullable | FK to `voice_profiles.id` at audit time |
+| `niche_problem_snapshot` | text nullable | `niche_problem` setting at audit time |
+| `niche_person_snapshot` | text nullable | `niche_person` setting at audit time |
+| `audit_json` | text | JSON. Schema: `{"overall_consistency_score": 0-3, "bio_alignment": {"score": 0-3, "gaps": [str], "suggestions": [str]}, "pinned_post_alignment": {"score": 0-3, "gaps": [str], "suggestions": [str]}, "recent_posts_themes": [str], "voice_consistency_with_profile": {"score": 0-3, "drift_observations": [str]}, "niche_coherence": {"score": 0-3, "overall_assessment": str}, "top_three_actions": [str]}` |
+| `model_used` | text | |
+| `tokens_used` | integer | |
+| `superseded_by_audit_id` | int nullable | back-reference once a later audit is run |
+| `daniel_notes` | text nullable | Daniel's post-audit notes — what he's acting on, what he's deferring |
+
+Indexes:
+
+```text
+index(audited_at_utc desc)
+```
+
+Notes:
+- No `is_active` flag. The "current" audit is implicitly the most recent row. Audits are append-only history.
+- Cadence is Daniel-decided: Settings → Growth Agent → Profile Audit panel surfaces "last audit was N days ago"; encourages quarterly but doesn't nag.
+- The audit reads `voice_profiles.is_active = true` row + settings + `recent_post_ids_json` — never touches `stir_testers` or `stir_conversion_events.qualitative_feedback`.
 
 ---
 
@@ -2420,6 +2523,14 @@ Turn raw activity into learning.
     * Reorder by priority
     * "Over-relied on" yellow banner per row when `invocation_count > personality_lore_overuse_threshold` AND `last_invoked_at_utc > now() - 30 days`
 
+12. **Profile audit** — see §28.25
+
+    * "Last audit: N days ago" or "No audits yet"
+    * "Run profile audit now" button — opens form prefilled with current bio + niche + active voice profile; Daniel pastes pinned-post text + (optional) recent-post window override
+    * Past audits table: `audited_at_utc`, `overall_consistency_score`, top three actions, expand → full `audit_json`
+    * Compare-to-previous diff view when ≥2 audits exist
+    * `coach_refuse_without_evidence` toggle (default `true`) — also controls Coach view (§14.10)
+
 ---
 
 # 14.8 Agent Chat — NEW
@@ -2546,6 +2657,132 @@ Agent: [opens confirmation flow — see §28.10]
 - New session starts fresh — no leakage from previous session into context.
 - Token usage visible per session and aggregated in Settings.
 - Direct keyboard shortcut to focus chat input (configurable).
+
+---
+
+# 14.9 Brain Dump — NEW
+
+### Purpose
+
+Capture-first surface, distinct from §14.8 Agent Chat (conversation-first). Daniel pastes raw thinking — half-formed ideas, observations, frustrations, fragments — without having to formulate a question. The agent processes the dump into clarifying questions + structured candidate drafts. Different UX mode: the user doesn't have to know what they want yet.
+
+The Brain Dump's job is to *capture before evaluation*. Filtering, ranking, and drafting happen after the dump is on the page. This is the only XGrowth surface that accepts raw text without a structural commitment first.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Brain Dump                                  [+ new dump]    │
+│ Last processed: 12 min ago     Pending: 1 unprocessed dump  │
+└─────────────────────────────────────────────────────────────┘
+
+[ Sidebar: past dumps list, newest first ]    [ Main: dump editor + results ]
+
+Raw text:
+┌──────────────────────────────────────────────────────────┐
+│ [textarea — multi-line, no character limit]              │
+│                                                            │
+│ kitchen-scanner missed the difference between ginger     │
+│ and soap again. third time this week. wondering if I     │
+│ should make Cook Mode forgive scanner errors with a     │
+│ "is this what you meant?" pass...                        │
+└──────────────────────────────────────────────────────────┘
+                                          [Process this dump]
+
+After processing:
+
+▼ Clarifying questions (3)
+  - Is the "is this what you meant?" pass a new feature or a fallback?
+  - How often does this happen vs. successful scans? (frame for value content)
+  - Want to share the actual ginger→soap example, or just the pattern?
+
+▼ Candidate drafts (4)
+  1. [stir × icp × personality]  Three ginger→soap misreads this week...
+  2. [build × icp × value]         Cook Mode is going to get a confirm pass...
+  3. [self × other × personality]  Building in public means logging the AI's stupidest moments...
+  4. [stir × icp × proof]          Day 47: kitchen scanner accuracy log...
+
+[ Send draft #1 to drafts ]  [ Discard ]  [ Edit & save ]
+```
+
+### Required components
+
+1. **Textarea + Process button.** No character limit. Submission creates a `brain_dumps` row with `status = unprocessed` and immediately fires the processing call. The textarea is bound to a `st.session_state` key scoped to the new-dump editor; cleared on successful save.
+
+2. **Past dumps sidebar.** Newest first. Each entry shows the first line of `raw_text` (truncated), the `status`, and `created_at_utc` relative time. Click to load into the main panel.
+
+3. **Processing UI.** Shows "Processing…" with a spinner while the agent call is in flight. On success, renders the two collapsible sections (clarifying questions + candidate drafts). On failure, renders a red banner with the error and a Retry button.
+
+4. **Send to drafts.** Each candidate draft has its own "Send to drafts" button. Clicking calls `_save_draft_post` (or `_save_draft_reply` if the candidate carries `target_post_url`) with the candidate's metadata. The candidate moves to a "sent" state in the dump's UI; the original `brain_dumps` row is unchanged (audit trail is preserved).
+
+5. **Annotation.** A `notes` textarea lets Daniel record what he did with the dump after the fact. Persists to `brain_dumps.notes`.
+
+### Acceptance criteria
+
+- Pasting raw text + clicking Process produces 1-5 candidate drafts within 30 seconds.
+- The dump's `raw_text` is never edited after insert; refining the input creates a new dump.
+- Candidate drafts inherit Daniel's active niche + voice profile + content-type axis (the agent sees the same system prompt).
+- Sending a candidate to drafts runs the full Phase 5.8 pipeline (IWH, dark-pattern lint, content-type validation, pre-publish scorer, repetition guard).
+- Failed dumps stay in the list with a Retry button; failures don't lose the raw text.
+
+---
+
+# 14.10 Coach — NEW
+
+### Purpose
+
+Dedicated *advice* surface. Conversational like §14.8 Agent Chat, but with a hard discipline: every analytical claim the coach makes is filtered through the §28.23 citation allowlist. Citations that don't resolve to a real `(record_type, record_id)` row in XGrowth's DB are *stripped* from the response, with the strip count surfaced under the message.
+
+§14.8 Agent Chat is open-ended — the agent can speculate, brainstorm, generate. The Coach view explicitly constrains itself to *grounded* advice. Different use case: you bring a strategic question, the coach answers with citations or refuses to answer.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Coach                                         [+ new ask]   │
+│ Citation discipline: ON — non-allowlisted citations stripped │
+└─────────────────────────────────────────────────────────────┘
+
+[ Sidebar: past coach sessions ]    [ Main: Q&A ]
+
+User: What's the strongest pattern in my last 30 days?
+
+Coach: Your `build × icp × value` posts are sitting in the
+"stronger" confidence label of v_lane_performance over the
+30-day window 〔post 142, post 156, post 161〕<confidence>fact</confidence>.
+The median engagement rate for that lane is 4.1% vs. your overall
+median of 1.7% 〔v_lane_performance row build/icp/value〕
+<confidence>fact</confidence>. Three things are doing the work:
+specificity (you cite the exact kitchen-scanner accuracy %),
+behind-the-scenes framing (real screenshots), and a tight ending
+ask 〔post 142, post 156〕<confidence>inference</confidence>.
+
+[1 citation removed: agent claimed post 998 supported a point;
+post 998 doesn't exist in your DB.]
+
+──────────────────────────────────────────────────────────────
+[ Compose your next question…                              ]
+```
+
+### Required components
+
+1. **Citation chips inline with claims.** Each citation rendered as a clickable chip; click opens the cited record in a side panel (post text + metrics for a `post` citation, view contents for a view-row citation).
+
+2. **Stripped-citation banner.** Under every coach message, if any citations were stripped, render a yellow note: "N citation(s) removed: <reason>." The reason is logged in `agent_tool_calls.notes` of the coach's underlying tool call.
+
+3. **Confidence label chips.** Same as §14.8 (green/blue/yellow/gray for fact/inference/speculation/mixed).
+
+4. **"Refuse if no evidence" mode.** Settings → Growth Agent → Coach gains a `coach_refuse_without_evidence` toggle (default `true`). When ON, the coach refuses to answer at all if it can't cite at least one real DB row to ground the answer — emits "I don't have data to answer this honestly" instead of a speculation-tagged guess.
+
+5. **Past sessions sidebar.** Mirror of §14.8.
+
+### Acceptance criteria
+
+- Citations link to real DB rows; broken citations are stripped before display.
+- Strip-count banner appears whenever ≥1 citation was removed.
+- `coach_refuse_without_evidence = true` produces refusals instead of un-cited claims.
+- The coach uses the SAME conversation infra as §14.8 (`agent_messages`, `agent_tool_calls`) — the discipline is a post-filter, not a separate model. `evidence_citations_json` persists the surviving citations on the `agent_messages` row.
+- The coach NEVER reads `stir_testers` or `stir_conversion_events.qualitative_feedback` (existing §28 read-scope rule applies).
 
 ---
 
@@ -2973,6 +3210,13 @@ No push notification required. A "Weekly review due" banner in the app is enough
     * Follower-velocity projection (`v_follower_velocity` view + §14.3 Progress velocity panel + `get_velocity_projection` agent tool) (§28.19).
     * Replier-pool candidate discovery (extended `reply_targets.source` enum value `replier_under_thread` + new `score_replier_pool` agent tool + §29.7 Reply Target Queue "Add replier pool" affordance) (§28.20).
     * Personality lore registry (`personality_lore` table + system-prompt Section 5 splice + Settings → Growth Agent → Personality lore panel) (§28.21).
+
+14. **Strategic Analysis Pack (Phase 5.10 — see §28.22 through §28.25):**
+
+    * Brain Dump capture-first view (`brain_dumps` table + new §14.9 Brain Dump view + `app/agent/brain_dump.py` + new agent tool `process_brain_dump`) (§28.22).
+    * Coach with citation allowlist (extension to `agent_messages.evidence_citations_json` + new §14.10 Coach view + `app/agent/coach.py` citation-allowlist post-filter + `coach_refuse_without_evidence` setting) (§28.23).
+    * Account Researcher (`account_research_reports` table + new agent tool `analyze_account` + Account Researcher tab in §29.7 Reply Target Queue + linkage to `reply_targets`) (§28.24).
+    * Profile Audit (`profile_audits` table + new agent tool `audit_profile` + Settings → Growth Agent → Profile Audit panel + compare-to-previous diff view) (§28.25).
 
 ### Can wait — V1.1+
 
@@ -3831,6 +4075,91 @@ Six features distilled from a tactical X-growth video (Jacob Edmunds, May 2026) 
 * [ ] Update `docs/IMPLEMENTATION_STATUS.md` with Phase 5.9 features + any deferred behaviors (V1.1+ programmatic replier scan, V1.1+ `v_content_type_x_pillar_performance` cross-pivot).
 * [ ] README addition: a short Phase 5.9 section describing the V/G/P/P axis and the niche definition as the agent's two new identity anchors.
 
+### Phase 5.10 — Strategic Analysis Pack (see §28.22 through §28.25 for full spec)
+
+Four features distilled from CreatorOS's strategic-analysis surfaces, ported into XGrowth's discipline. Brain Dump (capture-first), Coach (citation-allowlisted advice), Account Researcher (target-account analysis), Profile Audit (quarterly comprehensive review). The goal of this phase is to close the consolidation gap — after Phase 5.10, the workflows that previously required jumping to CreatorOS for "ideation," "advice," "research," or "review" all live in XGrowth.
+
+**Migration:**
+
+* [ ] Migration `migrations/013_strategic_analysis.sql`:
+
+  * [ ] Create `brain_dumps` table per §10 schema.
+  * [ ] Create `account_research_reports` table per §10 schema. FK `linked_reply_target_id` ON DELETE SET NULL.
+  * [ ] Create `profile_audits` table per §10 schema. FK `pinned_post_id` ON DELETE SET NULL; FK `active_voice_profile_id` ON DELETE SET NULL.
+  * [ ] Add column `agent_messages.evidence_citations_json` (text nullable) per §10. Backfill existing rows to NULL. (Note: `agent_messages.confidence_label` was already added in Phase 5.8 migration 011; this migration only adds `evidence_citations_json`.)
+  * [ ] Add settings rows: `coach_refuse_without_evidence = true`, `coach_citation_strip_log_threshold = 3` (log a Settings-visible "strip rate high" banner when avg strips/message > this over the last 20 messages), `brain_dump_max_candidate_drafts = 5`, `profile_audit_recent_posts_window_days = 30`, `profile_audit_cadence_reminder_days = 90`. Documented `note` per row.
+
+**Brain Dump (§28.22):**
+
+* [ ] Implement `app/agent/brain_dump.py`:
+
+  * [ ] `process(brain_dump_id) -> BrainDumpResult` — reads `raw_text`, calls Claude with `config/brain_dump_prompt.md` (returns structured `{clarifying_questions: [str], candidate_drafts: [{text, content_type, pillar, audience, cta, rationale}]}` JSON), writes results back to the row.
+  * [ ] Idempotent retry: re-running on the same `brain_dump_id` overwrites previous results in-place (no duplicate rows).
+  * [ ] Failure → `status = failed`; preserves `raw_text`; surfaces in UI with Retry button.
+* [ ] Create `config/brain_dump_prompt.md` — single-shot structured-output prompt. Returns at most `brain_dump_max_candidate_drafts` drafts. Each draft carries full content-type axis metadata per §28.17.
+* [ ] New agent tool `#18 process_brain_dump(brain_dump_id: int)` — exposed to the agent for chat-driven invocation ("process my last brain dump"). Click-handler path in §14.9 also calls the same backend function.
+* [ ] Build §14.9 Brain Dump view per the spec: textarea + Process button, past dumps sidebar, processing UI, candidate-drafts panel with per-draft "Send to drafts" button (calls `_save_draft_post`/`_save_draft_reply` with candidate metadata; runs full Phase 5.8 pipeline downstream), annotation textarea.
+* [ ] Wire `brain_dumps.status` transitions: `unprocessed` → `processing` → `processed`/`failed`. Status persisted on every transition.
+* [ ] Tests: round-trip of a synthetic dump → assert structured candidate drafts returned, each with valid `content_type`; promotion to draft fires the full pipeline including IWH + content-type validation.
+
+**Coach with citation allowlist (§28.23):**
+
+* [ ] Implement `app/agent/coach.py`:
+
+  * [ ] `extract_citations(message_text: str) -> list[Citation]` — regex-extract citations in the form `〔post 142〕`, `〔v_lane_performance row build/icp/value〕`, `〔experiment 4〕`, etc. (define the citation-format spec in the module docstring with examples).
+  * [ ] `validate_against_allowlist(citations: list[Citation]) -> tuple[list[Citation], list[StrippedCitation]]` — for each citation, verify the referenced record exists in the DB. Supported `record_type`s: `post` (id check against `posts`), `view_row` (well-formed view+filter), `experiment` (id check), `weekly_review`, `monthly_review`, `agent_draft`. Unknown record types are stripped with reason `unsupported_record_type`.
+  * [ ] `enforce(message_text: str) -> tuple[str, list[Citation], list[StrippedCitation]]` — orchestrates extraction + validation + (optionally) rewrites the message text to remove the stripped citation markers. Returns `(clean_text, surviving_citations, stripped_citations)`.
+* [ ] Wire into `app/agent/session.py`: when the message originates from the Coach view (mode flag carried through the session), run `enforce(...)` on every assistant message before persistence. Persist surviving citations to `agent_messages.evidence_citations_json`; log stripped count to `agent_tool_calls.notes` of the parent tool call.
+* [ ] Build §14.10 Coach view per the spec: same conversation infra as §14.8 Agent Chat with mode flag, citation chips inline, stripped-citation banner, confidence-label chips, refuse-without-evidence behavior.
+* [ ] Extend `coach_refuse_without_evidence = true` enforcement: when ON, if `enforce(...)` returns zero surviving citations AND the message contains analytical claims (regex per `app/agent/confidence_patterns.py`), the orchestrator replaces the message with the canonical refusal `"I don't have data in your dashboard to answer this honestly. {gap_description}"` BEFORE persistence.
+* [ ] Update `config/agent_system_prompt.md` with a new Section 9 (Coach mode) — gated by the mode flag, instructs the coach on the citation discipline.
+* [ ] Tests: synthetic coach response with valid + invalid citations → assert invalid stripped + count logged; refuse-without-evidence toggle ON + no citations → refusal message; OFF + no citations → message passes through with whatever confidence labels the agent emitted.
+
+**Account Researcher (§28.24):**
+
+* [ ] Implement `app/agent/account_research.py`:
+
+  * [ ] `analyze(target_handle, target_bio_text, target_recent_posts_text, daniel_niche_problem, daniel_niche_person) -> AccountResearchAnalysis` — single Claude call against `config/account_research_prompt.md`. Returns the structured `analysis_json` per §10 schema. External content wrapped in `--- BEGIN_UNTRUSTED_DATA ... ---` markers per the §28.2 prompt-injection-defense convention.
+  * [ ] Persistence wrapper that writes to `account_research_reports`.
+* [ ] Create `config/account_research_prompt.md` with the structured-output prompt + the `BEGIN_UNTRUSTED_DATA` wrap convention.
+* [ ] New agent tool `#19 analyze_account(target_handle, target_bio_text, target_recent_posts_text)` — exposed for chat invocation ("research @target for me").
+* [ ] Add Account Researcher tab to §29.7 Reply Target Queue:
+
+  * [ ] Form: target handle, bio paste, recent posts paste (one per `---`).
+  * [ ] Submit → `analyze_account` → results display with the full `analysis_json` schema rendered.
+  * [ ] "Generate reply target from this research" button — creates a `reply_targets` row prefilled with the research's recommended entry topics, links via `account_research_reports.linked_reply_target_id`.
+* [ ] Past research sidebar in the new tab — list by `target_handle`, newest first. Comparison view when ≥2 reports exist for the same handle (side-by-side diff of positioning + posting patterns over time).
+* [ ] Tests: round-trip a synthetic target → assert structured analysis returned; linkage to `reply_targets` creates valid row.
+
+**Profile Audit (§28.25):**
+
+* [ ] Implement `app/agent/profile_audit.py`:
+
+  * [ ] `audit(bio_text, pinned_post_text, recent_post_ids, active_voice_profile_id, niche_problem, niche_person) -> ProfileAuditAnalysis` — single Claude call against `config/profile_audit_prompt.md`. Returns the structured `audit_json` per §10 schema.
+  * [ ] Persistence wrapper that writes to `profile_audits` with all snapshot columns populated.
+* [ ] Create `config/profile_audit_prompt.md` with the structured-output prompt. Read scope explicit: `posts.text` only for `recent_post_ids`; never `stir_testers` or `stir_conversion_events.qualitative_feedback`.
+* [ ] New agent tool `#20 audit_profile(bio_text, pinned_post_text, recent_post_window_days)` — exposed for chat invocation ("audit my profile").
+* [ ] Settings → Growth Agent → Profile Audit panel:
+
+  * [ ] "Last audit: N days ago" header (or "No audits yet" empty state).
+  * [ ] "Run profile audit now" button → opens form prefilled with current bio + niche + active voice profile; Daniel pastes pinned-post text + (optional) recent-post window override.
+  * [ ] Past audits table: `audited_at_utc`, `overall_consistency_score`, top-three-actions excerpt; expand → full `audit_json` rendering.
+  * [ ] Compare-to-previous diff view: when ≥2 audits exist, side-by-side of scores + actions to show what shifted.
+  * [ ] Cadence reminder: when `now() - last_audit > profile_audit_cadence_reminder_days` (default 90), surface a yellow banner; doesn't auto-run.
+* [ ] Tests: round-trip a synthetic profile state → assert structured audit returned with all required fields; diff view renders correctly between two seeded audits.
+
+**QA across the pack:**
+
+* [ ] All existing tests pass (target ≥225 by end of Phase 5.10).
+* [ ] Ruff clean across all new modules.
+* [ ] Boot smoke: §14.9 Brain Dump and §14.10 Coach views render; Settings → Profile Audit panel renders empty-state CTA.
+* [ ] End-to-end: capture a brain dump → process → promote a candidate to a draft → assert full Phase 5.8 pipeline ran (IWH, content-type, scorer, repetition guard). Ask the Coach an analytical question → assert citation extraction + stripping + survivors persisted. Run an account researcher pass → assert report saved + reply-target link created. Run a profile audit → assert row saved + diff view works against a seeded prior audit.
+
+**Documentation:**
+
+* [ ] Update `docs/IMPLEMENTATION_STATUS.md` with Phase 5.10 features.
+* [ ] README addition: short Phase 5.10 section — what Brain Dump, Coach, Account Researcher, and Profile Audit each do; how this closes the CreatorOS consolidation gap.
+
 ### Phase 6 — V1.1: Data collection (deferred from MVP)
 
 * [ ] Configure xurl auth outside the app.
@@ -4663,6 +4992,198 @@ The agent has NO write access to `personality_lore`. No tool registry entry refe
 
 Auto-extracting would require an LLM to *guess* at recurring themes, which means hallucinated motifs would land in the prompt. Lore is identity-shaped; mis-extracted lore would warp drafts. Hand curation is a 5-minute Settings task once per quarter; auto-extraction would save those 5 minutes at the cost of an unbounded mis-attribution surface. Tradeoff is clearly worth it.
 
+### 28.22 Brain Dump
+
+Capture-first surface, distinct from §14.8 Agent Chat (conversation-first). The job of the Brain Dump is to absorb raw thinking *before* Daniel has to evaluate, structure, or commit to any particular draft. After the dump lands, the agent processes it into clarifying questions + structured candidate drafts; Daniel chooses what to promote into the drafts pipeline.
+
+**Why this is a separate view from §14.8:**
+
+§14.8 Agent Chat is conversational — it assumes a question. The Brain Dump assumes a mess. They are different cognitive modes, and trying to do "Brain Dump in chat" collapses both into a slot-machine experience where Daniel keeps asking "what should I post" without first surfacing what's actually in his head. The view's contract is: paste once, get structured candidates back, decide what to keep.
+
+**Pipeline (one Brain Dump processing pass):**
+
+1. Daniel pastes `raw_text` into §14.9. Inserts a `brain_dumps` row with `status = 'unprocessed'`.
+2. On Process click (or automatically on insert via `brain_dump_auto_process_enabled` setting — default `true`), `app/agent/brain_dump.py::process(brain_dump_id)` runs.
+3. Single Claude call against `config/brain_dump_prompt.md`. The prompt:
+   - Receives `raw_text` wrapped in the `--- BEGIN_UNTRUSTED_DATA ... ---` convention per §28.2.
+   - Receives the active niche definition + voice profile + content-type definitions + active personality lore as context.
+   - Returns structured JSON: `{clarifying_questions: [str, ≤5], candidate_drafts: [{text, content_type, pillar, audience, cta, rationale}, ≤brain_dump_max_candidate_drafts]}`.
+4. Results write to `clarifying_questions_json` + `candidate_drafts_json`; `status = 'processed'`, `processed_at_utc = now()`, `model_used` + `tokens_used` recorded.
+5. UI renders both sections. Per-candidate "Send to drafts" buttons invoke `_save_draft_post` (or `_save_draft_reply` if the candidate carries a `target_post_url`) with the candidate's metadata — full Phase 5.8 pipeline runs downstream (IWH preflight, dark-pattern lint, content-type validation, pre-publish scorer, repetition guard).
+
+**Immutability:**
+
+- `raw_text` is NEVER edited after insert. If Daniel wants to refine the input, he creates a new dump. This is intentional — Brain Dump is a *capture* surface; preserving the original mess is part of the audit trail for what the agent worked with.
+- `notes` is Daniel's annotation field, editable any time.
+
+**Failure handling:**
+
+- Bad JSON from model after bounded retry → `status = 'failed'`, error captured in `notes`. Retry button on the row creates a new processing attempt on the same row (overwrites prior failed-result fields).
+- Anthropic 5xx → bounded retry per existing §28.6 client policy; on exhaustion, same `failed` state.
+
+**Read scope (carried from §28):**
+
+Brain Dump prompt sees: `raw_text`, active niche, active voice profile, content-type definitions, active personality lore. It does NOT see: `stir_testers`, `stir_conversion_events.qualitative_feedback`, prior `agent_messages` content. Each dump is processed in isolation; there's no implicit memory across dumps.
+
+**Anti-feature:**
+
+- No auto-promotion. The agent never moves a candidate draft into `agent_drafts` without Daniel clicking. The Brain Dump's output is *proposals*, not commits.
+- No "regenerate" of candidate drafts on the same dump. Each processing run replaces all candidates atomically; partial-state UIs are confusing. If Daniel wants different candidates, he creates a new dump with refined `raw_text`.
+
+### 28.23 Coach with citation allowlist
+
+A second conversational surface (§14.10), structurally identical to §14.8 Agent Chat but with a hard discipline layered on: every analytical claim is filtered through a citation allowlist before persistence. Citations the agent emits that don't resolve to a real DB row are *stripped*; the strip count is surfaced under the message, and when `coach_refuse_without_evidence = true` is set, an uncited analytical message is replaced with a canonical refusal.
+
+**Why this is a separate view from §14.8:**
+
+§14.8 is open-ended: speculate, brainstorm, generate. The Coach explicitly constrains itself to *grounded* advice. Different cognitive contract: you bring a strategic question, you get an answer cited to your own data — or you get a refusal. No speculation surfacing as advice; no LLM-vague "consider posting more about your niche" without a DB row backing the recommendation.
+
+**Citation format (load-bearing — spec'd here, mirrored in `app/agent/coach.py` docstring):**
+
+Citations are inline tokens of the form `〔record_type id_or_filter〕`. Supported `record_type`s:
+
+| `record_type` | Example | Resolution |
+| --- | --- | --- |
+| `post` | `〔post 142〕` | `posts.id = 142` must exist |
+| `view_row` | `〔v_lane_performance row build/icp/value〕` | view row matching the filter must exist |
+| `experiment` | `〔experiment 4〕` | `experiments.id = 4` must exist |
+| `weekly_review` | `〔weekly_review 2026-W19〕` | `weekly_reviews.iso_week = '2026-W19'` must exist |
+| `monthly_review` | `〔monthly_review 2026-05〕` | (Phase 5.11) — same pattern |
+| `agent_draft` | `〔agent_draft 88〕` | `agent_drafts.id = 88` must exist |
+
+Any citation with an unsupported `record_type` or a non-resolvable id is stripped with reason logged in `agent_tool_calls.notes`.
+
+**Pipeline (one Coach message round-trip):**
+
+1. Daniel asks a question via §14.10 Coach view (mode flag set on the session).
+2. The orchestrator builds the system prompt with Section 9 (Coach mode) appended — instructs the coach on citation discipline.
+3. Agent responds with assistant text containing inline citations + `<confidence>` tags per §28.14.
+4. `app/agent/coach.py::enforce(message_text)` runs:
+   - Extract all `〔...〕` citations.
+   - Validate each against the allowlist (DB row existence check per `record_type`).
+   - Strip invalid ones; collect them into `stripped_citations`.
+   - Return `(clean_text, surviving_citations, stripped_citations)`.
+5. If `coach_refuse_without_evidence = true` AND `surviving_citations is empty` AND `clean_text` contains analytical claims (regex per §28.14's `confidence_patterns`), the orchestrator REPLACES `clean_text` with the canonical refusal `"I don't have data in your dashboard to answer this honestly. {gap_description}"` BEFORE persistence.
+6. Persist: `agent_messages.content = clean_text_or_refusal`, `agent_messages.evidence_citations_json = surviving_citations`, `agent_messages.confidence_label = parsed dominant label` (from §28.14). Log stripped count + reasons to `agent_tool_calls.notes` of the message's parent tool call.
+7. UI renders: clean text with citation chips, confidence-label chips, "N citation(s) removed" yellow banner if applicable.
+
+**Refusal behavior:**
+
+When the coach refuses, the refusal carries `confidence_label = 'fact'` (the FACT being "I can't answer this with the data I have") and zero citations. The refusal message includes a one-line `gap_description` — e.g. "you don't have enough posts in the build pillar yet" or "your last weekly review is from 2026-04-30; data after that hasn't been digested into a reviewable form."
+
+**Why a separate `evidence_citations_json` column rather than overloading `confidence_label`:**
+
+Confidence labels (§28.14) describe the *epistemic stance* of a claim. Evidence citations describe the *provenance* of a claim. They're orthogonal: a `fact`-labeled claim should have at least one citation (or it's a lie); an `inference`-labeled claim might have several citations (the inference draws on multiple rows); a `speculation` claim has zero citations (it's explicitly unsupported and the label tells Daniel so). Keeping them in separate columns lets the strip-and-refuse logic operate on citations without conflating with confidence semantics.
+
+**Read scope:**
+
+Coach prompt sees: full `posts` text, classifications, `v_lane_performance`, `v_content_type_performance`, `v_funnel_daily`, `experiments`, `weekly_reviews`, agent draft history. It does NOT see: `stir_testers`, `stir_conversion_events.qualitative_feedback`, `publish_confirmation_tokens`, or any raw `agent_tool_calls.arguments_json` for publish tools. The read scope is a hard constraint enforced at the tool-result level in `app/agent/session.py`.
+
+**Anti-feature:**
+
+- No auto-acted-on advice. The Coach NEVER calls `save_draft_*` or any write tool. It is advice-only. Daniel decides what to do with the advice; if he wants the agent to draft from it, he switches to §14.8 Agent Chat or §14.9 Brain Dump.
+
+### 28.24 Account Researcher
+
+Deep strategic read on a target X account: posting patterns, positioning, reply-strategy entry points, niche alignment with Daniel. Different question from §28.20 replier-pool — replier-pool answers *who's worth replying to within this thread*; Account Researcher answers *should I be in this account's orbit at all, and how?*
+
+**Manual-paste MVP (no scraping):**
+
+1. Daniel opens §29.7 Reply Target Queue → Account Researcher tab.
+2. Form fields:
+   - `target_handle` (required) — normalized to `@handle` on insert.
+   - `target_url` (optional).
+   - `target_display_name` (optional).
+   - `target_bio_snapshot` (recommended) — manually pasted.
+   - `target_recent_posts_text` (required) — manually pasted, one post per `---` separator. Daniel decides the count (typically last 10–20 posts).
+3. Click "Run analysis" → `app/agent/account_research.py::analyze(...)` runs.
+4. Single Claude call against `config/account_research_prompt.md`. External content wrapped per §28.2 convention. Returns structured JSON per §10 `account_research_reports.analysis_json` schema.
+5. Persist to `account_research_reports`. UI renders the structured analysis.
+
+**Linkage to Reply Target Queue (§29.7):**
+
+- "Generate reply target from this research" button — creates a `reply_targets` row prefilled with:
+  - `target_user = account_research_reports.target_handle`
+  - `agent_reasoning` populated from `analysis_json.reply_strategy`
+  - `pillar` / `audience` inferred from `analysis_json.niche_alignment_with_daniel.overlap_score`
+  - `source = 'agent_curated_account'` (Phase 5.9 enum value)
+- Bidirectional link: `account_research_reports.linked_reply_target_id` ← `reply_targets.id`.
+
+**Versioned history per handle:**
+
+- The schema permits multiple reports per `target_handle` over time. Each is a point-in-time snapshot.
+- The tab's per-handle history view renders consecutive reports side-by-side so Daniel can see how an account's positioning has shifted (the account starts as a kitchen-blogger, ten months later it's a meal-kit founder — research from then vs. now should show that).
+- The most recent report is the "current" one for tooling purposes (e.g., the "generate reply target" button uses the latest).
+
+**Read scope:**
+
+Account Researcher prompt sees: pasted `target_bio_snapshot`, `target_recent_posts_text` (wrapped as untrusted), Daniel's active niche definition (for the `niche_alignment_with_daniel` field). It does NOT see any of Daniel's posts or analytics — the analysis is *about the target*, not a comparison; alignment is computed from niche definition alone.
+
+**V1.1+ deferred:**
+
+Programmatic X API pull of bio + recent posts via xurl / direct API. Drops the paste step. Same tool signature gains optional `auto_pull: bool = false`.
+
+**Anti-feature:**
+
+- No scraping (already prohibited by §5 + §28).
+- No follower-tracking of target accounts — Daniel doesn't follow the account through Account Researcher. If he wants to engage, the linked `reply_targets` row drives the workflow.
+- No "rate this account 1-10." The structured `analysis_json` includes a `niche_alignment_with_daniel.overlap_score` (0-3, graduated-confidence-style), but it's a niche-alignment indicator, not an overall quality score for the account.
+
+### 28.25 Profile Audit
+
+Periodic comprehensive AI review of Daniel's X profile as a *unified surface*: bio + pinned post + recent posts + active voice profile + niche definition, read together. Different question from §28.16's "test against bio" — that one checks bio against niche definition; Profile Audit checks the whole presented surface against itself for *internal consistency*.
+
+**Audit composition:**
+
+The audit consumes a snapshot of Daniel's surface as it appears to a new follower:
+
+1. `bio_snapshot` — Daniel pastes (the X bio isn't auto-pulled at MVP; future V1.1+ direct API auto-pull).
+2. `pinned_post_text` — Daniel pastes (or `pinned_post_id` references a tracked post).
+3. `recent_post_ids_json` — last `profile_audit_recent_posts_window_days` (default 30) of posts from `posts` where `x_post_id IS NOT NULL`.
+4. `active_voice_profile_id` — the current `voice_profiles.is_active = true` row.
+5. `niche_problem_snapshot` + `niche_person_snapshot` — copied from current settings.
+
+All five feed `config/profile_audit_prompt.md`. Single Claude call returns the structured `audit_json` per §10.
+
+**Output structure (load-bearing):**
+
+```json
+{
+  "overall_consistency_score": 0-3,
+  "bio_alignment": {"score": 0-3, "gaps": [str], "suggestions": [str]},
+  "pinned_post_alignment": {"score": 0-3, "gaps": [str], "suggestions": [str]},
+  "recent_posts_themes": [str],
+  "voice_consistency_with_profile": {"score": 0-3, "drift_observations": [str]},
+  "niche_coherence": {"score": 0-3, "overall_assessment": str},
+  "top_three_actions": [str]
+}
+```
+
+The `top_three_actions` field is load-bearing — the audit is only useful if it produces concrete next steps. The prompt enforces "three specific actions, not generic advice." If the model can't produce three, it returns however many it can; UI handles 1-3.
+
+**Settings panel UI (§14.7 field 12):**
+
+- "Last audit: N days ago" or "No audits yet" header.
+- "Run profile audit now" button → opens a form prefilled with current bio (from `account_settings.bio_text_snapshot` or §14.7 field 1) + niche + active voice profile; Daniel pastes pinned-post text + (optional) recent-post window override.
+- Past audits table — `audited_at_utc`, `overall_consistency_score`, `top_three_actions` excerpt; expand → full `audit_json` rendering.
+- Compare-to-previous diff view when ≥2 audits exist — side-by-side of all sub-scores + actions. Shows what shifted between audits (e.g., "voice consistency dropped from 3 to 2 — drift observations now include 'sentence rhythm more uniform'").
+- Cadence reminder: when `now() - last_audit > profile_audit_cadence_reminder_days` (default 90), yellow banner in the panel. Doesn't auto-run.
+
+**Read scope:**
+
+Profile Audit prompt sees: `bio_snapshot`, `pinned_post_text`, post text from `recent_post_ids_json`, active voice profile JSON, niche settings. It does NOT see: `stir_testers`, `stir_conversion_events.qualitative_feedback`, other audits' history (each audit is a fresh independent read), `agent_messages` content.
+
+**Versioned, never-superseding:**
+
+- Audits are append-only history. No `is_active` flag; the "current" audit is implicitly the most recent.
+- `superseded_by_audit_id` is a back-reference set when a later audit is run — purely for joining; doesn't disable the prior row.
+- Daniel can annotate any past audit via `daniel_notes` — what he acted on, what he deferred.
+
+**Anti-feature:**
+
+- No auto-cadence. The cadence reminder banner surfaces; the audit itself is always Daniel-triggered.
+- No auto-acted-on suggestions. Audits produce `top_three_actions`; what Daniel does with them is Daniel's call. The audit never edits the bio or the pinned post or settings.
+
 ---
 
 ## 29. Reply Target Discovery
@@ -5318,6 +5839,26 @@ Deliberately rejected from the source video:
 - **Engagement-group / follow-for-follow / gain-train tactics.** Already prohibited via §5 + §28.2 #12; reaffirmed.
 - **Community / coaching-call upsell context from the source video.** Influencer monetization framing; ignored.
 - **Auto-extraction of personality lore from past posts.** §28.21 carves this out explicitly — lore is identity-shaped and mis-attribution would warp drafts; hand curation is a tiny tax for a meaningful safety floor.
+
+### Strategic Analysis Pack addition (2026-05-22) — §28.22 through §28.25
+
+Phase 5.10. Ports CreatorOS's four strategic-analysis surfaces into XGrowth's discipline, with the explicit goal of closing the consolidation gap — after this phase, the workflows that previously required jumping to CreatorOS (ideation, advice, target-account research, profile review) all live in XGrowth. Two new views (§14.9, §14.10), three new tables, one extension to `agent_messages`. No existing contracts changed.
+
+84. **Brain Dump capture-first view (§28.22).** New `brain_dumps` table + §14.9 view + `app/agent/brain_dump.py` + tool `#18 process_brain_dump`. Distinct cognitive mode from §14.8 Agent Chat: capture-first instead of conversation-first. Raw text is immutable after insert; processing produces clarifying questions + ≤5 structured candidate drafts; promotion to actual drafts is explicit Daniel action that runs the full Phase 5.8 pipeline. (§10 `brain_dumps`, §14.9, §28.22, §25 Phase 5.10)
+
+85. **Coach with citation allowlist (§28.23).** Second conversational surface (§14.10) with hard discipline layered on §14.8: every analytical claim is filtered through a citation allowlist; invalid citations are stripped with strip-count surfaced; `coach_refuse_without_evidence = true` (default) produces canonical refusals instead of un-cited speculation. New column `agent_messages.evidence_citations_json`. Citation format `〔record_type id_or_filter〕` is load-bearing and spec'd in §28.23. (§10 `agent_messages.evidence_citations_json`, §14.10, §28.23, §25 Phase 5.10)
+
+86. **Account Researcher (§28.24).** New `account_research_reports` table + tool `#19 analyze_account` + Account Researcher tab inside §29.7 Reply Target Queue + bidirectional linkage to `reply_targets`. Manual-paste workflow for MVP; V1.1+ adds programmatic X API pull. Versioned history per handle lets Daniel see how a target account's positioning has shifted over time. Answers a different question from §28.20 replier-pool. (§10 `account_research_reports`, §28.24, §29.7 tab extension, §25 Phase 5.10)
+
+87. **Profile Audit (§28.25).** New `profile_audits` table + tool `#20 audit_profile` + Settings → Growth Agent → Profile Audit panel. Quarterly (or on-demand) comprehensive review of bio + pinned post + recent posts + active voice profile + niche as a unified surface; `top_three_actions` field is load-bearing; append-only history with compare-to-previous diff view. Cadence reminder banner at 90 days; never auto-runs. (§10 `profile_audits`, §14.7 field 12, §28.25, §25 Phase 5.10)
+
+Deliberately rejected from CreatorOS for this phase:
+
+- **Auto-processing of Brain Dump on insert without confirmation.** Could be added later as a setting (`brain_dump_auto_process_enabled`); MVP is explicit click to keep costs predictable and intent clear.
+- **Coach as a tool the agent can call from §14.8.** Considered, rejected — the Coach's discipline is a *mode*, not a *tool*. Mixing modes within one chat session breaks the citation contract. Separate view, separate session.
+- **Account Researcher auto-pull via scraping.** Already prohibited by §5; manual paste is the MVP path, X API direct is V1.1+.
+- **Profile Audit cadence as a cron.** §28.25 carves this out — Daniel-triggered only; cron would import the "anxiety dashboard" failure mode the spec exists to prevent.
+- **Coach allowed to call write tools.** §28.23 carves this out — the Coach is advice-only; it never calls `save_draft_*` or any state-changing tool. Different cognitive contract from §14.8 Agent Chat.
 
 [1]: https://docs.x.com/x-api/fundamentals/data-dictionary "Data Dictionary - X"
 [2]: https://docs.x.com/x-api/getting-started/about-x-api "About the X API - X"
