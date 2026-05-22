@@ -12,6 +12,8 @@ A local-first "weight-loss dashboard for X growth" that helps Daniel track daily
 > **Growth Agent addition (same day):** A Claude-powered Growth Agent has been added as a first-class component of the app. It drafts posts and replies, analyzes content, surfaces reply targets, and posts to X with explicit two-step confirmation. The agent is integrated throughout the existing views (Today, Next Rep, Content Performance, Weekly Review) and has a dedicated chat view at §14.8. The full agent specification — system prompt, tool functions, data model, confirmation flow, failure modes — is in §28. The existing Changelog has been renumbered to §29.
 >
 > **Reply Target Discovery addition (same day):** Replies are now treated as a first-class distribution surface, not generic daily reps. A reply is a small post inserted into someone else's attention pool; the comment-section audience is the real reader, not the target author. A new §29 codifies the workflow: candidate discovery, four-dimension scoring, deterministic recommended action, a dedicated Reply Target Queue view, integration with §28.4 agent tools #6 and #7, and a V1.1+ thread-classifier lint pass mirroring the §28.2 dark-pattern lint. The Changelog has been renumbered to §30; see item 68 for the full delta.
+>
+> **Scope expansion (2026-05-22) — long-form blogs as a Phase 6 first-class surface.** After Phases 5.8 through 5.11 closed the consolidation gap with Daniel's prior creator tool (CreatorOS), one capability remained out of XGrowth: long-form blog authoring. Phase 6 (§28.31 through §28.34, full checklist in §25 Phase 6) adds blogs as a first-class production surface — `blogs` / `blog_versions` / `blog_exports` / `blog_to_post_links` tables, two new views (§14.14 Blogs index, §14.15 Blog Editor), agent tools for blog ideation / outlining / drafting / editing, exports (Markdown / HTML / JSON / MDX), and bidirectional repurposing (X thread ↔ blog, with deterministic plagiarism floor). **The single-user local-tool scope clarification in §7.1 is unchanged** — blogs are produced locally, exported to disk, published externally on Daniel's blog platform (not by this app). This is NOT a scope expansion toward multi-user / cloud / packaging; it is a *content-production-surface* expansion within the same single-user-local thesis. **Project name consideration deferred to Daniel.** "X Growth Dashboard" remains accurate as the name describes the primary distribution thesis; blogs serve that thesis via repurposing. A rename to e.g. "Distribution Dashboard" or "Personal Distribution OS" is a one-line spec edit Daniel can make at his discretion; the implementation does not depend on it. See §30 items 93–97 for the full delta.
 
 ---
 
@@ -22,6 +24,12 @@ The dashboard is not a social media "analytics dashboard" in the generic sense. 
 The core job:
 
 > Make it obvious whether Daniel is doing the daily distribution reps, whether those reps are moving X growth over time, and whether any of that growth is converting into real Stir validation.
+
+**Phase 6 expansion (2026-05-22) clarifies the thesis's content-production boundary:**
+
+> XGrowth is the *distribution-and-validation system* for Daniel's growth. Phase 6 adds a *content-production surface* (blogs) that serves the distribution system via repurposing. Blogs land here because (a) keeping ideation, voice, niche, and personality lore unified across short-form X posts AND long-form essays gives the agent a single coherent identity to draft from; (b) bidirectional repurposing (X thread ↔ blog) belongs in the same app as the X workflow; (c) Daniel's prior blog tool (CreatorOS) is being retired into XGrowth specifically to eliminate the cross-app context-switch.
+>
+> What Phase 6 does NOT change: this is still a single-user local tool. Blogs are written locally, exported to disk, and published externally on Daniel's blog platform — the app itself never publishes a blog anywhere. Multi-user, cloud sync, blog-platform integrations are not on the roadmap; if any future suggestion implies them, refuse and point back to §7.1.
 
 The most important product decision: **separate distribution growth from product validation, and give them equal structural weight in the goal hierarchy.**
 
@@ -1682,6 +1690,154 @@ Notes:
 
 ---
 
+### `blogs`
+
+Long-form posts. Distinct production lifecycle from X posts: idea → outline → draft → edit → ready → exported → published_externally → archived. See §28.31. Each row is one blog; versioning lives in `blog_versions`.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `slug` | text unique | URL-safe slug for export; auto-generated from `title` on first save, editable. Forbidden chars rejected at write time. |
+| `title` | text | |
+| `subtitle` | text nullable | |
+| `current_body_markdown` | text | latest editor state; immutable past versions live in `blog_versions` |
+| `status` | enum | `idea`, `outlining`, `drafting`, `editing`, `ready`, `exported`, `published_externally`, `archived` |
+| `pillar` | text nullable | reuses §10 `post_classifications.pillar` taxonomy — blogs are pillar-classified just like X posts |
+| `audience` | text nullable | reuses `post_classifications.audience` |
+| `outline_markdown` | text nullable | the outline as a separate artifact — preserved through drafting so Daniel can compare draft to outline |
+| `seo_title` | text nullable | for export metadata |
+| `seo_description` | text nullable | for export metadata |
+| `seo_tags_json` | text nullable | JSON array of strings |
+| `external_url` | text nullable | populated once Daniel marks `published_externally`; the URL where the blog actually lives |
+| `external_published_at` | datetime nullable | |
+| `agent_assisted` | boolean default false | true when any version was AI-drafted; informational, used by §28.31 stats |
+| `voice_profile_id_at_draft` | int nullable | FK to `voice_profiles.id`; the active voice profile when drafting last ran. ON DELETE SET NULL. |
+| `niche_problem_snapshot` | text nullable | copy of `niche_problem` at first agent-draft event; freezes the identity context the blog was authored under |
+| `niche_person_snapshot` | text nullable | same for `niche_person` |
+| `target_length_words` | integer nullable | Daniel's intended length; informational, not a hard gate |
+| `actual_length_words` | integer | computed from `current_body_markdown` on each save |
+| `notes` | text nullable | Daniel's working notes, distinct from the blog body itself |
+| `created_at_utc` | datetime | |
+| `updated_at_utc` | datetime | updated on every save |
+
+Indexes:
+
+```text
+unique(slug)
+index(status, updated_at_utc desc)
+index(pillar) where pillar is not null
+index(external_published_at) where external_published_at is not null
+```
+
+Notes:
+- `current_body_markdown` is the *live* state — what the editor shows. Saves to this column also append a row to `blog_versions` so history is preserved. The two writes happen in one transaction.
+- The status enum is a state machine; transitions are enforced in `app/agent/blogs.py::transition_status` (e.g., can't jump `idea → published_externally` without passing through `ready` first). `archived` is reachable from any non-`idea` state.
+- A blog with `status = 'published_externally'` requires `external_url` populated.
+- Blogs read the same niche definition + voice profile + personality lore the X agent reads. Identity is unified across short-form and long-form by design.
+
+---
+
+### `blog_versions`
+
+Immutable timeline of every blog save. Inserts only — no UPDATE, no DELETE. The "current" version is whichever row has `is_current_for_blog = true` (exactly one per `blog_id`, enforced by partial unique index). Daniel can revert by setting an older version's `is_current_for_blog = true` in a single transaction that demotes the prior current row.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `blog_id` | integer fk | ON DELETE CASCADE |
+| `version_number` | integer | monotonically increasing per `blog_id`; starts at 1 |
+| `body_markdown` | text | the body at this version |
+| `body_text_hash` | text | sha256(body_markdown) — for detecting accidental no-op saves |
+| `title_at_version` | text | snapshot of `blogs.title` at this version |
+| `outline_markdown_at_version` | text nullable | snapshot of `blogs.outline_markdown` at this version |
+| `status_at_version` | text | snapshot of `blogs.status` at this version |
+| `created_by` | enum | `daniel`, `agent` — was this version produced by manual edit or an agent draft? |
+| `agent_message_id` | int nullable | FK to `agent_messages.id` if `created_by = 'agent'`; ON DELETE SET NULL |
+| `agent_action` | enum nullable | `outline`, `draft`, `edit_suggestion_applied`, `seo_metadata`; populated when `created_by = 'agent'` |
+| `daniel_revision_note` | text nullable | Daniel's optional one-line "why this revision" |
+| `confidence_label_at_version` | enum nullable | `fact \| inference \| speculation \| mixed` — dominant label of the agent-emitted version per §28.14. NULL for manual edits. |
+| `is_current_for_blog` | boolean | exactly one true per `blog_id` (partial unique index); revert is atomic in a single transaction |
+| `created_at_utc` | datetime | |
+
+Indexes:
+
+```text
+unique(blog_id, version_number)
+unique(blog_id) where is_current_for_blog = true
+index(blog_id, created_at_utc desc)
+```
+
+Notes:
+- A no-op save (where `body_text_hash` matches the current version's hash AND `outline_markdown` AND `title` AND `status` are unchanged) does NOT create a new version. This keeps the history meaningful — every row in `blog_versions` represents a real change.
+- Reverting to an older version creates a NEW version (with the older body but a new `version_number` and a `daniel_revision_note = "reverted to version N"`). Reverting is forward-only history; the older row's `is_current_for_blog` doesn't flip back.
+- `confidence_label_at_version` lets Daniel see at a glance which agent drafts were grounded vs. speculative — relevant when reverting between agent-drafted versions.
+
+---
+
+### `blog_exports`
+
+One row per export operation. Blogs are exported to disk; the row records what was exported, in what format, to what path, and what the resulting file's content hash is. See §28.33.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `blog_id` | integer fk | ON DELETE CASCADE |
+| `blog_version_id` | integer fk | the specific version that was exported; ON DELETE SET NULL |
+| `format` | enum | `markdown`, `html`, `json`, `mdx` |
+| `target_path` | text | absolute path on disk where the export landed |
+| `file_size_bytes` | integer | recorded at export time |
+| `content_sha256` | text | sha256 of the exported file's contents — for detecting later disk-side tampering or accidental overwrite |
+| `seo_metadata_included` | boolean | true when the export embedded `blogs.seo_title` / `seo_description` / `seo_tags_json` (frontmatter for Markdown/MDX, `<head>` tags for HTML, top-level JSON keys) |
+| `repurposing_links_included` | boolean | true when the export included a "Repurposing notes" footer summarizing linked X threads/posts (see `blog_to_post_links`) |
+| `exported_at_utc` | datetime | |
+| `daniel_notes` | text nullable | e.g. "for Substack" / "for personal site mirror" |
+
+Indexes:
+
+```text
+index(blog_id, exported_at_utc desc)
+index(format)
+index(exported_at_utc desc)
+```
+
+Notes:
+- Exports are append-only history. Re-exporting overwrites the file on disk but inserts a new `blog_exports` row.
+- `content_sha256` is the export's audit anchor — if Daniel suspects a file was overwritten or tampered with, the row's hash is the source of truth.
+- Export operations also write an `audit_logs` row per §28.30 (`event_category = 'export', event_type = 'blog_export_markdown'` etc.) so the audit log carries the full record alongside the typed `blog_exports` table.
+
+---
+
+### `blog_to_post_links`
+
+Bidirectional linkage between blogs and X posts when one is the repurposed form of the other. See §28.34.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `blog_id` | integer fk | ON DELETE CASCADE |
+| `post_id` | integer fk | ON DELETE CASCADE |
+| `direction` | enum | `blog_to_post` (blog written first, X post derived), `post_to_blog` (X post written first, blog expanded from), `parallel` (both authored at the same time from a shared idea) |
+| `relationship_kind` | enum | `thread_root`, `quote_excerpt`, `summary_post`, `teaser_with_link`, `derived_outline`, `companion_post` |
+| `notes` | text nullable | |
+| `created_at_utc` | datetime | |
+| `created_by` | enum | `daniel`, `agent` — who established the link? Agent-suggested links require Daniel confirmation before insert. |
+| `agent_message_id` | int nullable | FK to `agent_messages.id` if agent-suggested; ON DELETE SET NULL |
+
+Indexes:
+
+```text
+unique(blog_id, post_id, direction)
+index(blog_id)
+index(post_id)
+```
+
+Notes:
+- A blog can link to multiple posts (a 6-post X thread derived from one blog → 6 rows). A post can link to multiple blogs (rare but possible — e.g. a single X post that summarizes two related essays).
+- `direction` is *content provenance*, not workflow ordering — `blog_to_post` means "this X post's content comes from this blog," not "the blog was created first in the database."
+- The §28.29 inspiration plagiarism guard runs on agent-suggested repurposing transforms (blog → X thread or X post → blog) — high overlap between the source and the derived form is expected, but it gets surfaced and audit-logged.
+
+---
+
 ## 11. Computed views
 
 ### `v_account_daily`
@@ -1924,6 +2080,43 @@ latest_shipped_at_utc
 Notes:
 - `percent_shipped` and `percent_planned_shipped` are NULL when `items_total = 0` (a campaign with no items planned yet — common at `status = 'planning'`). UI handles the NULL state with "no items planned yet."
 - The view is read-only; campaign progress changes are driven by `campaign_items.status` transitions which fire from the manual-mode "Mark posted" click-handler + agent-draft promotion paths.
+
+---
+
+### `v_blog_pipeline`
+
+Per-blog pipeline state for §14.14 Blogs index. Rolls up `blogs` + `blog_versions` + `blog_exports` into one row per blog.
+
+Fields:
+
+```text
+blog_id
+title
+slug
+status
+pillar
+audience
+current_version_number
+total_version_count
+last_edited_at_utc                   # max(blog_versions.created_at_utc)
+last_edited_by                       # daniel | agent (from latest blog_versions row)
+days_since_last_edit
+agent_assisted
+latest_confidence_label              # last agent-version confidence_label_at_version
+actual_length_words
+target_length_words
+length_gap_words                     # actual - target; NULL when target_length_words is NULL
+export_count
+last_exported_at_utc
+last_export_format
+external_url
+external_published_at
+days_in_current_status
+```
+
+Notes:
+- `days_in_current_status` is computed from the most recent `blog_versions` row whose `status_at_version` equals the blog's current `status` — i.e., when did this blog enter its current state? Stale states (a blog stuck in `drafting` for 90 days) become visible.
+- `latest_confidence_label` is informational; a `speculation`-labeled latest version doesn't BLOCK anything by itself, but the editor surfaces it as a yellow chip prompting "do you want to revise before exporting?"
 
 ---
 
@@ -3200,6 +3393,150 @@ Transforms:
 
 ---
 
+# 14.14 Blogs — NEW
+
+### Purpose
+
+Index view for all blogs in any status. Lists blog rows with their pipeline state, length vs. target, last-edited info, and export history. The entry point into long-form authoring; the actual writing happens in §14.15 Blog Editor.
+
+Pillar identity is unified: the agent's niche definition, voice profile, voice samples, and personality lore all feed blog drafting exactly as they feed X drafting. The point of putting blogs in XGrowth instead of a separate tool is precisely this unified identity surface.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Blogs                                       [+ new blog]    │
+│ Idea: 3   Outlining: 2   Drafting: 4   Editing: 1   Ready: 2 │
+│ Exported: 7   Published: 4   Archived: 2                    │
+└─────────────────────────────────────────────────────────────┘
+
+Filter:  [all] [idea] [outlining] [drafting] [editing] [ready] [exported]
+Sort:    [last edited] [stale longest] [length-gap] [pillar]
+
+┌──────────────────────────────────────────────────────────────┐
+│ ▶ Kitchen scanner UX from three failed dinner attempts       │
+│   stir × icp   drafting   1,247 / 1,800 words   −553         │
+│   v.4   ●agent  edited 2h ago   ⚠ speculation                │
+│   [Open]                                                     │
+├──────────────────────────────────────────────────────────────┤
+│ ▶ Why I'm building Stir before neuro-oncology                │
+│   self × icp   ready    2,011 / 2,000 words   +11            │
+│   v.7   ●daniel  edited 3d ago   ● fact                      │
+│   [Open]  [Export ↓]                                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Required components
+
+1. **Status counters strip.** All eight statuses with counts. Click a count to filter the list.
+2. **Filter dropdown + sort selector.** Filter is multi-select status; sort options are last-edited, stale-longest (`days_in_current_status` desc), length-gap (largest gap first), pillar.
+3. **Blog row.** Shows title, pillar × audience chips, status badge, length vs. target, current version + author chip (daniel/agent), last-edited relative time, latest confidence chip. Click "Open" → §14.15 Blog Editor.
+4. **"+ new blog" form.** Inline form (not modal): title (required), pillar (optional), audience (optional), target_length_words (optional). Creates blog with `status = 'idea'`; navigates to §14.15.
+5. **Per-row Export.** Only visible for `status IN ('ready', 'exported', 'published_externally')`. Opens the export dialog inline.
+6. **Stale-state highlight.** Rows with `days_in_current_status > blog_stale_status_warning_days` (default 21) get a yellow keyline indicating the blog's been sitting in its current state too long.
+
+### Acceptance criteria
+
+- Filter and sort persist in `st.session_state['blogs_filter']` and `['blogs_sort']` across navigation.
+- Status counters compute from `v_blog_pipeline` group-by; the strip totals match the filter results.
+- Length-gap sort puts the largest absolute gap first (positive or negative); ties broken by last-edited.
+- Stale-state highlight uses the configurable threshold, not a hardcoded number.
+- "+ new blog" creates the blog AND navigates atomically — no half-created rows if navigation fails.
+
+---
+
+# 14.15 Blog Editor — NEW
+
+### Purpose
+
+The actual writing surface. One blog open at a time. Three panels: outline (left), body editor (center), agent + metadata + version history (right). Status transitions, agent draft/edit/SEO actions, and exports all happen here.
+
+### Layout
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Blog Editor   ← Back to Blogs                              │
+│ Title: Kitchen scanner UX from three failed dinner attempts │
+│ Status: [drafting ▼]   1,247 words   v.4   2h ago          │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────┬─────────────────────────────────┬──────────────┐
+│ Outline     │ Body                            │ Agent panel  │
+│             │                                 │              │
+│ ## Hook     │ Three failed dinner attempts    │ Voice profile│
+│ Three fails │ before 7pm taught me more       │ active: ✓    │
+│             │ about Cook Mode UX than any...  │              │
+│ ## Frame    │                                 │ Niche: ✓     │
+│ Scanner err │ ## The pattern                  │ Lore: 3 act. │
+│             │                                 │              │
+│ ## Pattern  │ ...                             │ [Outline]    │
+│ misreads    │                                 │ [Draft]      │
+│             │                                 │ [Suggest    │
+│ ## Lesson   │                                 │  edits]      │
+│ confirm pass│                                 │ [SEO]        │
+│             │                                 │              │
+│             │                                 │ Versions     │
+│             │                                 │ ▼ v.4 ●agent │
+│             │                                 │ ▷ v.3 ●daniel│
+│             │                                 │ ▷ v.2 ●agent │
+│             │                                 │ ▷ v.1 ●daniel│
+│             │                                 │              │
+│             │                                 │ Linked to:   │
+│             │                                 │ ◆ post 142   │
+│             │                                 │ ◆ post 156   │
+└─────────────┴─────────────────────────────────┴──────────────┘
+
+  [Save]  [Discard changes]   [Export ▾]   [Repurpose to X ▾]
+```
+
+### Required components
+
+1. **Outline panel (left).** Editable Markdown. Saving the outline writes to `blogs.outline_markdown` and appends a `blog_versions` row with `status_at_version = current status` and `agent_action = NULL` if Daniel-edited.
+
+2. **Body editor (center).** Editable Markdown. Saving writes `blogs.current_body_markdown` and appends a `blog_versions` row in the same transaction. No-op saves (hash unchanged) skip the version-append.
+
+3. **Status selector.** Dropdown showing the current status; changing it triggers `app/agent/blogs.py::transition_status(blog_id, new_status)` which validates the transition is legal. Illegal transitions show an inline error; legal ones land immediately and write a version row.
+
+4. **Agent panel (right) — actions.**
+    - **Outline** — calls `outline_blog` tool (§28.32). Prefills outline panel with the agent's structured outline; Daniel can edit before saving. Agent run produces a `blog_versions` row with `created_by = 'agent', agent_action = 'outline'`.
+    - **Draft** — calls `draft_blog` tool with the current outline as input. Prefills the body panel with the agent's draft; Daniel reviews/edits before saving. Agent run produces a `blog_versions` row with `agent_action = 'draft'`.
+    - **Suggest edits** — calls `suggest_blog_edits` tool with the current body. Returns a structured list of inline edit suggestions (per-paragraph). Each suggestion has Accept / Reject / Modify buttons; accepted edits write to the body atomically.
+    - **SEO** — calls `generate_blog_seo_metadata` tool. Populates `seo_title`, `seo_description`, `seo_tags_json`.
+    - All four actions respect §28.6 cost cap and emit `<confidence>` tags parsed per §28.14.
+
+5. **Agent panel — identity readout.**
+    - Active voice profile (id + last-regenerated date).
+    - Active niche (problem + person, truncated).
+    - Active personality lore count.
+    - All three are live-bound to settings; changing voice profile or niche in Settings updates the readout on the next rerun.
+
+6. **Agent panel — version history.**
+    - List of `blog_versions` rows for this blog, newest first. Each row shows `version_number`, `created_by` chip, relative time, `agent_action` if any, `confidence_label_at_version` if any.
+    - Click a version → side-by-side diff with current.
+    - "Revert to this version" button → creates a new version row with the older body and `daniel_revision_note = "reverted to v{n}"`; current pointer moves to the new row.
+
+7. **Agent panel — linked posts.**
+    - List of `blog_to_post_links` rows for this blog. Each shows direction + relationship_kind + post text excerpt.
+    - "Add link" → inline form picks a `posts.id` and `relationship_kind`.
+
+8. **Footer actions.**
+    - **Save** — atomic write of `current_body_markdown` + `outline_markdown` + new `blog_versions` row. Disabled when no changes.
+    - **Discard changes** — reloads from DB.
+    - **Export ▾** — opens export dialog with Markdown / HTML / JSON / MDX choice + target-path picker + "include SEO metadata" + "include repurposing notes" toggles. On confirm, writes the file to disk, inserts a `blog_exports` row, writes an `audit_logs` row, transitions the blog to `exported` if it was `ready`.
+    - **Repurpose to X ▾** — opens a sub-menu: "Thread from sections" / "Single post summary" / "Teaser + link" — each calls `repurpose_blog_to_x` (§28.34) and routes the output into the regular drafts pipeline.
+
+### Acceptance criteria
+
+- No-op saves do NOT create a new `blog_versions` row.
+- Status transition validation rejects illegal transitions with an inline error; legal transitions write a version row.
+- Reverting to an older version creates a forward-moving version row (does not retroactively flip `is_current_for_blog`).
+- All four agent actions emit `<confidence>` tags; the parsed dominant label persists on the resulting `blog_versions.confidence_label_at_version`.
+- Exports write both the file AND the `blog_exports` row AND the `audit_logs` row in the same transaction-or-fail boundary; partial states are not possible.
+- Repurpose-to-X outputs flow through the full Phase 5.8 drafts pipeline (IWH, dark-pattern lint, content-type validation, pre-publish scorer, repetition guard, AND the plagiarism guard per §28.29).
+- Identity readout is correct after a voice-profile regeneration or niche edit — no cached state.
+
+---
+
 ## 15. Manual entry workflows
 
 **Manual entry is the MVP default**, not the fallback. Every form below is a first-class workflow.
@@ -3639,6 +3976,15 @@ No push notification required. A "Weekly review due" banner in the app is enough
     * Content Calendar (new §14.11 view + integration with `campaign_items.planned_for_date` + scheduled-drafts surface) (§28.28).
     * Inspiration library (`saved_inspiration_posts` + `inspiration_transforms` tables + new §14.13 Inspiration Library view + `app/agent/inspiration.py` with seven transform modes + deterministic plagiarism guard + new tools `transform_inspiration` and `score_inspiration_plagiarism_risk`) (§28.29).
     * Comprehensive audit logs (`audit_logs` table + write-through from every state-changing path + Settings → Audit log viewer) (§28.30).
+
+16. **Long-form blogs (Phase 6 — see §28.31 through §28.34):**
+
+    * Blog production tables (`blogs` + `blog_versions` + `blog_exports` + `blog_to_post_links`) and `v_blog_pipeline` view (§28.31).
+    * Two new views: §14.14 Blogs index + §14.15 Blog Editor (3-panel layout: outline / body / agent + version history).
+    * Blog drafting agent tools: `#25 outline_blog`, `#26 draft_blog`, `#27 suggest_blog_edits`, `#28 generate_blog_seo_metadata` (§28.32).
+    * Exports: Markdown / HTML / JSON / MDX with optional SEO frontmatter and optional repurposing-notes footer (§28.33).
+    * Bidirectional X ↔ blog repurposing via `#29 repurpose_blog_to_x` and `#30 repurpose_x_to_blog_idea`; outputs flow through full Phase 5.8 drafts pipeline AND the §28.29 plagiarism guard (§28.34).
+    * Unified identity: same niche definition + voice profile + voice samples + personality lore feed blog drafting as feed X drafting. The point of this phase.
 
 ### Can wait — V1.1+
 
@@ -4682,7 +5028,114 @@ Five features: Campaigns (with items + retrospective), Monthly AI reviews (along
 * [ ] Append a new phase block to `docs/index.html` for Phase 5.11 per the CLAUDE.md "Implementation status doc" instructions (do NOT append to `docs/IMPLEMENTATION_STATUS.md` — it's frozen at Phase 5.8).
 * [ ] README addition: short Phase 5.11 section — what Campaigns, Monthly Reviews, Calendar, Inspiration Library, and Audit Logs each do; how this leaves only blogs (Phase 6) as the final consolidation step.
 
-### Phase 6 — V1.1: Data collection (deferred from MVP)
+### Phase 6 — Long-form blogs (see §28.31 through §28.34 for full spec)
+
+Adds long-form blog authoring as a first-class production surface. Five workstreams: schema (`blogs`/`blog_versions`/`blog_exports`/`blog_to_post_links` + `v_blog_pipeline`), §14.14 Blogs index, §14.15 Blog Editor (three-panel: outline / body / agent + version history), blog-drafting agent tools (outline, draft, edit suggestions, SEO metadata), exports (Markdown / HTML / JSON / MDX), bidirectional X↔blog repurposing. Unified identity layer: same niche + voice profile + voice samples + personality lore feed blog drafting as feed X drafting.
+
+**Scope reminders (carried from §0 + §7.1 + §1):**
+
+* Blogs are written locally, exported to disk, published externally on Daniel's blog platform. The app NEVER publishes a blog anywhere.
+* No multi-user, no cloud sync, no blog-platform integrations (no Substack publish API, no Ghost API, no WordPress API). Refuse if asked.
+* `external_url` and `external_published_at` are MANUAL fields — Daniel updates them after he publishes externally; the app doesn't fetch them.
+
+**Migration:**
+
+* [ ] Migration `migrations/016_blogs.sql` (slot 015 was consumed by `015_growth_layer_qol.sql` during Phase 5.11; spec corrected on 2026-05-22 before Phase 6 work began):
+
+  * [ ] Create `blogs` table per §10 schema. Unique `slug` index. Status enum CHECK constraint `IN ('idea', 'outlining', 'drafting', 'editing', 'ready', 'exported', 'published_externally', 'archived')`. FK `voice_profile_id_at_draft` ON DELETE SET NULL.
+  * [ ] Create `blog_versions` table per §10 schema. FK `blog_id` ON DELETE CASCADE. Unique `(blog_id, version_number)`. Partial unique index on `(blog_id) where is_current_for_blog = true`. FK `agent_message_id` ON DELETE SET NULL.
+  * [ ] Create `blog_exports` table per §10 schema. FK `blog_id` ON DELETE CASCADE. FK `blog_version_id` ON DELETE SET NULL. Format CHECK `IN ('markdown', 'html', 'json', 'mdx')`.
+  * [ ] Create `blog_to_post_links` table per §10 schema. Both FKs ON DELETE CASCADE. Unique `(blog_id, post_id, direction)`. FK `agent_message_id` ON DELETE SET NULL.
+  * [ ] Create `v_blog_pipeline` view per §11.
+  * [ ] Add settings rows: `blog_stale_status_warning_days = 21`, `blog_default_target_length_words = 1500`, `blog_export_default_directory = 'data/blog_exports/'`, `blog_repurposing_plagiarism_check_enabled = true`, `blog_agent_max_draft_iterations = 3` (informational; per §28.32 calibration). Documented `note` per row.
+  * [ ] Log a `migration_applied_016` row to `audit_logs` per §28.30.
+
+**Schema discipline (§28.31):**
+
+* [ ] Implement `app/agent/blogs.py`:
+
+  * [ ] `create_blog(title, pillar=None, audience=None, target_length_words=None) -> Blog` — generates `slug` from title (lowercase, kebab-case, ASCII-only, suffixed with `-{id}` on collision), inserts row with `status = 'idea'`, version 1 with `body_markdown = ''`.
+  * [ ] `save_blog(blog_id, body_markdown, outline_markdown=None, title=None, status=None, created_by, agent_message_id=None, agent_action=None, daniel_revision_note=None) -> BlogVersion | None` — single transaction: writes `blogs.current_body_markdown` + appended fields, then appends `blog_versions` row, then demotes prior `is_current_for_blog` and promotes new. No-op detection: skip version row if `body_text_hash` AND `outline_markdown_at_version` AND `title_at_version` AND `status_at_version` all match the current version. Returns the new version row OR None on no-op.
+  * [ ] `transition_status(blog_id, new_status) -> bool` — validates the transition against the state machine (defined in module docstring); writes a version row capturing the status change; rejects illegal transitions with a structured error.
+  * [ ] `revert_to_version(blog_id, version_id, daniel_revision_note) -> BlogVersion` — creates a NEW version row with the older body but a new `version_number`; sets `is_current_for_blog`; logs `daniel_revision_note = 'reverted to version N'` AND the user's optional note.
+* [ ] State machine (define in module docstring + enforce in `transition_status`):
+
+  ```
+  idea          → outlining | archived
+  outlining     → drafting | idea | archived
+  drafting      → editing | outlining | archived
+  editing       → ready | drafting | archived
+  ready         → exported | editing | archived
+  exported      → published_externally | ready | archived
+  published_externally → archived
+  archived      → (terminal; no forward transitions)
+  ```
+
+* [ ] Tests: no-op save doesn't create a version row; illegal status transitions rejected; revert creates forward-moving history; concurrent saves (rare in single-user but possible mid-streaming) handle the version_number monotonic increment correctly.
+
+**Blog drafting agent tools (§28.32):**
+
+* [ ] Implement `app/agent/blog_drafting.py`:
+
+  * [ ] `outline_blog(blog_id, daniel_notes=None) -> OutlineResult` — single Claude call against `config/blog_outline_prompt.md`. Reads `blogs.title`, `pillar`, `audience`, `notes`, active niche, voice profile, voice samples, personality lore. Returns structured outline (Markdown headings + one-sentence-per-section). Writes via `save_blog(... agent_action='outline')`.
+  * [ ] `draft_blog(blog_id, target_length_words=None) -> DraftResult` — single Claude call against `config/blog_draft_prompt.md`. Reads outline + same identity context. Returns full draft body Markdown. Writes via `save_blog(... agent_action='draft')`.
+  * [ ] `suggest_blog_edits(blog_id) -> EditSuggestions` — single Claude call against `config/blog_edit_suggestions_prompt.md`. Reads current body. Returns structured `[{paragraph_anchor: str, suggested_replacement: str, rationale: str, confidence_label: str}]`. Does NOT auto-apply; UI surfaces with Accept / Reject / Modify.
+  * [ ] `generate_blog_seo_metadata(blog_id) -> SeoMetadata` — single Claude call against `config/blog_seo_prompt.md`. Returns `{seo_title, seo_description, seo_tags}`. Writes to `blogs.seo_title` etc. directly (no version row — SEO metadata is sidecar, not content).
+* [ ] New agent tools `#25 outline_blog`, `#26 draft_blog`, `#27 suggest_blog_edits`, `#28 generate_blog_seo_metadata` — all in the registered agent tool table (NOT internal-only).
+* [ ] All four tools emit `<confidence>` tags per §28.14; the orchestrator parses + persists the dominant label on `blog_versions.confidence_label_at_version`.
+* [ ] Tests: round-trip a synthetic blog idea through outline → draft → edit suggestions → SEO; assert version rows created with correct `agent_action` and `confidence_label_at_version`; assert SEO writes don't create version rows.
+
+**Blog editor (§14.15) wiring:**
+
+* [ ] Three-panel layout: outline (left, editable Markdown), body (center, editable Markdown), agent panel (right). All three live-bound to `st.session_state` per Streamlit discipline.
+* [ ] Identity readout in agent panel (voice profile, niche, lore count) — bound to a fresh DB read each rerun (no cached state).
+* [ ] Four agent action buttons (Outline / Draft / Suggest edits / SEO) wired to the four tools above; each click runs the tool synchronously, surfaces the result, and on Accept writes via `save_blog(...)`.
+* [ ] Version history list — clicking a version opens a side-by-side diff (use `difflib.unified_diff` or similar). Revert button creates a new version per `revert_to_version(...)`.
+* [ ] Linked posts list — read from `blog_to_post_links`; "Add link" form picks a `posts.id` + `relationship_kind`.
+* [ ] Status selector — dropdown bound to `transition_status(...)`; illegal transitions surface inline error.
+* [ ] Footer actions: Save (disabled when no changes), Discard, Export ▾, Repurpose to X ▾.
+
+**Blog exports (§28.33):**
+
+* [ ] Implement `app/agent/blog_exports.py`:
+
+  * [ ] `export(blog_id, format, target_path, include_seo_metadata=True, include_repurposing_links=False) -> BlogExport` — atomic: render content according to format, write file to `target_path`, compute `content_sha256`, insert `blog_exports` row, log to `audit_logs`. If any step fails, the entire op fails — no partial state.
+  * [ ] Format renderers:
+    * `markdown` — body Markdown with optional YAML frontmatter (when `include_seo_metadata = True`): `title`, `description`, `tags`, `slug`, `pillar`, `audience`, `created_at_utc`.
+    * `html` — Markdown rendered to HTML via `markdown-it-py` or similar; wrapped in minimal `<html><head>` (with `<meta name="description">`, `<meta name="keywords">` when SEO included) `<body>`.
+    * `json` — `{title, slug, status, body_markdown, body_html, seo: {...}, pillar, audience, created_at_utc, exported_at_utc, version_number}`.
+    * `mdx` — same as Markdown but with MDX-compatible frontmatter (e.g. `export const meta = {...}`).
+  * [ ] "Repurposing notes" footer — appended when `include_repurposing_links = True`. Compact rendering of `blog_to_post_links` rows: which X posts this blog is linked to, with permalinks.
+* [ ] Export dialog UI in §14.15: format dropdown, target-path picker with `blog_export_default_directory` prefill, two checkboxes (SEO, repurposing notes), confirm button.
+* [ ] Transition: blog with `status = 'ready'` exported → status becomes `exported`. Blog with `status = 'exported'` re-exported → status stays `exported`. Daniel transitions to `published_externally` MANUALLY via the status selector once he actually publishes.
+* [ ] Tests: each format renders correctly; SHA-256 matches written file contents; re-export of a blog appends a second `blog_exports` row; failed export (e.g. target_path not writable) leaves no `blog_exports` row.
+
+**X ↔ blog repurposing (§28.34):**
+
+* [ ] Implement `app/agent/blog_repurposing.py`:
+
+  * [ ] `repurpose_blog_to_x(blog_id, mode) -> RepurposingResult` — modes: `thread_from_sections` (one X post per major heading), `single_post_summary` (one X post summarizing the whole), `teaser_with_link` (a hook + a teaser + the `external_url` if set). Single Claude call per mode; outputs flow into the regular drafts pipeline as `agent_drafts` rows.
+  * [ ] `repurpose_x_to_blog_idea(post_id) -> BlogIdeaResult` — single Claude call that takes an X post and produces a blog *idea* (title + outline + content type framing). Inserts a new `blogs` row with `status = 'idea'`, links via `blog_to_post_links(direction='post_to_blog', relationship_kind='derived_outline')`.
+  * [ ] Plagiarism guard: every repurposing output runs through `app/agent/inspiration.py::compute_plagiarism_risk` (existing Phase 5.11 deterministic floor) against the source. High-risk outputs block the drafts-pipeline insertion until Daniel overrides (same UX as §14.13 high-risk inspiration transforms).
+* [ ] New agent tools `#29 repurpose_blog_to_x(blog_id, mode)` and `#30 repurpose_x_to_blog_idea(post_id)` — registered agent tools.
+* [ ] Wiring in §14.15: "Repurpose to X ▾" sub-menu with the three modes. Each click runs the tool, then opens the resulting `agent_drafts` row(s) in §14.8 Agent Chat for review.
+* [ ] Wiring in §14.4 Content Performance: per-post "Repurpose to blog idea" button → calls `repurpose_x_to_blog_idea(post_id)`, opens the resulting `blogs` row in §14.15.
+* [ ] Tests: round-trip post → blog idea → blog draft; assert `blog_to_post_links` linkage in both directions; assert plagiarism guard fires on high-overlap repurposing and blocks promotion until override.
+
+**QA across the pack:**
+
+* [ ] All existing tests pass (target ≥285 by end of Phase 6).
+* [ ] Ruff clean across all new modules.
+* [ ] Boot smoke: §14.14 Blogs index and §14.15 Blog Editor render; agent panel identity readout shows correct values after a voice-profile regenerate.
+* [ ] End-to-end: create blog → outline (agent) → draft (agent) → edit + save → status `editing` → suggest edits (agent) → accept one → status `ready` → export Markdown to tmp dir → assert file contents + `blog_exports` row + audit log row → status auto-`exported`. Repurpose-to-X-thread → assert plagiarism guard runs + 4-post thread lands in `agent_drafts` → assert Phase 5.8 pipeline fired on each draft. Revert to v.2 → assert forward-moving history (v.5 carries v.2's body).
+
+**Documentation:**
+
+* [ ] Append a new Phase 6 block to `docs/index.html` per the CLAUDE.md "Implementation status doc" workflow.
+* [ ] README addition: short Phase 6 section — what the Blogs surface adds; how it closes the final CreatorOS consolidation gap; the explicit reminder that the app NEVER publishes blogs (Daniel publishes externally).
+* [ ] Spec rename consideration: a one-line "consider renaming to Distribution Dashboard / Personal Distribution OS" note in `docs/index.html` Phase 6 block, flagging the decision for Daniel without committing to it.
+
+### Phase 7 — V1.1: Data collection (deferred from MVP, previously labeled Phase 6 before the Phase 6 Blogs renumber)
 
 * [ ] Configure xurl auth outside the app.
 * [ ] Implement `scripts/collect_account_snapshot.py`.
@@ -5931,6 +6384,183 @@ The Settings → Audit log viewer renders `details_json` for Daniel-only viewing
 - No append from agent context. The agent can trigger state changes via its existing tools; those tools call `audit_log.log(...)` from the server-side code path. The agent never has a "write an audit row" tool.
 - No structured-deletion-of-audit-rows. Pruning by retention is the only path that removes rows; even that self-audits.
 
+### 28.31 Blogs — schema discipline and state machine
+
+The blog production lifecycle has its own state machine because long-form has different gates than short-form. A blog is not a "long post" — it's authored, edited, reviewed, exported as a file, and (only then) published externally on Daniel's blog platform.
+
+**State machine (load-bearing — enforced in `app/agent/blogs.py::transition_status`):**
+
+```
+idea          → outlining | archived
+outlining     → drafting | idea | archived
+drafting      → editing | outlining | archived
+editing       → ready | drafting | archived
+ready         → exported | editing | archived
+exported      → published_externally | ready | archived
+published_externally → archived
+archived      → (terminal)
+```
+
+Why these transitions:
+- `idea → outlining` (not directly to drafting): the outline is a separate artifact (`blogs.outline_markdown`) preserved through drafting so Daniel can compare draft to plan.
+- `drafting → outlining`: legal. Sometimes the draft reveals the outline was wrong.
+- `editing → drafting`: legal. Sometimes editing reveals the draft needs a rewrite, not polish.
+- `ready → exported` requires an export operation that succeeded — transition cannot be set manually; it's set by the export path on success.
+- `exported → published_externally` is the ONLY manual transition that depends on an out-of-app fact (Daniel actually publishing). When Daniel makes this transition, the editor requires `external_url` to be populated.
+- `archived` is terminal — re-activating a blog means duplicating it.
+
+**Versioning discipline:**
+
+Every save that *changes content* (body OR outline OR title OR status) appends a `blog_versions` row. No-op saves (where everything is unchanged) skip the version row. This keeps history meaningful — every row represents real work.
+
+**Why no soft-delete on blogs:**
+
+`archived` covers the "I don't want to see this in my main list" use case. Hard deletion is rare and rare cases go through `audit_logs`'s recovery path (§28.30) — the deletion's `details_json.snapshot_of_deleted_row` preserves the blog + all versions + all exports as JSON, so a deleted blog is recoverable from the audit log.
+
+**Unified identity (the point of putting blogs here):**
+
+Every agent-driven blog action reads the same identity stack as X drafting:
+- Active niche definition (§28.16)
+- Active voice profile (§28.12)
+- Top-N voice samples (§28.5)
+- Top-N active personality lore (§28.21)
+- Confidence-label discipline (§28.14)
+
+Without this unification, "blogs in XGrowth" would just be "blogs in a different app that happens to share a database." The unified identity is the entire reason for the consolidation.
+
+### 28.32 Blog drafting agent tools
+
+Four agent tools cover the blog production pipeline: `outline_blog`, `draft_blog`, `suggest_blog_edits`, `generate_blog_seo_metadata`. All four are registered (not internal-only). All four respect §28.6 cost cap and emit `<confidence>` tags per §28.14.
+
+**Tool catalog additions to §28.4:**
+
+| # | Tool | Input | Output | Side effects |
+| --- | --- | --- | --- | --- |
+| 25 | `outline_blog` | `blog_id` | structured Markdown outline | Writes a `blog_versions` row via `save_blog(... agent_action='outline')`; populates `blogs.outline_markdown` |
+| 26 | `draft_blog` | `blog_id, target_length_words?` | full draft body Markdown | Writes a `blog_versions` row via `save_blog(... agent_action='draft')`; populates `blogs.current_body_markdown` |
+| 27 | `suggest_blog_edits` | `blog_id` | `[{paragraph_anchor, suggested_replacement, rationale, confidence_label}]` | None directly — UI surfaces with Accept/Reject/Modify; Accept calls `save_blog(... agent_action='edit_suggestion_applied')` |
+| 28 | `generate_blog_seo_metadata` | `blog_id` | `{seo_title, seo_description, seo_tags}` | Writes to `blogs.seo_title` / `seo_description` / `seo_tags_json` DIRECTLY; no version row (SEO metadata is sidecar, not content) |
+
+**Why suggest_blog_edits doesn't auto-apply:**
+
+Edit suggestions are localized — per-paragraph replacements with rationale. Auto-applying all of them would collapse Daniel's authorial judgment. The UI lists each suggestion separately so Daniel accepts/rejects/modifies per-paragraph; only accepted changes persist.
+
+**Confidence labels on blog drafts:**
+
+A `draft_blog` output with `confidence_label_at_version = 'speculation'` is a SIGNAL — the agent generated content it can't ground in fact (e.g., made up a statistic, fabricated an example). Daniel sees a yellow chip in the version list AND the editor displays a chip above the body. The export path is NOT blocked on speculation — Daniel can still export a speculation-labeled blog if he reviews and accepts the speculation. But the `blog_versions.confidence_label_at_version` is a permanent epistemic record.
+
+**Read scope:**
+
+All four tools read: `blogs.*`, `blog_versions.*` for prior versions of THIS blog, active niche, active voice profile, active voice samples, active personality lore. They do NOT read: other blogs' content, `stir_testers`, `stir_conversion_events.qualitative_feedback`, other `agent_messages`. The read scope is enforced at the tool-result level in `app/agent/session.py`.
+
+**No multi-blog context.** Each blog draft is generated in isolation. The agent doesn't "remember" what it wrote in another blog. Identity comes from voice profile + niche, not from prior agent output.
+
+**Anti-feature:**
+
+- No auto-drafting on idea creation. Creating a blog with `status = 'idea'` does NOT trigger `outline_blog`. Every agent invocation is explicit Daniel-click; cost and intent stay predictable.
+- No automatic status transitions on agent action. Running `outline_blog` doesn't auto-transition `idea → outlining` — Daniel transitions when he's reviewed the outline.
+
+### 28.33 Blog exports
+
+Markdown / HTML / JSON / MDX. Atomic write-then-record. Append-only history (re-export = new row, overwrites file but preserves prior export's row).
+
+**Atomicity contract:**
+
+```
+BEGIN TRANSACTION
+  render content to bytes
+  compute content_sha256
+  write file to target_path (file I/O — outside DB transaction)
+  IF file write succeeded:
+    insert blog_exports row (capturing target_path, content_sha256, file_size_bytes)
+    insert audit_logs row (event_category='export', event_type='blog_export_{format}')
+    IF blog.status == 'ready':
+      transition blog.status → 'exported'
+  COMMIT
+ELSE:
+  ROLLBACK (DB)
+  attempt to delete partially-written file (best-effort)
+  surface error to user
+```
+
+The DB writes happen AFTER the file write succeeds. If the DB writes fail after the file write, the file exists on disk but the export isn't recorded — surface a "file written but export record failed" banner with manual-mark-resolved button (analogous to the §28.10 publish-flow reconciliation banner).
+
+**SEO frontmatter (Markdown / MDX):**
+
+```yaml
+---
+title: "Kitchen scanner UX from three failed dinner attempts"
+description: "..."
+tags: ["cook-mode", "ux", "ai"]
+slug: "kitchen-scanner-ux-failures"
+pillar: "stir"
+audience: "icp"
+created_at_utc: "2026-05-15T14:32:00Z"
+exported_at_utc: "2026-05-22T18:42:00Z"
+---
+```
+
+**Repurposing-notes footer (when `include_repurposing_links = True`):**
+
+```markdown
+---
+**Repurposing notes (excluded from public publish):**
+- X thread: 3 posts derived from this blog — [post 142](...), [post 156](...), [post 161](...)
+- X teaser: [post 209](...)
+```
+
+Daniel can manually strip the footer before publishing externally if he wants — the export path's "include repurposing notes" toggle defaults to FALSE specifically because most public publishing surfaces don't want internal cross-references in the body.
+
+**Export integrity (`content_sha256`):**
+
+Every export row carries `content_sha256 = sha256(exported_file_contents)`. If Daniel later suspects the file was overwritten or tampered with on disk, he can re-hash the file and compare to the `blog_exports` row's hash to detect drift. The hash is the audit anchor.
+
+**No publish-to-external-platform integration.**
+
+The export writes to disk. Daniel takes the file (or its content) and publishes externally. The app NEVER calls Substack / Ghost / WordPress / Medium / any blog platform API. This is a hard scope rule (§0, §7.1, §1).
+
+### 28.34 X ↔ blog repurposing
+
+Bidirectional content reuse. A blog can be repurposed into X posts (thread / single-post summary / teaser-with-link). An X post can be expanded into a blog idea (outline + framing). Both directions are agent-tooled, both flow through the existing drafts pipeline + plagiarism guard.
+
+**Tool catalog additions:**
+
+| # | Tool | Input | Output | Side effects |
+| --- | --- | --- | --- | --- |
+| 29 | `repurpose_blog_to_x` | `blog_id, mode: 'thread_from_sections' \| 'single_post_summary' \| 'teaser_with_link'` | List of `agent_drafts.id` (one for `single_post_summary` and `teaser_with_link`, multiple for `thread_from_sections`) | Inserts `agent_drafts` rows via the full Phase 5.8 pipeline (IWH, dark-pattern lint, content-type validation, pre-publish scorer, repetition guard, AND plagiarism guard against the blog body). Inserts `blog_to_post_links` rows once Daniel ships the resulting drafts (linkage happens at ship time, not draft time — drafts may be discarded). |
+| 30 | `repurpose_x_to_blog_idea` | `post_id` | New `blogs.id` (status='idea') | Inserts a new `blogs` row with `status='idea'`, the X post's text as starter `notes`, populates `pillar` and `audience` from the post's classification, populates `niche_*_snapshot` from current settings. Inserts a `blog_to_post_links(direction='post_to_blog', relationship_kind='derived_outline')` row immediately (linkage is unambiguous at idea creation). |
+
+**Plagiarism guard (load-bearing for blog→X):**
+
+The §28.29 deterministic floor (Jaccard + n-gram + AI-reported, with final = `max(...)`) runs on every blog→X repurposing output against the source blog body. Expected behavior:
+
+- `thread_from_sections` outputs often have `medium` overlap (the X posts are derived directly from the blog's sentences) — the guard surfaces, the UI shows a yellow banner per draft, Daniel reviews each before promoting.
+- `single_post_summary` typically has `low` overlap (it's a compression, not a quote).
+- `teaser_with_link` typically has `low`/`medium` overlap depending on whether Daniel chose to quote a specific blog line.
+- `high` overlap blocks the drafts-pipeline insertion until Daniel overrides (same UX as §14.13 high-risk inspiration transforms). Override is audit-logged.
+
+**Why blog→X plagiarism check matters:**
+
+Without it, the agent could literally emit a paragraph of the blog as the X post body. That's not plagiarism in the legal sense (it's Daniel's own content), but it IS a repurposing failure — the X post should be derivative, not duplicative. The guard catches that case.
+
+**X→blog idea direction:**
+
+Lower-overlap by construction (the blog is being *expanded* from a short post, not compressed). The guard still runs but rarely fires. The output is just an idea + outline framing — Daniel writes the actual blog via `outline_blog` + `draft_blog`. The linkage row is established at idea creation; subsequent blog→X repurposing of the same blog would create *additional* links per derived post.
+
+**Bidirectional linkage at ship time:**
+
+`blog_to_post_links` for blog→X is written when an `agent_drafts` row derived from a blog gets shipped (`posts.published_to_x_at` populated). Until then, the linkage is implicit in `agent_drafts.notes` ("derived from blog 42, mode=thread_from_sections"); shipping is the moment that promotes the implicit link to an explicit row. This avoids polluting `blog_to_post_links` with rows for drafts that get discarded.
+
+**Read scope:**
+
+`repurpose_blog_to_x` reads: the blog's current body + outline + identity context (niche, voice profile, lore). It does NOT read other blogs, other posts, `stir_testers`, etc. `repurpose_x_to_blog_idea` reads: the post's text + classification + identity context. Same exclusions.
+
+**Anti-feature:**
+
+- No auto-repurposing on blog status transitions. Transitioning to `ready` does NOT trigger any X repurposing.
+- No auto-repurposing on post publish. A shipped X post does NOT auto-create a blog idea.
+- Both directions are explicit Daniel-click, no exceptions.
+
 ---
 
 ## 29. Reply Target Discovery
@@ -6630,6 +7260,37 @@ Deliberately rejected from CreatorOS for this phase:
 - **Auto-transform of inspiration on save.** Costs (token + cognitive) need to be predictable; explicit click is the loop.
 - **AI/agent write access to `audit_logs`.** State-change logs are Daniel's debugging surface, not the agent's context. Same discipline as `publish_confirmation_tokens` per §28.10.
 - **`agent_tool_calls`/`audit_logs` merger.** Considered, rejected — different volumes, different access patterns, different pruning policies. Two tables, clear contract.
+
+### Long-form blogs addition (2026-05-22) — §28.31 through §28.34
+
+Phase 6. Final consolidation step — ports CreatorOS's long-form blog system into XGrowth with explicit scope rewrite (§0 new fifth paragraph, §1 expansion paragraph, §7.1 untouched). After Phase 6, XGrowth subsumes CreatorOS's functional surface entirely; CreatorOS can be retired or kept frozen as historical archive. Four new tables, one new computed view, two new top-level views (§14.14 Blogs index, §14.15 Blog Editor), six new agent tools (tools #25–#30 in §28.4). The previously-deferred-from-MVP "V1.1 Data collection" phase (formerly §25 Phase 6) is renumbered to Phase 7.
+
+93. **Blog production schema and state machine (§28.31).** New `blogs` table with eight-state lifecycle (`idea → outlining → drafting → editing → ready → exported → published_externally → archived`); `blog_versions` table (immutable append-only history with `is_current_for_blog` partial-unique index); `blog_exports` table (one row per export op, `content_sha256` as audit anchor); `blog_to_post_links` table (bidirectional X↔blog linkage). State machine enforced in `app/agent/blogs.py::transition_status`. `external_url` / `external_published_at` are manual — app NEVER publishes externally. (§10 `blogs`, §10 `blog_versions`, §10 `blog_exports`, §10 `blog_to_post_links`, §11 `v_blog_pipeline`, §28.31, §25 Phase 6)
+
+94. **Blog drafting agent tools (§28.32).** Four registered tools: `#25 outline_blog`, `#26 draft_blog`, `#27 suggest_blog_edits`, `#28 generate_blog_seo_metadata`. All read the unified identity stack (niche + voice profile + voice samples + personality lore + confidence-label discipline). `suggest_blog_edits` returns structured per-paragraph suggestions for Accept/Reject/Modify — NEVER auto-applies. SEO metadata writes directly to `blogs.seo_*` columns without creating a version row (sidecar, not content). (§28.4 tool catalog, §28.32, §25 Phase 6)
+
+95. **Blog editor view §14.15.** Three-panel layout — outline (left, editable Markdown), body (center, editable Markdown), agent panel (right, with identity readout + four action buttons + version history + linked posts). Status selector enforces legal transitions; illegal transitions surface inline error. Revert to older version creates forward-moving history. Save is atomic (body + outline + version row in one transaction). (§14.14, §14.15, §25 Phase 6)
+
+96. **Blog exports (§28.33).** Four formats (Markdown / HTML / JSON / MDX), optional SEO frontmatter, optional repurposing-notes footer (default OFF). Atomic write-then-record contract — file write succeeds before DB rows insert; partial-state surfaces a manual-mark-resolved banner (mirrors §28.10 publish-flow reconciliation). `content_sha256` is the audit anchor for detecting later disk-side tampering. Re-export = new row, overwrites file but preserves prior export's row. No platform integration (no Substack/Ghost/WordPress/Medium API). (§28.33, §25 Phase 6)
+
+97. **Bidirectional X ↔ blog repurposing (§28.34).** Two tools: `#29 repurpose_blog_to_x` (modes: `thread_from_sections` / `single_post_summary` / `teaser_with_link`) and `#30 repurpose_x_to_blog_idea`. blog→X outputs flow through the full Phase 5.8 drafts pipeline AND the §28.29 plagiarism guard (deterministic floor catches high overlap; high-risk blocks until override). Linkage in `blog_to_post_links` is established at ship time for blog→X (not at draft time — drafts may be discarded) and at idea creation for X→blog. (§28.34, §25 Phase 6)
+
+Scope-rewrite anchors (load-bearing for Phase 6):
+
+- **§0 new fifth paragraph** explicitly acknowledges Phase 6 as a content-production-surface expansion within the same single-user-local thesis. §7.1 (single-user local tool) is unchanged.
+- **§1 product thesis** gains a "content-production boundary" paragraph clarifying that blogs serve the X-distribution thesis via repurposing — they're not a parallel product, they're a feeder.
+- **Project name remains "X Growth Dashboard"** for now. A rename to "Distribution Dashboard" or "Personal Distribution OS" is flagged in §0 as a Daniel-only decision; the implementation doesn't depend on it. If Daniel renames, it's a one-line spec edit + a one-line README edit.
+- **`§25` Phase 6 (formerly V1.1 Data collection) was renumbered to Phase 7.** All cross-references in this changelog from items 19 / 33 / 34 referencing "Phase 6" prior to this revision point at the NEW Phase 6 (Blogs); the prior Phase 6 (V1.1 Data collection) is now Phase 7. No prior changelog items reference Phase 7 — there is no historical-collision risk.
+
+Deliberately rejected from CreatorOS's blog system for Phase 6:
+
+- **External publish APIs (Substack / Ghost / WordPress / Medium / Hashnode).** Hard scope rule per §0 + §7.1 — local tool, single user. Daniel publishes externally by hand using the exported file.
+- **Auto-publish at scheduled time.** No scheduling for blogs at all; the moment between "exported file on disk" and "live on the web" is intentionally Daniel-mediated.
+- **Multi-author / shared drafts / comments.** Single-user, no exceptions.
+- **Newsletter integration / RSS feeds.** Out of scope.
+- **Drafting auto-trigger on idea creation.** Every agent invocation is explicit Daniel-click; cost and intent stay predictable.
+- **`suggest_blog_edits` auto-apply.** Collapses authorial judgment; per-paragraph Accept/Reject/Modify is the loop.
+- **Auto-status transitions on agent action.** Running `outline_blog` doesn't auto-transition `idea → outlining`; Daniel decides.
 
 [1]: https://docs.x.com/x-api/fundamentals/data-dictionary "Data Dictionary - X"
 [2]: https://docs.x.com/x-api/getting-started/about-x-api "About the X API - X"
