@@ -26,6 +26,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app.agent import settings_io
 
@@ -312,7 +313,6 @@ def is_over_relied_on(
     if not row.last_invoked_at_utc:
         return False
     # Pure date math — sqlite would also work, but this stays test-friendly.
-    from datetime import datetime, timezone
     try:
         last = datetime.fromisoformat(
             row.last_invoked_at_utc.replace("Z", "+00:00")
@@ -366,7 +366,6 @@ def render_splice_block(active_lore: list[LoreRow]) -> str:
 def _last_invoked_suffix(last_iso: str | None) -> str:
     if not last_iso:
         return " (not yet invoked)"
-    from datetime import datetime, timezone
     try:
         last = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
         if last.tzinfo is None:
