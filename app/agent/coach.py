@@ -191,37 +191,24 @@ StrippedCitation reason strings.
 """
 
 
-def _resolve_post(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]:
-    try:
-        post_id = int(c.record_id.strip())
-    except (ValueError, TypeError):
-        return False, "malformed"
-    row = conn.execute(
-        "SELECT 1 FROM posts WHERE id = ?", (post_id,)
-    ).fetchone()
-    return (bool(row), "" if row else "not_found")
-
-
-def _resolve_experiment(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]:
-    try:
-        exp_id = int(c.record_id.strip())
-    except (ValueError, TypeError):
-        return False, "malformed"
-    row = conn.execute(
-        "SELECT 1 FROM experiments WHERE id = ?", (exp_id,)
-    ).fetchone()
-    return (bool(row), "" if row else "not_found")
-
-
-def _resolve_agent_draft(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]:
-    try:
-        draft_id = int(c.record_id.strip())
-    except (ValueError, TypeError):
-        return False, "malformed"
-    row = conn.execute(
-        "SELECT 1 FROM agent_drafts WHERE id = ?", (draft_id,)
-    ).fetchone()
-    return (bool(row), "" if row else "not_found")
+# P510R-14: id-based resolvers were three line-for-line duplicates
+# differing only by table name. Factor a single helper that returns
+# a Resolver bound to the table — adding a new id-based record_type
+# in Phase 5.11+ is now one entry in _ID_RESOLVERS instead of nine
+# more lines of duplicated parse-and-query code. ``table_name`` is a
+# static identifier passed at registration time (never user input),
+# so the dynamic SQL is safe.
+def _resolve_by_int_id(table_name: str) -> Resolver:
+    def resolver(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]:
+        try:
+            row_id = int(c.record_id.strip())
+        except (ValueError, TypeError):
+            return False, "malformed"
+        row = conn.execute(
+            f"SELECT 1 FROM {table_name} WHERE id = ?", (row_id,)
+        ).fetchone()
+        return (bool(row), "" if row else "not_found")
+    return resolver
 
 
 def _resolve_weekly_review(
@@ -369,9 +356,9 @@ def _resolve_view_row(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]
 # by exact key. Adding a record_type? Add the spec table entry FIRST
 # (§28.23), then add to this dispatch.
 _ID_RESOLVERS: dict[str, Resolver] = {
-    "post": _resolve_post,
-    "experiment": _resolve_experiment,
-    "agent_draft": _resolve_agent_draft,
+    "post": _resolve_by_int_id("posts"),
+    "experiment": _resolve_by_int_id("experiments"),
+    "agent_draft": _resolve_by_int_id("agent_drafts"),
     "weekly_review": _resolve_weekly_review,
     "monthly_review": _resolve_monthly_review,
 }
