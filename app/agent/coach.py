@@ -218,17 +218,22 @@ def _resolve_by_int_id(table_name: str) -> Resolver:
 def _resolve_weekly_review(
     conn: sqlite3.Connection, c: Citation
 ) -> tuple[bool, str]:
-    """Resolve weekly_reviews by week_start_date OR ISO-week token.
+    """Resolve weekly_reviews by week_start_date, week_end_date, OR ISO-week.
 
     Spec example is ``〔weekly_review 2026-W19〕`` (ISO week notation).
-    The DB column is ``week_start_date`` (YYYY-MM-DD). We accept both
-    forms — the ISO-week string is converted to its Monday date.
+    The DB column is ``week_start_date`` (YYYY-MM-DD). We accept all
+    three forms — the ISO-week string is converted to its Monday date.
+
+    P510R-23: also accept ``week_end_date`` matches so a citation like
+    ``〔weekly_review 2026-05-10〕`` (the Sunday end of week 19) resolves.
+    Daniel may legitimately reach for either end of the week when
+    citing a review.
 
     Spec divergence: §28.23 says ``weekly_reviews.iso_week = '2026-W19'``
     but the table has no ``iso_week`` column. We resolve by either
     interpretation rather than failing every legitimate citation; the
     spec should be amended in a future revision to acknowledge the
-    actual column name.
+    actual column names.
     """
     token = c.record_id.strip()
     if not token:
@@ -251,8 +256,12 @@ def _resolve_weekly_review(
 
     placeholders = ",".join("?" * len(candidate_dates))
     row = conn.execute(
-        f"SELECT 1 FROM weekly_reviews WHERE week_start_date IN ({placeholders})",
-        candidate_dates,
+        f"""
+        SELECT 1 FROM weekly_reviews
+        WHERE week_start_date IN ({placeholders})
+           OR week_end_date   IN ({placeholders})
+        """,
+        candidate_dates + candidate_dates,
     ).fetchone()
     return (bool(row), "" if row else "not_found")
 

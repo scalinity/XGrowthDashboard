@@ -161,6 +161,20 @@ def test_resolve_weekly_review_iso_date_format(
     assert len(surviving) == 1
 
 
+def test_resolve_weekly_review_end_date_format(
+    seeded_conn: sqlite3.Connection,
+) -> None:
+    """P510R-23: week_end_date (Sunday) should also resolve to the same row.
+
+    The seeded fixture inserts a row with
+    week_start_date='2026-05-04' (Monday) + week_end_date='2026-05-10'
+    (Sunday). Either end of the week should be a valid citation token.
+    """
+    citations = _coach.extract_citations("〔weekly_review 2026-05-10〕")
+    surviving, _stripped = _coach.validate_against_allowlist(seeded_conn, citations)
+    assert len(surviving) == 1
+
+
 def test_resolve_monthly_review_always_strips_until_phase511(
     seeded_conn: sqlite3.Connection,
 ) -> None:
