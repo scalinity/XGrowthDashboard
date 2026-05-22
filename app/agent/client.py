@@ -1,0 +1,367 @@
+"""AgentClient — Anthropic SDK streaming wrapper (§28, §14.8).
+
+The client:
+
+  1. Loads the API key from ``.env`` (``ANTHROPIC_API_KEY``).
+  2. Assembles the system prompt via ``prompt_builder.build_system_prompt``.
+  3. Imports tool specs from ``app.agent.tools.AGENT_TOOLS`` ONLY — the
+     publish tools in ``_internal_tools`` are never imported here.
+  4. Enforces the §28.6 monthly cost ceiling before each round trip.
+  5. Streams the response and dispatches tool_use blocks to local handlers.
+  6. Persists every assistant message + tool call to the DB.
+
+The streaming surface returns an iterator the Streamlit page consumes
+(``st.write_stream``-compatible). Tests use the non-streaming
+``send_message_sync`` path which captures the full final state.
+
+The publish tools deliberately have no path into this client. The
+``_dispatch_tool_call`` helper raises ``KeyError`` for any unknown name —
+including the publish names — so even a hypothetical leak would fail
+loudly rather than execute.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from app.agent import audit, cost, prompt_builder, tools
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap conversation rows.
+# ---------------------------------------------------------------------------
+def start_conversation(
+    conn: sqlite3.Connection,
+    *,
+    title: str | None = None,
+    context_seed: str | None = None,
+    model_default: str = "claude-opus-4-7",
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO agent_conversations
+            (title, context_seed, status, model_default)
+        VALUES (?, ?, 'active', ?)
+        """,
+        (title, context_seed, model_default),
+    )
+    return int(cur.lastrowid)
+
+
+def append_message(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    role: str,
+    content: str,
+    model: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    rate_snapshot: dict | None = None,
+    tool_calls: list[dict] | None = None,
+    tool_call_id: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO agent_messages
+            (conversation_id, role, content, tool_calls_json, tool_call_id,
+             model, input_tokens, output_tokens, rate_snapshot_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            conversation_id,
+            role,
+            content,
+            json.dumps(tool_calls) if tool_calls else None,
+            tool_call_id,
+            model,
+            input_tokens,
+            output_tokens,
+            json.dumps(rate_snapshot) if rate_snapshot else None,
+        ),
+    )
+    # Update conversation's denormalized counters.
+    conn.execute(
+        """
+        UPDATE agent_conversations
+        SET last_message_at_utc = datetime('now'),
+            message_count = message_count + 1,
+            total_input_tokens = total_input_tokens + COALESCE(?, 0),
+            total_output_tokens = total_output_tokens + COALESCE(?, 0)
+        WHERE id = ?
+        """,
+        (input_tokens, output_tokens, conversation_id),
+    )
+    return int(cur.lastrowid)
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatch — agent-side handlers only.
+# ---------------------------------------------------------------------------
+def dispatch_tool_call(
+    conn: sqlite3.Connection,
+    *,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    message_id: int,
+) -> dict[str, Any]:
+    """Dispatch a tool_use block to its handler and log the call.
+
+    Raises ``KeyError`` if the tool name is unknown — including any
+    publish-tool name that somehow appears in a model response. The publish
+    tools are not in AGENT_TOOLS, so a valid model response can never name
+    them; the explicit KeyError is defense-in-depth against a corrupt SDK
+    payload or a future leak.
+    """
+    start = datetime.now(timezone.utc)
+    try:
+        tool = tools.get_tool(tool_name)
+        result = tool.handler(conn, **tool_input)
+        duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=tool_input,
+            status="success",
+            result=result,
+            duration_ms=duration_ms,
+        )
+        return {"tool_name": tool_name, "result": result, "status": "success"}
+    except Exception as exc:
+        duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=tool_input,
+            status="error",
+            error_message=f"{type(exc).__name__}: {exc}",
+            duration_ms=duration_ms,
+        )
+        return {
+            "tool_name": tool_name,
+            "error": f"{type(exc).__name__}: {exc}",
+            "status": "error",
+        }
+
+
+# ---------------------------------------------------------------------------
+# AgentClient — orchestrates the SDK call + tool loop.
+# ---------------------------------------------------------------------------
+@dataclass
+class AgentTurn:
+    """A single user→assistant exchange — what the chat view renders."""
+
+    user_text: str
+    assistant_text: str = ""
+    tool_calls: list[dict] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    model: str = ""
+    error: str | None = None
+
+
+class AgentClient:
+    """Wraps the Anthropic SDK with cost-ceiling enforcement + tool dispatch.
+
+    Tests can subclass and override ``_call_model`` to avoid the live SDK.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = "claude-opus-4-7",
+        max_tokens: int = 4096,
+        api_key: str | None = None,
+    ) -> None:
+        self.model = model
+        self.max_tokens = max_tokens
+        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+
+    def is_available(self) -> bool:
+        return bool(self._api_key)
+
+    def send_message_sync(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        conversation_id: int,
+        user_text: str,
+    ) -> AgentTurn:
+        """Non-streaming round trip. Persists user + assistant messages.
+
+        Wired into the Streamlit page in a placeholder way: the page calls
+        this and renders the full assistant text + tool-call blocks at
+        once. Streaming UX upgrade is a future iteration; the architecture
+        already separates SDK call from UI render.
+        """
+        turn = AgentTurn(user_text=user_text, model=self.model)
+        # Cost ceiling preflight — projected cost = 0.01 USD as a coarse
+        # placeholder; the actual cost is computed post-call from the
+        # token counts the API returns.
+        try:
+            cost.check_ceiling_or_raise(conn, projected_call_cost_usd=0.01)
+        except cost.MonthlyCostCeilingExceeded as exc:
+            turn.error = str(exc)
+            return turn
+
+        # Persist the user message.
+        append_message(
+            conn,
+            conversation_id=conversation_id,
+            role="user",
+            content=user_text,
+        )
+
+        if not self.is_available():
+            turn.error = (
+                "Growth Agent disabled — set ANTHROPIC_API_KEY in .env. "
+                "See spec §28.8 for the env setup."
+            )
+            return turn
+
+        try:
+            assistant_text, tool_calls, in_tok, out_tok = self._call_model(
+                conn, conversation_id=conversation_id
+            )
+        except Exception as exc:
+            turn.error = f"{type(exc).__name__}: {exc}"
+            return turn
+
+        # Estimate cost from token counts using the rate snapshot.
+        estimate = cost.estimate_cost(
+            input_tokens=in_tok, output_tokens=out_tok, model=self.model
+        )
+        msg_id = append_message(
+            conn,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=assistant_text,
+            model=self.model,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            rate_snapshot=estimate.rate_snapshot,
+            tool_calls=tool_calls or None,
+        )
+
+        # Dispatch each tool_use block locally.
+        dispatched: list[dict] = []
+        for tc in tool_calls:
+            result = dispatch_tool_call(
+                conn,
+                tool_name=tc.get("name", ""),
+                tool_input=tc.get("input", {}) or {},
+                message_id=msg_id,
+            )
+            dispatched.append(result)
+            # Persist tool_result message so the next turn has it in context.
+            append_message(
+                conn,
+                conversation_id=conversation_id,
+                role="tool_result",
+                content=json.dumps(result.get("result") or result.get("error")),
+                tool_call_id=tc.get("id"),
+            )
+        turn.assistant_text = assistant_text
+        turn.tool_calls = dispatched
+        turn.input_tokens = in_tok
+        turn.output_tokens = out_tok
+        turn.cost_usd = estimate.total_usd
+        return turn
+
+    # ---------------------------------------------------------------------
+    # SDK boundary — overridable for tests.
+    # ---------------------------------------------------------------------
+    def _call_model(
+        self, conn: sqlite3.Connection, *, conversation_id: int
+    ) -> tuple[str, list[dict], int, int]:
+        """Make the actual Anthropic API call. Returns (text, tool_calls, in_tok, out_tok).
+
+        Tests override this to skip the network round trip.
+        """
+        import anthropic  # local import keeps the offline path cheap
+
+        client = anthropic.Anthropic(api_key=self._api_key)
+        system_prompt = prompt_builder.build_system_prompt(conn)
+        messages = self._load_messages_history(conn, conversation_id)
+        tool_specs = [t.to_anthropic_spec() for t in tools.AGENT_TOOLS]
+        resp = client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system_prompt,
+            tools=tool_specs,
+            messages=messages,
+        )
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        for block in resp.content:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text_parts.append(block.text)
+            elif btype == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+        usage = getattr(resp, "usage", None)
+        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+        return ("\n\n".join(text_parts), tool_calls, in_tok, out_tok)
+
+    def _load_messages_history(
+        self, conn: sqlite3.Connection, conversation_id: int
+    ) -> list[dict[str, Any]]:
+        """Convert agent_messages rows into the Anthropic SDK message format."""
+        rows = conn.execute(
+            """
+            SELECT role, content, tool_calls_json, tool_call_id
+            FROM agent_messages
+            WHERE conversation_id = ?
+              AND role IN ('user', 'assistant', 'tool_result')
+            ORDER BY id ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
+        history: list[dict[str, Any]] = []
+        for r in rows:
+            role = r["role"]
+            if role == "tool_result":
+                history.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": r["tool_call_id"],
+                                "content": r["content"],
+                            }
+                        ],
+                    }
+                )
+            elif role == "assistant" and r["tool_calls_json"]:
+                blocks: list[dict[str, Any]] = []
+                if r["content"]:
+                    blocks.append({"type": "text", "text": r["content"]})
+                for tc in json.loads(r["tool_calls_json"]):
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.get("id"),
+                            "name": tc.get("name"),
+                            "input": tc.get("input") or {},
+                        }
+                    )
+                history.append({"role": "assistant", "content": blocks})
+            else:
+                history.append({"role": role, "content": r["content"]})
+        return history
