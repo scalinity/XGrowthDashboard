@@ -168,11 +168,17 @@ def dispatch_tool_call(
                 "status": "error",
                 "error": f"refused by niche gate: {n_gate.rationale}",
             }
+        # Phase 5.9 / §28.18 — pass draft_kind + target_post_text so the
+        # reply-quality lint runs in-band with the IWH/dark-pattern gate.
+        _draft_kind = "reply" if tool_name == "save_draft_reply" else "standalone"
+        _target_post_text = tool_input.get("target_post_text") if _draft_kind == "reply" else None
         decision = session.decide_save_or_revise(
             conn,
             assistant_text=assistant_text,
             draft_text=tool_input.get("text", ""),
             current_attempt_index=current_attempt_index,
+            draft_kind=_draft_kind,
+            target_post_text=_target_post_text,
         )
         if decision.action == "refuse":
             audit.log_tool_call(
@@ -219,6 +225,15 @@ def dispatch_tool_call(
         # readers (Content Performance calibration, export jobs).
         if decision.confidence_label is not None:
             tool_input = {**tool_input, "confidence_label": decision.confidence_label}
+        # Phase 5.9 / §28.18 — inject the reply-quality lint result so
+        # the handler can persist agent_drafts.reply_quality_lint_passed
+        # alongside the row. When None (standalone draft) the handler
+        # writes NULL — same semantics as the lint not running.
+        if decision.reply_quality_result is not None:
+            tool_input = {
+                **tool_input,
+                "reply_quality_lint_passed": decision.reply_quality_result.passed,
+            }
 
     try:
         tool = tools.get_tool(tool_name)

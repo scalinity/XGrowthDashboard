@@ -856,9 +856,17 @@ def _save_draft_reply(
     conversation_id: int | None = None,
     agent_reasoning: str | None = None,
     confidence_label: str | None = None,
+    reply_quality_lint_passed: bool | None = None,
 ) -> dict[str, Any]:
     # Phase 5.9 / §28.17 — required, same enforcement as posts.
     ct = _content_types.validate_for_save(content_type)
+    # Phase 5.9 / §28.18 — persistence: None when the lint wasn't run
+    # (dispatcher didn't inject), 1/0 from the dispatcher-injected
+    # decision.reply_quality_result.passed.
+    rq_persist = (
+        None if reply_quality_lint_passed is None
+        else (1 if reply_quality_lint_passed else 0)
+    )
     with transaction(conn):
         draft_cur = conn.execute(
             """
@@ -866,8 +874,8 @@ def _save_draft_reply(
                 (session_id, conversation_id, draft_kind, text, pillar,
                  target_post_url, target_post_text, agent_reasoning,
                  voice_self_score, iwh_attempt_index, status,
-                 confidence_label, content_type)
-            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+                 confidence_label, content_type, reply_quality_lint_passed)
+            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)
             """,
             (
                 session_id,
@@ -881,6 +889,7 @@ def _save_draft_reply(
                 int(iwh_attempt_index),
                 confidence_label,
                 ct,
+                rq_persist,
             ),
         )
         draft_id = int(draft_cur.lastrowid)

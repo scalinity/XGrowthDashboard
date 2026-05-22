@@ -329,6 +329,20 @@ class Decision:
     # a draft) or agent_messages.confidence_label (otherwise).
     confidence_label: str | None = None
     untagged_analytical_claims: int = 0
+    # Phase 5.9 / §28.18 — reply-quality lint result. Only populated when
+    # draft_kind='reply' was passed to decide_save_or_revise. The handler
+    # writes the boolean into agent_drafts.reply_quality_lint_passed.
+    reply_quality_result: lint.ReplyQualityResult | None = None
+
+
+def _read_reply_quality_lint_enabled(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?",
+        ("reply_quality_lint_enabled",),
+    ).fetchone()
+    if row is None:
+        return True
+    return lint.is_reply_quality_lint_enabled(row["value_json"])
 
 
 def decide_save_or_revise(
@@ -337,12 +351,19 @@ def decide_save_or_revise(
     assistant_text: str,
     draft_text: str,
     current_attempt_index: int,
+    draft_kind: str = "standalone",
+    target_post_text: str | None = None,
 ) -> Decision:
     """Run IWH + lint preflight; return whether to save / revise / refuse.
 
     The orchestrator never trusts the agent's self-reported attempt count.
     The current_attempt_index here is computed from agent_drafts.iwh_attempt_index
     on the durable side (see app/agent/tools.py::_revise_draft).
+
+    Phase 5.9 / §28.18 — when ``draft_kind='reply'`` we also run the
+    reply-quality lint AFTER the dark-pattern lint and treat its failure
+    the same way: failed IWH revision, attempt counter bumped, refuse
+    on the (N+1)th attempt.
     """
     minimum = get_iwh_self_score_minimum(conn)
     max_attempts = get_iwh_max_revision_attempts(conn)
@@ -371,9 +392,22 @@ def decide_save_or_revise(
     iwh_score = parse_iwh_self_score(assistant_text)
     lint_result = lint.lint_draft(draft_text)
 
+    # Phase 5.9 / §28.18 — reply-quality lint AFTER dark-pattern lint.
+    # Only runs for replies. The result is exposed on the Decision so
+    # the handler can persist agent_drafts.reply_quality_lint_passed.
+    reply_quality_result: lint.ReplyQualityResult | None = None
+    if draft_kind == "reply":
+        rq_enabled = _read_reply_quality_lint_enabled(conn)
+        reply_quality_result = lint.reply_quality_lint(
+            draft_text, target_post_text, enabled=rq_enabled
+        )
+
     # If no IWH tag was emitted, treat as failed IWH check.
     iwh_failed = iwh_score is None or iwh_score.min_score() < minimum
     lint_failed = lint_result.dark_pattern_detected
+    reply_quality_failed = bool(
+        reply_quality_result is not None and not reply_quality_result.passed
+    )
 
     # Phase 5.8 / §28.14 — untagged analytical claims drop humility by one
     # per claim. We apply the penalty by lowering iwh_score.humility for
@@ -389,12 +423,12 @@ def decide_save_or_revise(
         )
         iwh_failed = iwh_failed or effective_iwh.min_score() < minimum
 
-    if iwh_failed or lint_failed:
+    if iwh_failed or lint_failed or reply_quality_failed:
         reasons = []
-        # Three independent gates can each contribute a reason. Independent
-        # `if`s instead of `elif` so an IWH miss AND an untagged-claim
-        # penalty BOTH surface — audit reviewers lost the humility signal
-        # when only the first elif fired.
+        # Three+ independent gates can each contribute a reason.
+        # Independent `if`s instead of `elif` so an IWH miss AND an
+        # untagged-claim penalty BOTH surface — audit reviewers lost the
+        # humility signal when only the first elif fired.
         if iwh_score is None:
             reasons.append("no <iwh_self_score> tag emitted")
         elif iwh_score.min_score() < minimum:
@@ -412,6 +446,11 @@ def decide_save_or_revise(
             )
         if lint_failed:
             reasons.append(f"dark-pattern lint: {lint_result.rationale}")
+        if reply_quality_failed and reply_quality_result is not None:
+            reasons.append(
+                f"reply-quality lint ({reply_quality_result.failure_mode}): "
+                f"{reply_quality_result.rationale}"
+            )
         next_idx = current_attempt_index + 1
         action: Literal["save", "revise", "refuse"]
         if next_idx > max_attempts:
@@ -426,6 +465,7 @@ def decide_save_or_revise(
             next_attempt_index=next_idx,
             confidence_label=dominant,
             untagged_analytical_claims=untagged,
+            reply_quality_result=reply_quality_result,
         )
 
     return Decision(
@@ -436,4 +476,5 @@ def decide_save_or_revise(
         next_attempt_index=current_attempt_index,
         confidence_label=dominant,
         untagged_analytical_claims=untagged,
+        reply_quality_result=reply_quality_result,
     )

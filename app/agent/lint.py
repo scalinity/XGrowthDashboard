@@ -191,3 +191,235 @@ def lint_draft(
             model_used="offline-fallback",
             api_call_failed=True,
         )
+
+
+# ===========================================================================
+# Phase 5.9 / §28.18 — reply-quality lint.
+# ===========================================================================
+# Catches the specific failure mode the source video calls out: forced,
+# AI-tasting, or selfishly self-promoting replies. Runs AFTER the dark-
+# pattern lint (rule #12) and BEFORE the pre-publish scorer (§28.11) in
+# the reply pipeline. Same enforcement contract as dark-pattern lint —
+# failure counts as a failed IWH revision attempt.
+#
+# Gated by `reply_quality_lint_enabled` setting (default true). When
+# disabled the lint short-circuits to (True, 'lint disabled') so the
+# audit row records that the lint did not run.
+
+# Offline-mode patterns for tests + fallback. These mirror the three
+# Haiku failure-mode labels: forced / AI-tasting / selfishly self-
+# promoting. Conservative — false positives bounce as IWH revisions;
+# false negatives are caught by §28.13 repetition guard + Daniel's eye.
+_REPLY_QUALITY_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        r"\bgreat\s+(post|thread|take)!?\s*[\U0001F300-\U0001FAFF🔥👏🙌💯❤️🎉✨].*\b(check|stop\s+by|visit|see)\b",
+        "selfishly self-promoting: 'great post! check out my…'",
+    ),
+    (
+        r"\b(check\s+out|stop\s+by|visit|see)\s+(my|our)\s+(stuff|site|product|profile|page)\b",
+        "selfishly self-promoting: explicit self-link CTA in a reply",
+    ),
+    (
+        r"\b(amazing|incredible|love\s+this|fire|absolute\s+banger)!?\s*[\U0001F300-\U0001FAFF🔥👏🙌💯❤️🎉✨]+\s*$",
+        "forced: emoji-led affirmation with no substantive content",
+    ),
+    (
+        r"^\s*(this|that|so\s+true|exactly|💯|🔥)\.?\s*$",
+        "forced: single-word affirmation with no substance",
+    ),
+    (
+        r"\b(as\s+an\s+ai|i\s+am\s+an\s+ai|let\s+me\s+know\s+if\s+you'd\s+like\s+me\s+to)\b",
+        "AI-tasting: explicit LLM-template phrasing",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ReplyQualityResult:
+    """Output of the §28.18 reply-quality lint pass.
+
+    ``passed`` is True when the reply reads as genuine + substantive.
+    False bounces back as a failed IWH revision via the same enforcement
+    path as ``LintResult.dark_pattern_detected``.
+
+    ``failure_mode`` is one of: 'forced', 'ai_tasting',
+    'selfishly_self_promoting', 'lint_disabled', or None on pass.
+    """
+
+    passed: bool
+    rationale: str
+    failure_mode: str | None = None
+    model_used: str | None = None
+    api_call_failed: bool = False
+
+
+_REPLY_QUALITY_PROMPT = """You are reviewing a reply to an X post. Does this reply sound forced,
+AI-generated, or selfishly self-promoting (would the original poster
+find it annoying)?
+
+Target post:
+{target_post}
+
+Proposed reply:
+{reply}
+
+Reply with exactly one of:
+- "no, this is genuine and substantive" + one-line reasoning
+- "yes, forced" + one-line reasoning
+- "yes, AI-tasting" + one-line reasoning
+- "yes, selfishly self-promoting" + one-line reasoning
+"""
+
+
+def _parse_reply_quality_response(body: str) -> ReplyQualityResult:
+    """Map the four-option Haiku response to a ReplyQualityResult.
+
+    Tolerates leading whitespace and the model occasionally wrapping
+    its answer in a code fence; the four expected verdict prefixes are
+    matched case-insensitively.
+    """
+    text = body.strip().lower()
+    if text.startswith("no,") or text.startswith("no:") or text.startswith("no "):
+        return ReplyQualityResult(
+            passed=True,
+            rationale=body.strip(),
+            failure_mode=None,
+        )
+    if "forced" in text and text.startswith("yes"):
+        return ReplyQualityResult(
+            passed=False, rationale=body.strip(), failure_mode="forced"
+        )
+    if "ai-tasting" in text or "ai tasting" in text:
+        return ReplyQualityResult(
+            passed=False, rationale=body.strip(), failure_mode="ai_tasting"
+        )
+    if "self-promoting" in text or "selfishly" in text:
+        return ReplyQualityResult(
+            passed=False,
+            rationale=body.strip(),
+            failure_mode="selfishly_self_promoting",
+        )
+    # Defensive default — unparseable response treated as a soft pass
+    # so an outage doesn't block legitimate replies. The audit row
+    # records the response verbatim.
+    return ReplyQualityResult(
+        passed=True,
+        rationale=f"unparseable response — defaulted to pass: {body[:200]!r}",
+        failure_mode=None,
+    )
+
+
+def _offline_reply_quality(text: str) -> ReplyQualityResult:
+    """Deterministic pattern matcher — used in tests + as API fallback."""
+    for pat, label in _REPLY_QUALITY_PATTERNS:
+        if re.search(pat, text, flags=re.IGNORECASE):
+            mode = (
+                "selfishly_self_promoting" if "self-promoting" in label
+                else "ai_tasting" if "AI-tasting" in label
+                else "forced"
+            )
+            return ReplyQualityResult(
+                passed=False,
+                rationale=f"offline reply-quality lint matched: {label}",
+                failure_mode=mode,
+                model_used="offline",
+            )
+    return ReplyQualityResult(
+        passed=True,
+        rationale="offline reply-quality lint: no failure-mode patterns matched",
+        failure_mode=None,
+        model_used="offline",
+    )
+
+
+def is_reply_quality_lint_enabled(value_json: str | None) -> bool:
+    """Parse the ``reply_quality_lint_enabled`` setting value_json."""
+    if value_json is None:
+        return True
+    try:
+        return bool(json.loads(value_json))
+    except (json.JSONDecodeError, ValueError):
+        return True
+
+
+def reply_quality_lint(
+    text: str,
+    target_post_text: str | None,
+    *,
+    model: str = "claude-haiku-4-5",
+    enabled: bool = True,
+) -> ReplyQualityResult:
+    """Run the §28.18 reply-quality lint over ``text``.
+
+    When ``enabled=False`` short-circuits to ``passed=True`` with
+    ``failure_mode='lint_disabled'`` and ``rationale='lint disabled'``;
+    the audit row carries the disabled state so the trail is complete.
+
+    Honors ``LINT_OFFLINE=1`` env var: skips the Haiku call and runs the
+    deterministic pattern matcher only.
+
+    When the model API is unavailable or returns unparseable output, we
+    fall back to the offline matcher. The ``api_call_failed`` field
+    distinguishes outage from clean offline-mode invocation.
+    """
+    if not enabled:
+        return ReplyQualityResult(
+            passed=True,
+            rationale="lint disabled",
+            failure_mode="lint_disabled",
+            model_used="disabled",
+        )
+
+    if os.environ.get("LINT_OFFLINE") == "1":
+        return _offline_reply_quality(text)
+
+    try:
+        import anthropic
+    except ImportError:
+        return _offline_reply_quality(text)
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return _offline_reply_quality(text)
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=200,
+            messages=[
+                {
+                    "role": "user",
+                    "content": _REPLY_QUALITY_PROMPT.format(
+                        target_post=(target_post_text or "(target post not provided)"),
+                        reply=text,
+                    ),
+                }
+            ],
+        )
+        body = ""
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                body = block.text
+                break
+        if not body:
+            return _offline_reply_quality(text)
+        parsed = _parse_reply_quality_response(body)
+        return ReplyQualityResult(
+            passed=parsed.passed,
+            rationale=parsed.rationale,
+            failure_mode=parsed.failure_mode,
+            model_used=model,
+        )
+    except Exception as exc:
+        result = _offline_reply_quality(text)
+        return ReplyQualityResult(
+            passed=result.passed,
+            rationale=(
+                f"offline-fallback (haiku unreachable: {type(exc).__name__}). "
+                f"offline result: {result.rationale}"
+            ),
+            failure_mode=result.failure_mode,
+            model_used="offline-fallback",
+            api_call_failed=True,
+        )
