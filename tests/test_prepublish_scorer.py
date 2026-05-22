@@ -140,8 +140,10 @@ def test_topic_fit_unknown_pillar_returns_one_or_default() -> None:
     text = "totally unrelated topic content here"
     # pillar 'stir' but no affinity hits.
     assert ps.topic_fit_score(text, pillar="stir") == 1
-    # no pillar → default 2 (spec rule)
+    # No pillar → default 2 (schema-required NOT NULL; see docstring
+    # for the P58R-21 deliberation).
     assert ps.topic_fit_score(text, pillar=None) == 2
+    assert ps.topic_fit_score(text, pillar="") == 2
 
 
 def test_topic_fit_three_when_multiple_affinity_words() -> None:

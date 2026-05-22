@@ -285,9 +285,17 @@ def format_fit_score(text: str) -> int:
 def topic_fit_score(text: str, pillar: str | None) -> int:
     """0-3. Sits inside the declared pillar.
 
-    Without a pillar tag (pillar None) the dimension defaults to 2 —
-    declared-pillar drift is the only way to fall below it. Each pillar
-    carries a small affinity vocabulary, hand-curated for MVP.
+    Without a pillar tag (pillar None or empty) the dimension returns 2
+    — declared-pillar drift is the only way to fall below it. Each
+    pillar carries a small affinity vocabulary, hand-curated for MVP.
+
+    P58R-21 considered returning None to mirror the
+    cta_strength_score=None pattern, but the §10 schema declares
+    `topic_fit_score INTEGER NOT NULL` and the spec lists it as
+    required. Making it nullable would require a schema migration
+    + spec change. The "default 2 when no pillar" behavior remains;
+    callers that care about missing-pillar replies should consult
+    the warnings_json field for downstream nudges.
     """
     if pillar is None or pillar == "":
         return 2
