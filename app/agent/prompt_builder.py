@@ -86,8 +86,8 @@ def extract_rules_from_spec(spec_path: Path | None = None) -> list[str]:
         rules.append(f"{num}. {body}")
     if not rules:
         raise SpecRuleExtractionError(
-            f"Found §28.2 but extracted zero rules. The 'N. **...**' rule "
-            f"shape regex no longer matches; check rule_re or spec formatting."
+            "Found §28.2 but extracted zero rules. The 'N. **...**' rule "
+            "shape regex no longer matches; check rule_re or spec formatting."
         )
     return rules
 
