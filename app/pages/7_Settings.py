@@ -13,6 +13,7 @@ are managed via the `milestones` table (seeded by
 
 from __future__ import annotations
 
+import html
 import json
 import sqlite3
 import sys
@@ -739,16 +740,28 @@ with st.expander(
         for r in _recent:
             opt_in_flag = "—" if r["include_opt_in"] is None else ("yes" if r["include_opt_in"] else "no")
             file_name = Path(r["output_path"]).name if r["output_path"] else "—"
+            # /review-2 S8: escape every DB-sourced interpolation before
+            # injecting it into unsafe_allow_html markdown. Inputs are
+            # controlled in this single-user local tool, but a future
+            # output path or table name containing `<` / `"` would otherwise
+            # silently break the layout (best case) or open an HTML-injection
+            # vector (worst case).
+            exported_at_html = html.escape(str(r["exported_at_utc"]))
+            kind_html = html.escape(str(r["kind"]))
+            table_html = html.escape(str(r["table_name"])) if r["table_name"] else "—"
+            file_name_html = html.escape(file_name)
+            row_count_html = html.escape(str(r["row_count"])) if r["row_count"] is not None else "—"
+            opt_in_html = html.escape(opt_in_flag)
             st.markdown(
                 f"""<div style='display:grid; grid-template-columns:1.2fr 0.7fr 1fr 1.5fr auto auto;
                                 gap:1rem; padding:0.28rem 0;
                                 border-bottom:1px solid {PALETTE['hairline']};'>
-                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};'>{r['exported_at_utc']}</span>
-                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone']};'>{r['kind']}</span>
-                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};'>{r['table_name'] or '—'}</span>
-                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone']}; overflow:hidden; text-overflow:ellipsis;'>{file_name}</span>
-                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']}; text-align:right;'>{r['row_count'] if r['row_count'] is not None else '—'}</span>
-                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']}; text-align:right;'>{opt_in_flag}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};'>{exported_at_html}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone']};'>{kind_html}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']};'>{table_html}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone']}; overflow:hidden; text-overflow:ellipsis;'>{file_name_html}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']}; text-align:right;'>{row_count_html}</span>
+                    <span class='numeric' style='font-size:0.78rem; color:{PALETTE['bone_dim']}; text-align:right;'>{opt_in_html}</span>
                 </div>""",
                 unsafe_allow_html=True,
             )
