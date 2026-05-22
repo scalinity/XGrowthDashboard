@@ -127,6 +127,14 @@ def _load_corpus(
       - parent post has a non-null x_post_id (shipped, not a draft);
       - embedding_dim matches the current provider's dim (mismatches are
         skipped — operator must run `embed_posts.py --re-embed-all`).
+
+    Perf note (P58R-24): the row-by-row blob_to_vector list-comp here
+    is followed by a np.stack at call site (`check()`). For
+    low-thousands corpora at 512-1536 dim float32, total allocation is
+    a few MB and the loop dominates only marginally over the SQL fetch.
+    If the corpus crosses ~10k posts, replace with a pre-allocated
+    `np.empty((n, dim))` and `np.frombuffer` row-slice fill that skips
+    the intermediate Python list + stack copy.
     """
     target_dim = _embeddings.DEFAULT_PROVIDER.embedding_dim
     rows = conn.execute(
