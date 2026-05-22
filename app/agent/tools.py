@@ -1145,22 +1145,26 @@ def _record_reply_target(
         ),
     )
     rt_id = int(cur.lastrowid)
-    # /review-2 🔵 #4 — compute the expiry timestamp inline from the same
-    # settings the maintenance job reads, instead of returning a dead None
-    # the agent can never act on. The Queue's expire_stale_candidates() is
-    # still the authority on the actual transition; this is the informational
-    # readout the agent can quote back to Daniel.
+    # P58R-13 — compute expiry from the row's actual last_checked_at_utc
+    # (the timestamp basis expire_stale_candidates uses in
+    # app/jobs/reply_target_maintenance.py) so the agent's quoted
+    # expiry can't drift from the DB-side policy. The prior
+    # `datetime('now', '+N hours')` SELECT re-computed the timestamp
+    # at SELECT time, which under contention could differ from the
+    # INSERT's timestamp by milliseconds-to-seconds.
     expires_row = conn.execute(
         """
         SELECT datetime(
-            'now',
+            last_checked_at_utc,
             '+' || COALESCE(
                 (SELECT CAST(json_extract(value_json, '$') AS INTEGER)
                    FROM settings WHERE key = 'reply_target_expiry_hours'),
                 24
             ) || ' hours'
         ) AS expires_at_utc
-        """
+        FROM reply_targets WHERE id = ?
+        """,
+        (rt_id,),
     ).fetchone()
     return {
         "reply_target_id": rt_id,
