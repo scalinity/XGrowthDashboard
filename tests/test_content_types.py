@@ -212,6 +212,47 @@ def test_save_draft_post_accepts_canonical_content_type_and_propagates(
     assert post_ct == "value"
 
 
+def test_revise_draft_preserves_content_type(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P59A-W12 + P59A-C1 regression: every IWH revision must propagate
+    content_type from the source draft. Before C1, _revise_draft
+    omitted content_type from both INSERTs and the new agent_drafts
+    row landed with content_type=NULL (silently dropped from
+    v_content_type_performance) while the linked posts row defaulted
+    to content_type='unspecified' — bypassing the §28.17 'refuse
+    unspecified' orchestrator promise via the revise path.
+    """
+    from app.agent.tools import _revise_draft
+    _set_niche(db_conn)
+    src = _save_draft_post(
+        db_conn,
+        text="Original draft.",
+        pillar="build",
+        audience="icp",
+        cta="none",
+        content_type="personality",
+    )
+    rev = _revise_draft(
+        db_conn,
+        draft_post_id=src["draft_id"],
+        feedback="too vague",
+        new_text="Revised draft.",
+    )
+    # New agent_drafts row carries the source content_type.
+    new_draft_ct = db_conn.execute(
+        "SELECT content_type FROM agent_drafts WHERE id = ?",
+        (rev["new_draft_id"],),
+    ).fetchone()[0]
+    assert new_draft_ct == "personality"
+    # New linked posts row also carries it.
+    new_post_ct = db_conn.execute(
+        "SELECT content_type FROM posts WHERE id = ?",
+        (rev["post_id"],),
+    ).fetchone()[0]
+    assert new_post_ct == "personality"
+
+
 def test_save_draft_reply_refuses_missing_content_type(
     db_conn: sqlite3.Connection,
 ) -> None:
