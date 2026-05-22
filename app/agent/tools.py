@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.db import transaction
+from app.agent import account_research as _account_research
 from app.agent import brain_dump as _brain_dump
 from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
@@ -1208,6 +1209,62 @@ def _record_reply_target(
 
 
 # ===========================================================================
+# Account Researcher tool wrapper — runs analyze() + save() inside one tool
+# invocation so chat-driven calls get the persisted report id back (§28.24).
+# Failures surface as a `status='failed'` dict so the handler contract
+# stays "always returns a dict".
+# ===========================================================================
+def _analyze_account_to_dict(
+    conn: sqlite3.Connection,
+    *,
+    target_handle: str,
+    target_bio_text: str,
+    target_recent_posts_text: str,
+    target_url: str | None,
+    target_display_name: str | None,
+) -> dict[str, Any]:
+    # Read niche from settings so the prompt's niche_alignment_with_
+    # daniel field has the right context. Niche unset → analysis still
+    # runs but the alignment rationale carries "(niche not yet defined)".
+    from app.agent import niche as _niche
+
+    niche = _niche.get_niche(conn)
+    try:
+        analysis = _account_research.analyze(
+            target_handle=target_handle,
+            target_bio_text=target_bio_text,
+            target_recent_posts_text=target_recent_posts_text,
+            daniel_niche_problem=niche.problem,
+            daniel_niche_person=niche.person,
+            target_url=target_url,
+            target_display_name=target_display_name,
+        )
+    except _account_research.AccountResearchError as exc:
+        return {"status": "failed", "error": str(exc)}
+
+    report_id = _account_research.save(
+        conn,
+        analysis=analysis,
+        target_bio_snapshot=target_bio_text,
+        target_recent_posts_text=target_recent_posts_text,
+        target_url=target_url,
+        target_display_name=target_display_name,
+    )
+    return {
+        "status": "saved",
+        "report_id": report_id,
+        "target_handle": analysis.target_handle,
+        "analysis": analysis.to_dict(),
+        "tokens_used": analysis.tokens_used,
+        "note": (
+            "Reply target NOT created automatically. Daniel clicks "
+            "'Generate reply target' in §29.7 Account Researcher tab to "
+            "promote (§28.24)."
+        ),
+    }
+
+
+# ===========================================================================
 # Brain Dump tool wrapper — converts BrainDumpResult to a JSON-serializable
 # dict for the agent's tool-result message (§28.22).
 # ===========================================================================
@@ -1232,7 +1289,7 @@ def _brain_dump_process_to_dict(
     }
 
 
-# AGENT_TOOLS — the registered tool catalog (19 entries after Phase 5.10).
+# AGENT_TOOLS — the registered tool catalog (20 entries after Phase 5.10).
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -1678,6 +1735,46 @@ AGENT_TOOLS: list[ToolDef] = [
         },
         handler=lambda conn, *, brain_dump_id: _brain_dump_process_to_dict(
             conn, int(brain_dump_id)
+        ),
+    ),
+    ToolDef(
+        name="analyze_account",
+        description=(
+            "Strategic analysis of a target X account (§28.24). Daniel "
+            "pastes the target's handle + bio + recent posts text "
+            "(one post per `---` separator) and this tool runs a "
+            "structured-output Claude pass returning posting patterns, "
+            "positioning, reply-strategy entry points, and niche "
+            "alignment with Daniel (overlap_score 0-3). Persists to "
+            "account_research_reports; the schema permits multiple "
+            "reports per handle so each call is a point-in-time "
+            "snapshot. External content is wrapped per §28.2 prompt-"
+            "injection-defense convention."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target_handle": {"type": "string"},
+                "target_bio_text": {"type": "string"},
+                "target_recent_posts_text": {"type": "string"},
+                "target_url": {"type": "string"},
+                "target_display_name": {"type": "string"},
+            },
+            "required": [
+                "target_handle",
+                "target_recent_posts_text",
+            ],
+        },
+        handler=lambda conn, *, target_handle, target_recent_posts_text,
+        target_bio_text="", target_url=None, target_display_name=None: (
+            _analyze_account_to_dict(
+                conn,
+                target_handle=target_handle,
+                target_bio_text=target_bio_text,
+                target_recent_posts_text=target_recent_posts_text,
+                target_url=target_url,
+                target_display_name=target_display_name,
+            )
         ),
     ),
 ]

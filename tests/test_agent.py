@@ -191,6 +191,13 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         # surfaces failure as a dict (not an exception) so the smoke test
         # holds even when ANTHROPIC_API_KEY is absent in CI.
         "process_brain_dump": {"brain_dump_id": None},
+        # Phase 5.10 / §28.24 — Account Researcher. Handler surfaces
+        # AccountResearchError as {"status": "failed"} so the smoke test
+        # passes without ANTHROPIC_API_KEY.
+        "analyze_account": {
+            "target_handle": "@smoke_target",
+            "target_recent_posts_text": "smoke post\n---\nsmoke post 2",
+        },
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
