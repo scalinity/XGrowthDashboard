@@ -243,6 +243,34 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         12,
         "Hour-of-day local time below which a slot is AM; at-or-above is PM (§28.28).",
     ),
+    # Phase 6 — Long-form Blogs (§28.31-§28.34). Mirrors migration
+    # 016_blogs.sql so a fresh DB initialized via init_db agrees with
+    # one initialized via raw migrations only.
+    (
+        "blog_stale_status_warning_days",
+        21,
+        "Rows with days_in_current_status > this surface a yellow stale-state keyline in §14.14 Blogs index (§28.31).",
+    ),
+    (
+        "blog_default_target_length_words",
+        1500,
+        "Default target_length_words for new blogs when Daniel does not specify one (§14.14).",
+    ),
+    (
+        "blog_export_default_directory",
+        "data/blog_exports/",
+        "Default target-path prefix for the §14.15 export dialog (§28.33).",
+    ),
+    (
+        "blog_repurposing_plagiarism_check_enabled",
+        True,
+        "When true, blog→X repurposing outputs run through the §28.29 deterministic plagiarism floor (§28.34).",
+    ),
+    (
+        "blog_agent_max_draft_iterations",
+        3,
+        "Informational ceiling on consecutive draft_blog calls within an editing session (§28.32). UI surfaces a soft warning; not enforced.",
+    ),
 ]
 
 

@@ -77,6 +77,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "013_strategic_analysis.sql",
     "014_velocity_view_expose_noise_floor.sql",
     "015_growth_layer_qol.sql",
+    "016_blogs.sql",
 )
 
 
@@ -953,3 +954,277 @@ def test_phase511_settings_rows_present(db_conn: sqlite3.Connection) -> None:
     keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
     missing = set(PHASE_511_SETTINGS) - keys
     assert not missing, f"missing Phase 5.11 settings rows: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Long-form Blogs (migration 016).
+# ---------------------------------------------------------------------------
+PHASE_6_TABLES: tuple[str, ...] = (
+    "blogs",
+    "blog_versions",
+    "blog_exports",
+    "blog_to_post_links",
+)
+
+PHASE_6_VIEWS: tuple[str, ...] = ("v_blog_pipeline",)
+
+PHASE_6_SETTINGS: tuple[str, ...] = (
+    "blog_stale_status_warning_days",
+    "blog_default_target_length_words",
+    "blog_export_default_directory",
+    "blog_repurposing_plagiarism_check_enabled",
+    "blog_agent_max_draft_iterations",
+)
+
+
+def test_phase6_tables_exist(db_conn: sqlite3.Connection) -> None:
+    rows = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    names = {row["name"] for row in rows}
+    missing = set(PHASE_6_TABLES) - names
+    assert not missing, f"Phase 6 tables missing: {missing}"
+
+
+def test_phase6_v_blog_pipeline_compiles(db_conn: sqlite3.Connection) -> None:
+    for view in PHASE_6_VIEWS:
+        db_conn.execute(f"SELECT * FROM {view} LIMIT 0")
+
+
+def test_phase6_blogs_status_check(db_conn: sqlite3.Connection) -> None:
+    db_conn.execute(
+        "INSERT INTO blogs (slug, title, status) VALUES ('a', 'A', 'idea')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            "INSERT INTO blogs (slug, title, status) VALUES ('b', 'B', 'in_progress')"
+        )
+
+
+def test_phase6_blogs_slug_unique(db_conn: sqlite3.Connection) -> None:
+    db_conn.execute("INSERT INTO blogs (slug, title) VALUES ('dup', 'first')")
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute("INSERT INTO blogs (slug, title) VALUES ('dup', 'second')")
+
+
+def test_phase6_blog_versions_unique_version_per_blog(
+    db_conn: sqlite3.Connection,
+) -> None:
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('uvc', 't') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_versions
+          (blog_id, version_number, body_text_hash, title_at_version,
+           status_at_version, created_by)
+        VALUES (?, 1, 'h1', 't', 'idea', 'daniel')
+        """,
+        (blog_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO blog_versions
+              (blog_id, version_number, body_text_hash, title_at_version,
+               status_at_version, created_by)
+            VALUES (?, 1, 'h2', 't', 'idea', 'daniel')
+            """,
+            (blog_id,),
+        )
+
+
+def test_phase6_blog_versions_partial_unique_current(
+    db_conn: sqlite3.Connection,
+) -> None:
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('puc', 't') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_versions
+          (blog_id, version_number, body_text_hash, title_at_version,
+           status_at_version, created_by, is_current_for_blog)
+        VALUES (?, 1, 'h', 't', 'idea', 'daniel', 1)
+        """,
+        (blog_id,),
+    )
+    # Second is_current_for_blog=1 row for the same blog violates the
+    # partial unique index.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO blog_versions
+              (blog_id, version_number, body_text_hash, title_at_version,
+               status_at_version, created_by, is_current_for_blog)
+            VALUES (?, 2, 'h2', 't', 'idea', 'daniel', 1)
+            """,
+            (blog_id,),
+        )
+
+
+def test_phase6_blog_versions_cascades_on_blog_delete(
+    db_conn: sqlite3.Connection,
+) -> None:
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('cas', 't') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_versions
+          (blog_id, version_number, body_text_hash, title_at_version,
+           status_at_version, created_by)
+        VALUES (?, 1, 'h', 't', 'idea', 'daniel')
+        """,
+        (blog_id,),
+    )
+    db_conn.execute("DELETE FROM blogs WHERE id = ?", (blog_id,))
+    remaining = db_conn.execute(
+        "SELECT COUNT(*) FROM blog_versions WHERE blog_id = ?", (blog_id,)
+    ).fetchone()[0]
+    assert remaining == 0
+
+
+def test_phase6_blog_exports_format_check(db_conn: sqlite3.Connection) -> None:
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('exf', 't') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_exports
+          (blog_id, format, target_path, file_size_bytes, content_sha256)
+        VALUES (?, 'markdown', '/tmp/a.md', 100, 'abc')
+        """,
+        (blog_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO blog_exports
+              (blog_id, format, target_path, file_size_bytes, content_sha256)
+            VALUES (?, 'rst', '/tmp/b.rst', 50, 'def')
+            """,
+            (blog_id,),
+        )
+
+
+def test_phase6_blog_to_post_links_unique_triple(
+    db_conn: sqlite3.Connection,
+) -> None:
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('lnk', 't') RETURNING id"
+    ).fetchone()[0]
+    post_id = db_conn.execute(
+        """
+        INSERT INTO posts (created_date, text, type, posted_via,
+                           manual_confirmation_status)
+        VALUES ('2026-05-22', 'hi', 'standalone', 'manual', 'confirmed')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_to_post_links
+          (blog_id, post_id, direction, relationship_kind)
+        VALUES (?, ?, 'blog_to_post', 'thread_root')
+        """,
+        (blog_id, post_id),
+    )
+    # Same direction → duplicate.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO blog_to_post_links
+              (blog_id, post_id, direction, relationship_kind)
+            VALUES (?, ?, 'blog_to_post', 'companion_post')
+            """,
+            (blog_id, post_id),
+        )
+    # Different direction for the same pair is permitted.
+    db_conn.execute(
+        """
+        INSERT INTO blog_to_post_links
+          (blog_id, post_id, direction, relationship_kind)
+        VALUES (?, ?, 'parallel', 'companion_post')
+        """,
+        (blog_id, post_id),
+    )
+
+
+def test_phase6_blog_to_post_links_cascades(db_conn: sqlite3.Connection) -> None:
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('cas2', 't') RETURNING id"
+    ).fetchone()[0]
+    post_id = db_conn.execute(
+        """
+        INSERT INTO posts (created_date, text, type, posted_via,
+                           manual_confirmation_status)
+        VALUES ('2026-05-22', 'hi', 'standalone', 'manual', 'confirmed')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_to_post_links
+          (blog_id, post_id, direction, relationship_kind)
+        VALUES (?, ?, 'blog_to_post', 'thread_root')
+        """,
+        (blog_id, post_id),
+    )
+    db_conn.execute("DELETE FROM blogs WHERE id = ?", (blog_id,))
+    assert (
+        db_conn.execute(
+            "SELECT COUNT(*) FROM blog_to_post_links WHERE blog_id = ?", (blog_id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_phase6_settings_rows_present(db_conn: sqlite3.Connection) -> None:
+    keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
+    missing = set(PHASE_6_SETTINGS) - keys
+    assert not missing, f"missing Phase 6 settings rows: {missing}"
+
+
+def test_phase6_audit_logs_migration_row_present(db_conn: sqlite3.Connection) -> None:
+    row = db_conn.execute(
+        """
+        SELECT event_category, event_type, success
+        FROM audit_logs
+        WHERE event_category = 'migration' AND event_type = 'migration_applied_016'
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["success"] == 1
+
+
+def test_phase6_v_blog_pipeline_basic_rollup(db_conn: sqlite3.Connection) -> None:
+    blog_id = db_conn.execute(
+        """
+        INSERT INTO blogs (slug, title, status, target_length_words, actual_length_words)
+        VALUES ('roll', 't', 'drafting', 1000, 750) RETURNING id
+        """
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_versions
+          (blog_id, version_number, body_text_hash, title_at_version,
+           status_at_version, created_by, is_current_for_blog)
+        VALUES (?, 1, 'h', 't', 'drafting', 'daniel', 1)
+        """,
+        (blog_id,),
+    )
+    row = db_conn.execute(
+        """
+        SELECT status, current_version_number, total_version_count,
+               actual_length_words, target_length_words, length_gap_words,
+               export_count
+        FROM v_blog_pipeline WHERE blog_id = ?
+        """,
+        (blog_id,),
+    ).fetchone()
+    assert row["status"] == "drafting"
+    assert row["current_version_number"] == 1
+    assert row["total_version_count"] == 1
+    assert row["length_gap_words"] == -250
+    assert row["export_count"] == 0
