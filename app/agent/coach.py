@@ -316,6 +316,15 @@ def _resolve_view_row(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]
     Two layers of check: (1) the view name must be in our known set;
     (2) running ``SELECT 1 FROM <view> WHERE <filter_template>`` with
     the parsed tokens must return at least one row.
+
+    P510R-25 (perf note, accepted at Phase 5.10 scale): the ``SELECT 1
+    LIMIT 1`` probe runs against views that internally aggregate over
+    all posts (``v_lane_performance``, ``v_content_type_performance``,
+    etc.). Per citation, this is one extra view materialization. At
+    Coach's expected message volume (single-user, ~10s of citations
+    per session) this is fine; if Phase 5.11+ scales the citation
+    load significantly, swap to a column-indexed probe table or
+    materialize the view's grouping keys into an indexed helper.
     """
     view_name = c.record_type
     filter_text = c.filter_text
