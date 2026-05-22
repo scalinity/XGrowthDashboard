@@ -24,13 +24,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import niche as _niche
+from app.agent.untrusted_wrap import (
+    strip_code_fence as _strip_code_fence_shared,
+    wrap_untrusted as _wrap_untrusted_shared,
+)
 from app.db import transaction
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -39,14 +42,6 @@ ACCOUNT_RESEARCH_PROMPT_PATH: Path = (
 )
 
 DEFAULT_MODEL: str = "claude-opus-4-7"
-
-# Boundary markers reused from brain_dump.py — keep the convention
-# in one shape per module so future audits read a single contract.
-_UNTRUSTED_BEGIN: str = "--- BEGIN_UNTRUSTED_DATA ---"
-_UNTRUSTED_END: str = "--- END_UNTRUSTED_DATA ---"
-_BOUNDARY_RE: re.Pattern[str] = re.compile(
-    r"---\s*(?:BEGIN|END)_UNTRUSTED_DATA\s*---", re.IGNORECASE
-)
 
 
 # ---------------------------------------------------------------------------
@@ -162,11 +157,11 @@ def normalize_handle(handle: str) -> str:
 def wrap_untrusted(text: str) -> str:
     """Wrap external text in BEGIN/END_UNTRUSTED_DATA markers (§28.2).
 
-    Inner boundary markers are scrubbed first so a paste containing
-    ``--- END_UNTRUSTED_DATA ---`` can't terminate the wrap early.
+    Thin re-export of ``app.agent.untrusted_wrap.wrap_untrusted`` —
+    kept as a module-level name so existing imports + tests don't
+    break.
     """
-    scrubbed = _BOUNDARY_RE.sub("[boundary-marker-scrubbed]", text)
-    return f"{_UNTRUSTED_BEGIN}\n{scrubbed}\n{_UNTRUSTED_END}"
+    return _wrap_untrusted_shared(text)
 
 
 # ---------------------------------------------------------------------------
@@ -181,20 +176,7 @@ def _read_prompt() -> str:
     return ACCOUNT_RESEARCH_PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def _strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        nl = stripped.find("\n")
-        if nl != -1:
-            stripped = stripped[nl + 1 :]
-        else:
-            stripped = stripped.lstrip("`")
-            if stripped.lower().startswith("json"):
-                stripped = stripped[4:]
-            stripped = stripped.lstrip()
-        if stripped.rstrip().endswith("```"):
-            stripped = stripped.rstrip()[:-3]
-    return stripped.strip()
+_strip_code_fence = _strip_code_fence_shared
 
 
 def _build_user_message(

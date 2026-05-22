@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,23 +45,16 @@ from app.agent import content_types as _content_types
 from app.agent import niche as _niche
 from app.agent import personality_lore as _personality_lore
 from app.agent import voice_profile as _voice_profile
+from app.agent.untrusted_wrap import (
+    strip_code_fence as _strip_code_fence_shared,
+    wrap_untrusted as _wrap_untrusted_shared,
+)
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 BRAIN_DUMP_PROMPT_PATH: Path = PROJECT_ROOT / "config" / "brain_dump_prompt.md"
 
 DEFAULT_MODEL: str = "claude-opus-4-7"
 DEFAULT_MAX_CANDIDATE_DRAFTS: int = 5
-
-# Boundary markers for the §28.2 prompt-injection-defense convention.
-# Any occurrence of these markers inside the raw text is scrubbed
-# before wrapping so Daniel can't accidentally — or deliberately —
-# inject an early "END" marker that would let downstream content
-# escape the untrusted-data block.
-_UNTRUSTED_BEGIN: str = "--- BEGIN_UNTRUSTED_DATA ---"
-_UNTRUSTED_END: str = "--- END_UNTRUSTED_DATA ---"
-_BOUNDARY_RE: re.Pattern[str] = re.compile(
-    r"---\s*(?:BEGIN|END)_UNTRUSTED_DATA\s*---", re.IGNORECASE
-)
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +165,11 @@ def get_max_candidate_drafts(conn: sqlite3.Connection) -> int:
 def wrap_untrusted(raw_text: str) -> str:
     """Wrap arbitrary user text in BEGIN/END_UNTRUSTED_DATA markers.
 
-    Boundary markers inside ``raw_text`` are scrubbed first so a paste
-    containing ``--- END_UNTRUSTED_DATA ---`` can't terminate the wrap
-    early and let the rest of the paste run as instructions.
+    Thin re-export of ``app.agent.untrusted_wrap.wrap_untrusted`` —
+    kept as a module-level name so existing imports + tests don't
+    break. See §28.2 + the shared module's docstring for the rationale.
     """
-    scrubbed = _BOUNDARY_RE.sub("[boundary-marker-scrubbed]", raw_text)
-    return f"{_UNTRUSTED_BEGIN}\n{scrubbed}\n{_UNTRUSTED_END}"
+    return _wrap_untrusted_shared(raw_text)
 
 
 # ---------------------------------------------------------------------------
@@ -193,21 +184,7 @@ def _read_prompt() -> str:
     return BRAIN_DUMP_PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def _strip_code_fence(text: str) -> str:
-    """Tolerate the model occasionally wrapping JSON in ```json … ``` fences."""
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        nl = stripped.find("\n")
-        if nl != -1:
-            stripped = stripped[nl + 1 :]
-        else:
-            stripped = stripped.lstrip("`")
-            if stripped.lower().startswith("json"):
-                stripped = stripped[4:]
-            stripped = stripped.lstrip()
-        if stripped.rstrip().endswith("```"):
-            stripped = stripped.rstrip()[:-3]
-    return stripped.strip()
+_strip_code_fence = _strip_code_fence_shared
 
 
 def _build_user_message(
