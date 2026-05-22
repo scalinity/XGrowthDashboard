@@ -240,9 +240,19 @@ def _validate_int_score(payload: Any, key: str, *, low: int = 0, high: int = 3) 
 
 
 def _validate_str_list(payload: Any, key: str) -> list[str]:
+    # P510R-13: don't silently coerce non-strings via str() — a model
+    # returning [null, 42, "foo"] would otherwise persist as
+    # ["None", "42", "foo"], polluting the analysis with no signal
+    # that a schema violation happened. Raise instead so the row is
+    # marked failed and Daniel sees the real cause.
     if not isinstance(payload, list):
         raise AccountResearchError(f"{key} must be a list; got {type(payload).__name__}")
-    return [str(x) for x in payload]
+    for i, item in enumerate(payload):
+        if not isinstance(item, str):
+            raise AccountResearchError(
+                f"{key}[{i}] must be a string; got {type(item).__name__}"
+            )
+    return list(payload)
 
 
 def parse_response(raw_response: str) -> AccountResearchAnalysis:

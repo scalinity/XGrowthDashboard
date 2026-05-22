@@ -132,6 +132,14 @@ def test_parse_response_rejects_boolean_overlap_score() -> None:
         _ar.parse_response(json.dumps(payload))
 
 
+def test_parse_response_rejects_non_string_in_list_field() -> None:
+    """P510R-13: refuse to silently coerce null/42 → 'None'/'42'."""
+    payload = json.loads(_valid_analysis_json())
+    payload["posting_patterns"]["topics"] = ["kitchen", None, 42]
+    with pytest.raises(_ar.AccountResearchError, match="must be a string"):
+        _ar.parse_response(json.dumps(payload))
+
+
 def test_parse_response_rejects_missing_top_level_field() -> None:
     payload = json.loads(_valid_analysis_json())
     del payload["reply_strategy"]

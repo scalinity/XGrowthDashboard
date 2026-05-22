@@ -304,11 +304,20 @@ def _validate_int_score(payload: Any, key: str, *, low: int = 0, high: int = 3) 
 
 
 def _validate_str_list(payload: Any, key: str) -> list[str]:
+    # P510R-13: same rule as account_research — raise on non-str
+    # entries instead of silently coercing via str(). The persisted
+    # audit_json should never contain "None" or "42" strings from a
+    # type-confused model response.
     if not isinstance(payload, list):
         raise ProfileAuditError(
             f"{key} must be a list; got {type(payload).__name__}"
         )
-    return [str(x) for x in payload]
+    for i, item in enumerate(payload):
+        if not isinstance(item, str):
+            raise ProfileAuditError(
+                f"{key}[{i}] must be a string; got {type(item).__name__}"
+            )
+    return list(payload)
 
 
 def _validate_scored_section(payload: Any, key: str) -> ScoredSection:
