@@ -53,7 +53,6 @@ from app.components.theme import (
     hairline,
     iwh_meter,
     kicker,
-    token_ttl_countdown,
     tool_call_block,
 )
 from app.pages import open_connection
@@ -307,8 +306,19 @@ def _render_draft_actions(conn, draft_row, message_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Publish modal — kicker, exact text re-display, char count, TTL countdown,
-# type-to-confirm, two-button row. The only animated UI in the app.
+# Publish modal — kicker, exact text re-display, char count, "type 'confirm'"
+# field, two-button row.
+#
+# §28.10 + W4 contract: the raw confirmation_token MUST live ONLY in the
+# click-handler's local stack frame. We achieve that by NOT minting the
+# token in `_open_publish_modal` — only in the confirm-and-publish click
+# handler, where it stays in a local variable for one synchronous call
+# into _internal_tools.publish_post_to_x and is then dropped. Nothing
+# token-shaped is ever written to st.session_state.
+#
+# The post_id + draft_text live in session_state (they're not secrets;
+# they're already in the DB). Token minting is cheap, so re-opening the
+# modal after expiry costs nothing.
 # ---------------------------------------------------------------------------
 def _open_publish_modal(conn, *, draft_id: int, draft_text: str, message_id: int) -> None:
     post_id_row = conn.execute(
@@ -322,17 +332,13 @@ def _open_publish_modal(conn, *, draft_id: int, draft_text: str, message_id: int
         )
         return
     post_id = int(post_id_row["id"])
-    minted = confirmation.mint_confirmation_token(
-        conn, post_id=post_id, draft_text=draft_text
-    )
+    # No token mint here — see module-level note. The mint happens inside
+    # the confirm-and-publish click handler in _render_publish_modal.
     st.session_state.publish_modal = {
         "draft_id": draft_id,
         "post_id": post_id,
         "text": draft_text,
-        "raw_token": minted.raw_token,
-        "expires_at_utc": minted.expires_at_utc,
         "message_id": message_id,
-        "confirm_text": "",
     }
     st.rerun()
 
@@ -341,11 +347,6 @@ def _render_publish_modal(conn) -> None:
     modal = st.session_state.get("publish_modal")
     if modal is None:
         return
-    expires_at = datetime.strptime(
-        modal["expires_at_utc"], "%Y-%m-%d %H:%M:%S"
-    ).replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    seconds_remaining = int((expires_at - now).total_seconds())
 
     st.markdown("<hr class='hairline' />", unsafe_allow_html=True)
     kicker("publish to X")
@@ -368,18 +369,35 @@ def _render_publish_modal(conn) -> None:
     )
 
     st.markdown("<div style='margin: 1.2rem 0;'></div>", unsafe_allow_html=True)
-    token_ttl_countdown(seconds_remaining)
+    # Static TTL note in place of the prior animated countdown (C4 + W4
+    # combined: removing the rerun loop + dropping the pre-minted token
+    # means there's no live TTL to render. The actual mint happens
+    # below; the six-check chain enforces server-side expiry).
+    st.markdown(
+        "<div class='kicker'>publish window</div>"
+        "<div class='faint' style='font-size: 0.82rem;'>"
+        "On confirm: a single-use sha256-hashed token is minted with a "
+        "60-second TTL and immediately consumed by the publish call. "
+        "The raw token never leaves this click-handler's local stack "
+        "frame (§28.10). If you take longer than 60 s between minting "
+        "and confirming, the server rejects the click and you can retry."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div style='margin: 1.2rem 0;'></div>", unsafe_allow_html=True)
     confirm_text = st.text_input(
         "type 'confirm' to enable publish",
         key="publish_confirm_input",
-        value=modal.get("confirm_text", ""),
         label_visibility="visible",
     )
-    modal["confirm_text"] = confirm_text
 
-    can_publish = confirm_text.strip().lower() == "confirm" and seconds_remaining > 0
+    # Server-side belt to W10's suspenders: refuse confirm when over the
+    # X cap so the publish_post_atomic length check doesn't have to fire.
+    can_publish = (
+        confirm_text.strip().lower() == "confirm"
+        and char_count <= 280
+    )
     col_a, col_b = st.columns([1, 1])
     with col_a:
         if st.button(
@@ -388,12 +406,22 @@ def _render_publish_modal(conn) -> None:
             disabled=not can_publish,
             key="publish_confirm_btn",
         ):
+            # ---- Raw-token critical section — keep it tight. ----
+            # mint() returns a MintedToken whose .raw_token lives ONLY in
+            # this local variable. The publish call below consumes it in
+            # a single synchronous Python call. After the call returns
+            # the local goes out of scope and the raw value is unreachable.
+            minted = confirmation.mint_confirmation_token(
+                conn, post_id=modal["post_id"], draft_text=modal["text"]
+            )
             result = _internal_tools.publish_post_to_x(
                 conn,
                 post_id=modal["post_id"],
-                confirmation_token=modal["raw_token"],
+                confirmation_token=minted.raw_token,
                 message_id=modal["message_id"],
             )
+            del minted  # explicit: the raw value is gone from this frame.
+            # ---- End critical section ----
             st.session_state.publish_result = {
                 "success": result.success,
                 "intent_url": result.intent_url,
@@ -405,16 +433,6 @@ def _render_publish_modal(conn) -> None:
         if st.button("cancel", key="publish_cancel_btn"):
             st.session_state.publish_modal = None
             st.rerun()
-
-    # NOTE: C4 — no script-rerun polling. A previous implementation called
-    # `time.sleep(1); st.rerun()` to animate the countdown, which blocked
-    # the Streamlit server thread for the full TTL window (~60 s) per
-    # publish modal — every interaction (cancel, chat input, sidebar
-    # click) was queued behind the next 1-s wake-up. The countdown now
-    # renders once on entry; the user types 'confirm' and clicks, and
-    # the server-side six-check validation (§28.10 rule #10) rejects the
-    # click cleanly if the token has expired. To see a fresh TTL the
-    # user re-opens the modal — mint_confirmation_token is cheap.
 
 
 def _render_publish_result() -> None:
