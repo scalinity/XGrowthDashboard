@@ -102,7 +102,11 @@ def _query_rows(
         sql += " AND pillar = ?"
         params.append(pillar)
     if reply_intent:
-        sql += " AND reply_intent = ?"
+        # /review-2 🔵 #3 — reply_intent is set at draft/post time per §29.5,
+        # so most fresh candidates carry NULL. Hiding untagged rows when
+        # Daniel filters by intent makes the queue feel emptier than it is;
+        # treat the filter as "matches this intent OR is still untagged".
+        sql += " AND (reply_intent = ? OR reply_intent IS NULL)"
         params.append(reply_intent)
     if recommended_action:
         sql += " AND recommended_action_label = ?"
