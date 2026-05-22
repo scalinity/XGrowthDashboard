@@ -19,6 +19,24 @@ captures its own timestamp, and it self-prunes per `settings.backup_retention_da
 `launchd` is the native scheduler on macOS, survives reboots, and runs even
 if the laptop missed the trigger time while asleep.
 
+### Before you install — locate `uv` on this machine
+
+The plist and crontab below both hard-code an absolute path to `uv`
+because launchd / cron run with a stripped PATH. Discover the actual
+path on your machine first:
+
+```bash
+which uv
+# Common results:
+#   /Users/danny/.local/bin/uv          (uv's own installer, current default)
+#   /opt/homebrew/bin/uv                (Homebrew on Apple Silicon)
+#   /usr/local/bin/uv                   (Homebrew on Intel)
+```
+
+If your `which uv` output differs from the path baked into the
+templates below, edit the plist / crontab to match. Re-check after any
+`uv` reinstall — the path can move between package managers.
+
 ### Plist template
 
 Save the file below to:
