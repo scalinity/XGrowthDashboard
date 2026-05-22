@@ -406,14 +406,15 @@ def _render_publish_modal(conn) -> None:
             st.session_state.publish_modal = None
             st.rerun()
 
-    if seconds_remaining > 0:
-        # Auto-rerun once per second to update the countdown. This is the
-        # only place the app drives a polling refresh — everything else is
-        # interaction-triggered.
-        import time
-
-        time.sleep(1)
-        st.rerun()
+    # NOTE: C4 — no script-rerun polling. A previous implementation called
+    # `time.sleep(1); st.rerun()` to animate the countdown, which blocked
+    # the Streamlit server thread for the full TTL window (~60 s) per
+    # publish modal — every interaction (cancel, chat input, sidebar
+    # click) was queued behind the next 1-s wake-up. The countdown now
+    # renders once on entry; the user types 'confirm' and clicks, and
+    # the server-side six-check validation (§28.10 rule #10) rejects the
+    # click cleanly if the token has expired. To see a fresh TTL the
+    # user re-opens the modal — mint_confirmation_token is cheap.
 
 
 def _render_publish_result() -> None:
