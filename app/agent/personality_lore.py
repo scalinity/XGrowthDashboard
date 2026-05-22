@@ -343,8 +343,16 @@ def is_over_relied_on(
 # ---------------------------------------------------------------------------
 # Splice rendering — used by prompt_builder.
 # ---------------------------------------------------------------------------
-def render_splice_block(active_lore: list[LoreRow]) -> str:
+def render_splice_block(
+    active_lore: list[LoreRow], *, limit: int | None = None
+) -> str:
     """Render the §28.21 splice — empty string when no active rows.
+
+    P59A-S16: ``limit`` is a defensive cap. Callers in prompt_builder
+    pre-slice via ``list_active(limit=splice_n)`` and this function
+    trusted that — a future caller passing a longer list would have
+    blown past the configured splice count. When ``limit`` is set
+    here too, the function caps regardless of what the caller did.
 
     Format (mirrors the §28.21 example):
 
@@ -356,11 +364,14 @@ def render_splice_block(active_lore: list[LoreRow]) -> str:
     """
     if not active_lore:
         return ""
+    rows_to_render = active_lore if limit is None else active_lore[: int(limit)]
+    if not rows_to_render:
+        return ""
     lines: list[str] = [
         "**Personal lore (running bits to draw on when "
         "content_type = personality):**",
     ]
-    for row in active_lore:
+    for row in rows_to_render:
         suffix = last_invoked_suffix(row.last_invoked_at_utc)
         lines.append(
             f"- {row.theme}: {row.description}{suffix}"
