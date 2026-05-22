@@ -61,21 +61,25 @@ def test_every_view_compiles(db_conn: sqlite3.Connection) -> None:
         db_conn.execute(f"SELECT * FROM {view} LIMIT 0")
 
 
+EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
+    "001_initial.sql",
+    "002_views.sql",
+    "003_backup_settings.sql",
+    "004_data_exports.sql",
+    "005_agent_core.sql",
+    "006_publish_columns.sql",
+    "007_post_classifications_unique.sql",
+    "008_agent_tool_usage_view.sql",
+    "009_reply_targets.sql",
+    "010_reply_targets_idx.sql",
+    "011_drafting_intelligence.sql",
+)
+
+
 def test_schema_migrations_records_each_file(db_conn: sqlite3.Connection) -> None:
     rows = db_conn.execute("SELECT filename FROM schema_migrations ORDER BY filename").fetchall()
     filenames = [row["filename"] for row in rows]
-    assert filenames == [
-        "001_initial.sql",
-        "002_views.sql",
-        "003_backup_settings.sql",
-        "004_data_exports.sql",
-        "005_agent_core.sql",
-        "006_publish_columns.sql",
-        "007_post_classifications_unique.sql",
-        "008_agent_tool_usage_view.sql",
-        "009_reply_targets.sql",
-        "010_reply_targets_idx.sql",
-    ]
+    assert filenames == list(EXPECTED_MIGRATION_FILES)
 
 
 def test_apply_migrations_is_idempotent(db_path: Path) -> None:
@@ -83,18 +87,7 @@ def test_apply_migrations_is_idempotent(db_path: Path) -> None:
     first_run = apply_migrations(conn)
     second_run = apply_migrations(conn)
     conn.close()
-    assert first_run == [
-        "001_initial.sql",
-        "002_views.sql",
-        "003_backup_settings.sql",
-        "004_data_exports.sql",
-        "005_agent_core.sql",
-        "006_publish_columns.sql",
-        "007_post_classifications_unique.sql",
-        "008_agent_tool_usage_view.sql",
-        "009_reply_targets.sql",
-        "010_reply_targets_idx.sql",
-    ]
+    assert first_run == list(EXPECTED_MIGRATION_FILES)
     assert second_run == []
 
 
@@ -259,3 +252,126 @@ def test_settings_seed_is_idempotent(db_conn: sqlite3.Connection) -> None:
     seed_settings(db_conn)
     after = db_conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0]
     assert before == after, "seed_settings must be idempotent (INSERT OR IGNORE)"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.8 — Drafting Intelligence Pack (migration 011).
+# ---------------------------------------------------------------------------
+PHASE_58_TABLES: tuple[str, ...] = (
+    "voice_profiles",
+    "post_embeddings",
+    "prepublish_scores",
+)
+
+PHASE_58_SETTINGS: tuple[str, ...] = (
+    "voice_profile_window_days",
+    "voice_profile_min_source_posts",
+    "repetition_guard_lookback_days",
+    "repetition_guard_near_duplicate_threshold",
+    "repetition_guard_close_echo_threshold",
+    "prepublish_scorer_llm_augmentation_enabled",
+    "modal_hash_recheck_debounce_ms",
+    "modal_edit_settle_seconds",
+)
+
+
+def test_phase58_tables_exist(db_conn: sqlite3.Connection) -> None:
+    rows = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    names = {row["name"] for row in rows}
+    missing = set(PHASE_58_TABLES) - names
+    assert not missing, f"Phase 5.8 tables missing: {missing}"
+
+
+def test_phase58_new_agent_drafts_columns(db_conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in db_conn.execute("PRAGMA table_info(agent_drafts)")}
+    assert {"prepublish_score_id", "confidence_label", "similarity_warning_json"}.issubset(cols)
+
+
+def test_phase58_new_agent_messages_column(db_conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in db_conn.execute("PRAGMA table_info(agent_messages)")}
+    assert "confidence_label" in cols
+
+
+def test_phase58_voice_profiles_unique_active(db_conn: sqlite3.Connection) -> None:
+    # First active row is allowed.
+    db_conn.execute(
+        """
+        INSERT INTO voice_profiles
+          (is_active, source_post_window_days, source_post_count, profile_json,
+           model_used, tokens_used)
+        VALUES (1, 90, 12, '{}', 'claude-haiku-4-5-20251001', 0)
+        """
+    )
+    # Second active row violates the partial unique index.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO voice_profiles
+              (is_active, source_post_window_days, source_post_count, profile_json,
+               model_used, tokens_used)
+            VALUES (1, 90, 12, '{}', 'claude-haiku-4-5-20251001', 0)
+            """
+        )
+
+
+def test_phase58_post_embeddings_cascade_on_post_delete(db_conn: sqlite3.Connection) -> None:
+    post_id = db_conn.execute(
+        """
+        INSERT INTO posts (created_date, text, type, posted_via, manual_confirmation_status)
+        VALUES ('2026-05-22', 'hello', 'standalone', 'manual', 'confirmed')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO post_embeddings
+          (post_id, embedding_blob, embedding_dim, model_name, source_text_hash)
+        VALUES (?, X'00', 4, 'voyage-3-lite', 'deadbeef')
+        """,
+        (post_id,),
+    )
+    db_conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    remaining = db_conn.execute(
+        "SELECT COUNT(*) FROM post_embeddings WHERE post_id = ?", (post_id,)
+    ).fetchone()[0]
+    assert remaining == 0, "post_embeddings should cascade-delete with its parent post"
+
+
+def test_phase58_prepublish_scores_composite_label_check(db_conn: sqlite3.Connection) -> None:
+    # Insert a parent draft to satisfy the FK first.
+    draft_id = db_conn.execute(
+        """
+        INSERT INTO agent_drafts (draft_kind, text)
+        VALUES ('standalone', 'placeholder')
+        RETURNING id
+        """
+    ).fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO prepublish_scores
+              (agent_draft_id, clarity_score, hook_strength_score, specificity_score,
+               length_fit_score, format_fit_score, topic_fit_score, composite_label,
+               scorer_version)
+            VALUES (?, 2, 2, 2, 2, 2, 2, 'mediocre', 'prepublish-scorer/0.1.0')
+            """,
+            (draft_id,),
+        )
+
+
+def test_phase58_agent_drafts_confidence_label_check(db_conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO agent_drafts (draft_kind, text, confidence_label)
+            VALUES ('standalone', 'x', 'gut_feel')
+            """
+        )
+
+
+def test_phase58_settings_rows_present(db_conn: sqlite3.Connection) -> None:
+    keys = {row["key"] for row in db_conn.execute("SELECT key FROM settings").fetchall()}
+    missing = set(PHASE_58_SETTINGS) - keys
+    assert not missing, f"missing Phase 5.8 settings rows: {missing}"
