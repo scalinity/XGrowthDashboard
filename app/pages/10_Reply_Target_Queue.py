@@ -278,15 +278,23 @@ with st.expander("＋  add candidate (paste URL)", expanded=False):
                         "Use the filter bar above to find the existing row."
                     )
                 else:
+                    # /review-2 🟡 #3 — `or None` coerces a real 0 to NULL.
+                    # A candidate genuinely at 0 likes / 0 replies is data,
+                    # not "no value provided". Only the author follower
+                    # count uses the `0 → None` mapping because 0 followers
+                    # is functionally unknown (and the number_input's default
+                    # is 0).
                     rec = _record_reply_target(
                         conn,
                         target_post_url=url_clean,
                         target_post_text=target_text or None,
                         target_user=final_handle,
-                        target_author_follower_count=int(author_followers) or None,
-                        like_count=int(like_count) or None,
-                        reply_count=int(reply_count) or None,
-                        repost_count=int(repost_count) or None,
+                        target_author_follower_count=(
+                            int(author_followers) if author_followers else None
+                        ),
+                        like_count=int(like_count),
+                        reply_count=int(reply_count),
+                        repost_count=int(repost_count),
                         pillar=None if c_pillar == "—" else c_pillar,
                         reply_intent=None if c_intent == "—" else c_intent,
                         discovered_via="manual",

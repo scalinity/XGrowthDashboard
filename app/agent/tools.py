@@ -944,6 +944,14 @@ def _revise_draft(
 # more context (likes / replies / author follower count discovered later)
 # refreshes the row without re-scoring it — scoring lives on
 # score_reply_candidates per §29.8.
+#
+# CONTRACT (/review-2 🟡 #3):
+#   * Pass an explicit value to set a column, including 0.
+#   * Pass None (the default for every keyword) to leave the existing
+#     column untouched on the re-record path, or to leave it NULL on insert.
+#   * Callers must NOT use ``int(x) or None`` to mean "field omitted" —
+#     a legitimate 0 (e.g. a candidate genuinely at 0 likes) is data and
+#     should land as 0, not NULL.
 # ---------------------------------------------------------------------------
 def _record_reply_target(
     conn: sqlite3.Connection,
