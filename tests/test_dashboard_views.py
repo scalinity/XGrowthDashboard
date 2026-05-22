@@ -174,6 +174,65 @@ def test_palette_contains_no_red_dominant_tones() -> None:
     )
 
 
+def test_progress_weekly_post_counts_buckets_into_correct_iso_weeks(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Regression for an SQLite `||` operator-precedence bug that made the
+    weekly-bucketing query return NULL week_starts (which then never matched
+    the Python-side fill, so every week reported zero)."""
+    from datetime import date, timedelta
+
+    # Pick two fixed Mondays so the assertions are deterministic regardless
+    # of which day-of-week the test happens to run on.
+    monday_a = date(2026, 5, 4)   # Monday
+    monday_b = date(2026, 5, 11)  # Monday
+    rows = [
+        (monday_a,                          "standalone"),  # Mon A
+        (monday_a + timedelta(days=2),      "standalone"),  # Wed A
+        (monday_a + timedelta(days=4),      "reply"),       # Fri A
+        (monday_b,                          "standalone"),  # Mon B
+        (monday_b + timedelta(days=6),      "reply"),       # Sun B (still bucket B)
+    ]
+    for i, (d, t) in enumerate(rows):
+        db_conn.execute(
+            """
+            INSERT INTO posts
+              (x_post_id, created_at_utc, created_date, text, type,
+               posted_via, manual_confirmation_status)
+            VALUES (?, ?, ?, ?, ?, 'manual', 'confirmed')
+            """,
+            (f"weekly_test_{i}", f"{d.isoformat()}T12:00:00Z",
+             d.isoformat(), "x", t),
+        )
+
+    fetched = db_conn.execute(
+        """
+        SELECT
+            DATE(created_date,
+                 '-' || ((CAST(strftime('%w', created_date) AS INTEGER) + 6) % 7)
+                 || ' days') AS week_start,
+            SUM(CASE WHEN type IN ('standalone', 'thread_root', 'thread_child', 'quote')
+                      THEN 1 ELSE 0 END) AS posts,
+            SUM(CASE WHEN type = 'reply' THEN 1 ELSE 0 END) AS replies
+        FROM posts
+        WHERE created_date BETWEEN '2026-05-04' AND '2026-05-17'
+        GROUP BY week_start
+        """,
+    ).fetchall()
+    # The whole point of this test: NULL week_start = SQLite || precedence
+    # bug; if any row reports NULL the original ship-the-feature regression
+    # is back.
+    assert all(r["week_start"] is not None for r in fetched), (
+        f"weekly bucket returned NULL — SQLite || precedence bug: "
+        f"{[dict(r) for r in fetched]}"
+    )
+    by_week = {r["week_start"]: (r["posts"], r["replies"]) for r in fetched}
+    # Week A: 2 posts (Mon + Wed) + 1 reply (Fri) → all bucket on 2026-05-04.
+    assert by_week["2026-05-04"] == (2, 1)
+    # Week B: 1 post (Mon) + 1 reply (Sun belongs to Monday-anchored week B).
+    assert by_week["2026-05-11"] == (1, 1)
+
+
 def test_lane_scatter_palette_contains_no_red() -> None:
     """The scatter palette is the one place red-coloured dots could slip
     in (Content Performance assigns lanes a color by index). Block it

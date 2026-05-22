@@ -25,6 +25,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Browser-automation scratch (Playwright MCP snapshots, console logs,
+# ad-hoc screenshots taken during visual verification). Not part of the
+# committed artifact set per CLAUDE.md "Public-Safe Commits".
+.playwright-mcp/
+phase*.png
+
 # OS
 .DS_Store
 Thumbs.db

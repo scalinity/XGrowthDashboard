@@ -31,17 +31,19 @@ from app.forms import get_setting, snapshot as snapshot_form
 from app.pages import open_connection
 
 
-def _format_delta(value: int | None, *, noise_floor: int = 2) -> str:
-    """Render a delta as a string with the §13 noise-band convention.
+def _format_delta(value: int | None, *, noise_floor: int = 2) -> tuple[str, str]:
+    """Render a delta as (big_value, caption) for st.metric(value=…, delta=…).
 
-    Values inside ``|value| <= noise_floor`` are wrapped with "within noise"
-    — no arrow, no sign of conviction.
+    Streamlit's metric value box is narrow (~6 chars in mono), so the
+    "(noise)" qualifier from §12 lives on the small caption line below
+    the number rather than inside the big value. Out-of-band values get
+    an empty caption.
     """
     if value is None:
-        return "—"
+        return "—", ""
     if abs(value) <= noise_floor:
-        return f"±{value:+d} (within noise)"
-    return f"{value:+d}"
+        return f"{value:+d}", f"within ±{noise_floor}/day"
+    return f"{value:+d}", ""
 
 
 def _today_followers_snapshot(conn):
@@ -150,7 +152,10 @@ else:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Followers", f"{followers:,}")
-    c2.metric("Δ yesterday", _format_delta(delta_yest))
+    delta_y_value, delta_y_caption = _format_delta(delta_yest)
+    # `delta_color="off"` keeps the noise caption styled as a neutral
+    # annotation rather than a gain/loss signal.
+    c2.metric("Δ yesterday", delta_y_value, delta=delta_y_caption or None, delta_color="off")
     c3.metric("Δ baseline", f"{delta_base:+,}")
     c4.metric(f"To {target}", f"{int(distance_ms or 0):,}" if distance_ms is not None else "—")
 

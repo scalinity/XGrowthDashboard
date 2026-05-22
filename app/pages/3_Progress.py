@@ -66,11 +66,14 @@ def _weekly_post_counts(conn, weeks: int = 8) -> list[tuple[str, int, int]]:
 
     # SQLite's strftime('%w', d) returns weekday with Sunday=0, so to anchor
     # on Monday we subtract `(strftime('%w', d) + 6) % 7` days from each row.
+    # NB: the inner arithmetic MUST be parenthesised before the `||` concat
+    # — SQLite's `||` precedence is high enough that without parens the
+    # modifier reduces to a bare integer and DATE() returns NULL.
     rows = conn.execute(
         """
         SELECT
             DATE(created_date,
-                 '-' || (CAST(strftime('%w', created_date) AS INTEGER) + 6) % 7
+                 '-' || ((CAST(strftime('%w', created_date) AS INTEGER) + 6) % 7)
                  || ' days') AS week_start,
             SUM(CASE WHEN type IN ('standalone', 'thread_root', 'thread_child', 'quote')
                       THEN 1 ELSE 0 END) AS posts,
