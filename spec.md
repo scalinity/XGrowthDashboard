@@ -4545,12 +4545,14 @@ Four features distilled from CreatorOS's strategic-analysis surfaces, ported int
   * [ ] Persistence wrapper that writes to `account_research_reports`.
 * [ ] Create `config/account_research_prompt.md` with the structured-output prompt + the `BEGIN_UNTRUSTED_DATA` wrap convention.
 * [ ] New agent tool `#19 analyze_account(target_handle, target_bio_text, target_recent_posts_text)` — exposed for chat invocation ("research @target for me").
-* [ ] Add Account Researcher tab to §29.7 Reply Target Queue:
+* [ ] Add Account Researcher surface adjacent to §29.7 Reply Target Queue:
 
   * [ ] Form: target handle, bio paste, recent posts paste (one per `---`).
   * [ ] Submit → `analyze_account` → results display with the full `analysis_json` schema rendered.
   * [ ] "Generate reply target from this research" button — creates a `reply_targets` row prefilled with the research's recommended entry topics, links via `account_research_reports.linked_reply_target_id`.
 * [ ] Past research sidebar in the new tab — list by `target_handle`, newest first. Comparison view when ≥2 reports exist for the same handle (side-by-side diff of positioning + posting patterns over time).
+
+> **Phase 5.10 implementation divergence (documented 2026-05-22 per P510R-18):** the Account Researcher ships as a sibling Streamlit page (`app/pages/13_Account_Researcher.py`) rather than an `st.tabs()` container inside the 600+-line `10_Reply_Target_Queue.py`. Same sidebar position, simpler routing, no large-page restructure. The §29.7 ↔ §28.24 link is fully preserved via the bidirectional `account_research_reports.linked_reply_target_id` column — "Generate reply target from this research" inserts a row into the Queue and stamps the back-reference, so Daniel can navigate in either direction. Future Phase 5.11+ work may revisit the consolidation; until then, treat the sibling-page shape as the canonical surface.
 * [ ] Tests: round-trip a synthetic target → assert structured analysis returned; linkage to `reply_targets` creates valid row.
 
 **Profile Audit (§28.25):**
