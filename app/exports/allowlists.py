@@ -84,15 +84,29 @@ class TableAllowlist(TypedDict):
     excluded_columns: list[str]
 
 
-class UnknownTableError(KeyError):
+class UnknownTableError(ValueError):
     """Raised by exporters when asked to export a table not in the registry.
 
-    Subclasses ``KeyError`` so ``ALLOWLISTS[name]`` callers can catch this
-    via either type. ``str(err)`` returns the table name with hints.
+    Inherits from :class:`ValueError` (not :class:`KeyError`) so
+    ``str(err)`` returns the plain message text. ``KeyError`` calls
+    :func:`repr` on its message argument, which would surface the
+    multi-line message as a single double-quoted string in CLI / UI
+    output — confusing to read.
+
+    The "allowlisted tables" list is computed lazily at ``__init__``
+    time (rather than baked into a frozen string at class-definition
+    time) so this class can be defined BEFORE :data:`ALLOWLISTS` is
+    populated. Earlier revisions captured the list eagerly and depended
+    on the module's load order for correctness — a future circular
+    import would have NameError'd. The lazy lookup tolerates a
+    partially-initialised module.
     """
 
     def __init__(self, table_name: str) -> None:
-        known = ", ".join(sorted(ALLOWLISTS.keys()))
+        try:
+            known = ", ".join(sorted(ALLOWLISTS.keys()))
+        except NameError:
+            known = "(registry not yet loaded)"
         super().__init__(
             f"Unknown table {table_name!r}. "
             f"Allowlisted tables: {known}. "
