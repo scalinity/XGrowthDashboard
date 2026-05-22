@@ -278,37 +278,22 @@ def _resolve_monthly_review(
 
 # Per-view filter parsers. The agent emits ``v_<name> row
 # <slash-separated-tokens>``; each entry below maps a view to the SQL
-# WHERE template + the ordered column list the tokens fill. Views not
-# listed here strip with ``view_filter_mismatch``.
-_VIEW_FILTERS: dict[str, tuple[str, list[str]]] = {
-    "v_lane_performance": (
-        "pillar = ? AND audience = ? AND cta = ?",
-        ["pillar", "audience", "cta"],
-    ),
-    "v_content_type_performance": (
-        "content_type = ?",
-        ["content_type"],
-    ),
-    "v_funnel_daily": (
-        "event_date = ?",
-        ["event_date"],
-    ),
-    "v_account_daily": (
-        "snapshot_date = ?",
-        ["snapshot_date"],
-    ),
-    "v_post_latest_metrics": (
-        "post_id = ?",
-        ["post_id"],
-    ),
-    "v_daily_reps": (
-        "activity_date = ?",
-        ["activity_date"],
-    ),
-    "v_follower_velocity": (
-        "snapshot_date = ?",
-        ["snapshot_date"],
-    ),
+# WHERE template. The tokens are positional placeholders matching the
+# template's ``?`` count. Views not listed here strip with
+# ``view_filter_mismatch``.
+#
+# P510R-21: previous shape stored (where_template, [columns]) tuples
+# but the columns list was never consumed (the resolver unpacked it
+# into ``_cols`` and discarded). Dropped the list — the where_template
+# already encodes the expected token count via its ``?`` placeholders.
+_VIEW_FILTER_TEMPLATES: dict[str, str] = {
+    "v_lane_performance": "pillar = ? AND audience = ? AND cta = ?",
+    "v_content_type_performance": "content_type = ?",
+    "v_funnel_daily": "event_date = ?",
+    "v_account_daily": "snapshot_date = ?",
+    "v_post_latest_metrics": "post_id = ?",
+    "v_daily_reps": "activity_date = ?",
+    "v_follower_velocity": "snapshot_date = ?",
 }
 
 
@@ -323,7 +308,7 @@ def _resolve_view_row(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]
     filter_text = c.filter_text
     if filter_text is None:
         return False, "view_filter_mismatch"
-    if view_name not in _VIEW_FILTERS:
+    if view_name not in _VIEW_FILTER_TEMPLATES:
         return False, "view_not_found"
 
     # Confirm the view actually exists in the DB (defensive — covers
@@ -335,7 +320,7 @@ def _resolve_view_row(conn: sqlite3.Connection, c: Citation) -> tuple[bool, str]
     if not exists:
         return False, "view_not_found"
 
-    where_template, _cols = _VIEW_FILTERS[view_name]
+    where_template = _VIEW_FILTER_TEMPLATES[view_name]
     tokens = [t.strip() for t in filter_text.split("/")]
     expected = where_template.count("?")
     if len(tokens) != expected:
@@ -365,7 +350,7 @@ _ID_RESOLVERS: dict[str, Resolver] = {
 
 
 SUPPORTED_RECORD_TYPES: tuple[str, ...] = tuple(_ID_RESOLVERS.keys()) + tuple(
-    _VIEW_FILTERS.keys()
+    _VIEW_FILTER_TEMPLATES.keys()
 )
 
 
