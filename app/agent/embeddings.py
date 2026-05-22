@@ -207,6 +207,9 @@ DEFAULT_PROVIDER: _ProviderAdapter = VoyageAIAdapter()
 # Public entry points used by the repetition guard and the backfill script.
 # ---------------------------------------------------------------------------
 def embed_one(text: str, *, provider: _ProviderAdapter | None = None) -> EmbeddingResult:
+    # Convenience wrapper around embed_batch. Allocates a single-element
+    # list; negligible at MVP volume but worth noting for readers who
+    # might be tempted to micro-optimize the inline call (P58R-28).
     return embed_batch([text], provider=provider)
 
 
