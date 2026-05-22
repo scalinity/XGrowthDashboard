@@ -241,6 +241,42 @@ def test_list_all_handles_groups_correctly(db_conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 # generate_reply_target — bidirectional link to reply_targets.
 # ---------------------------------------------------------------------------
+def test_generate_reply_target_second_click_does_not_collide(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P510R-2: second promotion for the SAME handle must succeed.
+
+    target_post_url has a UNIQUE index (migration 009). The fix uses
+    a per-report fragment so each promoted target gets a unique URL.
+    """
+    import time
+    analysis_1 = _ar.analyze(
+        target_handle="zeta",
+        target_bio_text="",
+        target_recent_posts_text="p1",
+        model_caller=_fake_caller(_valid_analysis_json()),
+    )
+    report_a = _ar.save(db_conn, analysis=analysis_1)
+    time.sleep(1.05)
+    analysis_2 = _ar.analyze(
+        target_handle="zeta",
+        target_bio_text="",
+        target_recent_posts_text="p2",
+        model_caller=_fake_caller(_valid_analysis_json()),
+    )
+    report_b = _ar.save(db_conn, analysis=analysis_2)
+
+    rt_a = _ar.generate_reply_target(db_conn, report_id=report_a)
+    rt_b = _ar.generate_reply_target(db_conn, report_id=report_b)
+    assert rt_a != rt_b
+    # Each promoted target gets its own URL (UNIQUE constraint holds).
+    urls = db_conn.execute(
+        "SELECT target_post_url FROM reply_targets WHERE id IN (?, ?)",
+        (rt_a, rt_b),
+    ).fetchall()
+    assert len({r["target_post_url"] for r in urls}) == 2
+
+
 def test_generate_reply_target_creates_linked_row(
     db_conn: sqlite3.Connection,
 ) -> None:

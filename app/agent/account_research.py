@@ -523,6 +523,14 @@ def generate_reply_target(
     # — we use 'agent_score' (closest semantic). The Phase 5.9 `source`
     # column accepts 'agent_curated_account'. Status defaults to
     # 'candidate' per the schema's CHECK.
+    #
+    # P510R-2: target_post_url has a UNIQUE index (migration 009).
+    # Multiple reports per handle are an explicit §28.24 design, so the
+    # bare profile URL would collide on the second promotion. Use a
+    # synthetic fragment so each promoted target is unique per report.
+    # X ignores the fragment, so click-through still lands on the
+    # profile.
+    synthetic_url = f"https://x.com/{handle}#account-research-{report_id}"
     cur = conn.execute(
         """
         INSERT INTO reply_targets
@@ -532,7 +540,7 @@ def generate_reply_target(
         RETURNING id
         """,
         (
-            f"https://x.com/{handle}",
+            synthetic_url,
             handle,
             json.dumps(reply_strategy),
         ),
