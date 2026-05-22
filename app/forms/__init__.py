@@ -75,7 +75,13 @@ def get_setting(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
         return default
 
 
-def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
+def set_setting(
+    conn: sqlite3.Connection,
+    key: str,
+    value: Any,
+    *,
+    suppress_audit: bool = False,
+) -> None:
     """Upsert a settings row, JSON-encoding ``value``. Used by the Settings page.
 
     Phase 5.11 (§28.30): captures the prior value first, performs the
@@ -86,6 +92,13 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
     wrapped in a defensive try/except so a missing ``audit_logs`` table
     (e.g. a legacy DB created before migration 015) never blocks the
     underlying settings write.
+
+    P511R-11: ``suppress_audit=True`` skips the audit append entirely.
+    Use for system-touched operational telemetry keys (e.g.
+    ``last_backup_at_utc`` — the backup itself already audit-logs
+    ``admin/backup_run``; a parallel ``settings_changed_last_backup_
+    at_utc`` row is pure noise that would accumulate ~365 rows/year).
+    Daniel-editable settings should never pass this flag.
     """
     # Capture the prior value BEFORE the upsert so the diff is honest.
     prior_row = conn.execute(
@@ -111,7 +124,10 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
     )
 
     # Audit-log the change (§28.30 write-through point). Skipped when
-    # the value didn't actually change.
+    # the value didn't actually change OR when the caller flagged the
+    # write as operational telemetry (P511R-11).
+    if suppress_audit:
+        return
     if old_value != value:
         try:
             # Local import to avoid an import cycle (app.agent.audit_log

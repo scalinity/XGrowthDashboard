@@ -255,7 +255,13 @@ def backup_database(
                 "Backup deleted; source DB is untouched."
             )
 
-        set_setting(conn, "last_backup_at_utc", _now_utc_iso())
+        # P511R-11: suppress the settings_changed_last_backup_at_utc
+        # audit row — the parallel admin/backup_run row below carries
+        # the same signal with structured context, and over 365 days
+        # of daily backups the per-write audit rows are pure noise.
+        set_setting(
+            conn, "last_backup_at_utc", _now_utc_iso(), suppress_audit=True
+        )
         pruned = _prune_old_backups(backups_path, retention, keep=target)
 
         # §28.30 write-through: every backup run lands one audit row.

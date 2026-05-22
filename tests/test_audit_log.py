@@ -173,6 +173,23 @@ def test_set_setting_audit_records_first_write_as_old_none(
     assert rows[0].details["new_value"] == "v1"
 
 
+def test_p511r11_set_setting_suppress_audit_skips_row(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """suppress_audit=True skips the audit append entirely (operational
+    telemetry path — e.g. last_backup_at_utc)."""
+    set_setting(
+        db_conn,
+        "last_backup_at_utc",
+        "2026-05-22T18:00:00",
+        suppress_audit=True,
+    )
+    rows = audit_log.query(
+        db_conn, category="settings", target_id="last_backup_at_utc"
+    )
+    assert rows == []
+
+
 # ---------------------------------------------------------------------------
 # Append-only invariant — no helper exposes UPDATE / DELETE on audit_logs.
 # ---------------------------------------------------------------------------
