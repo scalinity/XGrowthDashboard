@@ -184,6 +184,12 @@ def load_recent_post_ids(
 def load_recent_post_texts(
     conn: sqlite3.Connection, *, post_ids: list[int]
 ) -> list[str]:
+    # P510R-8: posts.text is NOT NULL in migration 001, so the NULL
+    # case shouldn't reach via normal flow. But belt-and-suspenders:
+    # if a future migration loosens the constraint, or someone hand-
+    # edits the DB, this guard prevents downstream
+    # "\n\n---\n\n".join(...) from raising TypeError on a NULL row.
+    # Empty string keeps the boundary separator intact in that case.
     if not post_ids:
         return []
     placeholders = ",".join("?" * len(post_ids))
@@ -194,7 +200,7 @@ def load_recent_post_texts(
         """,
         post_ids,
     ).fetchall()
-    return [r["text"] for r in rows]
+    return [r["text"] or "" for r in rows]
 
 
 # ---------------------------------------------------------------------------
