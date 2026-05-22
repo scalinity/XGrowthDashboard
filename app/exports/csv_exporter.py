@@ -78,8 +78,15 @@ def export_table_to_csv(
         Key into :data:`app.exports.allowlists.ALLOWLISTS`.
     output_path
         Destination file. Created if absent; overwritten if present. Parent
-        directory is created on demand. Relative paths anchor on
-        ``PROJECT_ROOT`` (matches ``app.backup``).
+        directory is created on demand.
+
+        Relative paths anchor on ``PROJECT_ROOT`` (not the current working
+        directory), matching ``app.backup``. This differs from Python's
+        usual "relative means relative to CWD" convention — a CLI caller
+        running ``python -m app.exports.csv_exporter --output foo.csv``
+        from ``/tmp`` will see the file land at ``<project>/foo.csv``,
+        not ``/tmp/foo.csv``. Pass an absolute path if you want CWD
+        semantics.
     include_opt_in
         When True, appends ``opt_in_columns`` after ``default_columns`` in
         both the header and each row. Phase 5 ships with every table's
