@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.db import DEFAULT_DB_PATH, connect
+from app.db import DEFAULT_DB_PATH, PROJECT_ROOT, connect
 from app.forms import get_setting, set_setting
 
 DEFAULT_BACKUPS_DIR: Path = DEFAULT_DB_PATH.parent / "backups"
@@ -109,11 +109,25 @@ def _prune_old_backups(
     return pruned
 
 
+def _anchor_on_project_root(path: Path) -> Path:
+    """If ``path`` is relative, anchor it on ``PROJECT_ROOT``.
+
+    The seeded ``backup_dir`` value is ``"data/backups"`` (relative). The
+    launchd plist and crontab in docs/AUTOMATION.md ``cd`` into the project
+    first, so a naive ``Path.resolve()`` against CWD works there. But a
+    manual ``uv run python -m scripts.backup_db`` from ``~`` would drop
+    backups at ``~/data/backups/…`` while the dashboard looks under the
+    project's own ``data/backups/``. Anchoring on PROJECT_ROOT keeps the
+    two views consistent regardless of CWD.
+    """
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 def _resolve_backups_dir(conn, override: Path | None) -> Path:
     if override is not None:
-        return Path(override)
+        return _anchor_on_project_root(Path(override))
     seeded = get_setting(conn, "backup_dir", default=str(DEFAULT_BACKUPS_DIR))
-    return Path(seeded) if seeded else DEFAULT_BACKUPS_DIR
+    return _anchor_on_project_root(Path(seeded) if seeded else DEFAULT_BACKUPS_DIR)
 
 
 def _resolve_retention_days(conn, override: int | None) -> int:

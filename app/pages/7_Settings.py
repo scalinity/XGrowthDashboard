@@ -236,8 +236,19 @@ def _humanise_age(seconds: float) -> str:
 
 
 def _backups_dir_from_settings() -> Path:
+    """Resolve ``settings.backup_dir`` against PROJECT_ROOT, not CWD.
+
+    Mirrors ``app.backup._anchor_on_project_root`` so the manifest expander
+    points at the same directory the runner writes to, regardless of the
+    Streamlit process's CWD at boot.
+    """
+    from app.db import PROJECT_ROOT
+
     seeded = get_setting(conn, "backup_dir", default=str(DEFAULT_BACKUPS_DIR))
-    return Path(seeded).resolve() if seeded else DEFAULT_BACKUPS_DIR.resolve()
+    path = Path(seeded) if seeded else DEFAULT_BACKUPS_DIR
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
 
 
 def _list_backups(backups_dir: Path) -> list[tuple[Path, int, float]]:

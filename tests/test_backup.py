@@ -17,8 +17,19 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+
+@contextmanager
+def _chdir(path: Path):
+    prev = Path.cwd()
+    try:
+        os.chdir(path)
+        yield
+    finally:
+        os.chdir(prev)
 
 from app.backup import BACKUP_FILENAME_GLOB, backup_database
 from app.forms import get_setting
@@ -228,6 +239,42 @@ def test_restore_with_confirm_moves_old_to_sidecar(
 # ---------------------------------------------------------------------------
 # 6. Retention prunes files older than the window (mtime-based).
 # ---------------------------------------------------------------------------
+
+def test_relative_backups_dir_anchored_on_project_root(
+    db_conn: sqlite3.Connection,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """W3 regression — a relative backups_dir must NOT resolve against the
+    process CWD. We monkeypatch PROJECT_ROOT to a tmp directory, set CWD
+    to a *different* tmp directory, and pass a relative backups_dir. The
+    backup must land under the patched PROJECT_ROOT, not under CWD.
+    """
+    db_conn.close()
+    fake_root = tmp_path / "fake_project_root"
+    fake_root.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("app.backup.PROJECT_ROOT", fake_root)
+
+    with _chdir(elsewhere):
+        result = backup_database(
+            source_path=db_path,
+            backups_dir=Path("rel_backups"),
+            retention_days=30,
+        )
+
+    expected_dir = (fake_root / "rel_backups").resolve()
+    assert result.path.parent == expected_dir, (
+        f"Backup landed at {result.path.parent}, expected {expected_dir}. "
+        "Relative backups_dir leaked into CWD-anchored resolution."
+    )
+    assert not (elsewhere / "rel_backups").exists(), (
+        "Backup must not appear under CWD-relative path."
+    )
+
 
 def test_retention_zero_keeps_the_freshly_created_backup(
     db_conn: sqlite3.Connection, db_path: Path, tmp_path: Path
