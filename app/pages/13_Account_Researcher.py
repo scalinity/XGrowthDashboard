@@ -209,7 +209,7 @@ def _render_rail(all_handles: list[dict]) -> None:
         return
 
     active_handle = st.session_state.get("ar_active_handle")
-    for h in all_handles:
+    for i, h in enumerate(all_handles):
         handle = h["target_handle"]
         is_active = handle == active_handle
         border = PALETTE["phosphor"] if is_active else PALETTE["hairline"]
@@ -229,9 +229,14 @@ def _render_rail(all_handles: list[dict]) -> None:
             </div>""",
             unsafe_allow_html=True,
         )
+        # P510R-11: index-based key (not handle-interpolated) so the
+        # button key stays well-formed regardless of handle characters
+        # (whitespace, Unicode, mixed case after P510R-9). Stable
+        # within a single render because the list ordering is
+        # deterministic (newest first).
         st.button(
             "open",
-            key=f"ar_open_{handle}",
+            key=f"ar_open_rail_{i}",
             on_click=_handle_select_handle,
             args=(handle,),
             use_container_width=True,
