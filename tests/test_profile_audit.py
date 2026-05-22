@@ -306,6 +306,56 @@ def test_save_stamps_prior_audit_as_superseded(
     assert new_superseded is None
 
 
+def test_save_self_heals_chain_gap(seeded_posts: sqlite3.Connection) -> None:
+    """P510R-5: a subsequent save() stamps ALL prior unsuperseded rows.
+
+    Simulate a gap: insert an unsuperseded audit row directly (bypassing
+    save() so no stamp runs). Then call save() and assert the gap row
+    is also stamped by the new row's id — invariant "AT MOST ONE
+    unsuperseded row at rest" is re-asserted on every save.
+    """
+    # Seed a gap row directly — no save(), so superseded_by stays NULL.
+    seeded_posts.execute(
+        """
+        INSERT INTO profile_audits
+          (bio_snapshot, audit_json, model_used)
+        VALUES ('gap row', '{}', 'claude-opus-4-7')
+        """
+    )
+    gap_id = seeded_posts.execute(
+        "SELECT id FROM profile_audits ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    time.sleep(1.05)
+
+    # Normal save — should self-heal by stamping the gap row.
+    analysis, snapshot = _pa.audit(
+        seeded_posts,
+        bio_text="bio",
+        pinned_post_text="pinned",
+        model_caller=_fake_caller(_valid_audit_json()),
+    )
+    new_id = _pa.save(
+        seeded_posts,
+        analysis=analysis,
+        bio_snapshot="bio",
+        pinned_post_id=None,
+        pinned_post_text="pinned",
+        snapshot=snapshot,
+    )
+
+    healed = seeded_posts.execute(
+        "SELECT superseded_by_audit_id FROM profile_audits WHERE id = ?",
+        (gap_id,),
+    ).fetchone()[0]
+    assert healed == new_id
+
+    # Invariant: only the newest row has NULL superseded_by_audit_id.
+    unsuperseded = seeded_posts.execute(
+        "SELECT COUNT(*) FROM profile_audits WHERE superseded_by_audit_id IS NULL"
+    ).fetchone()[0]
+    assert unsuperseded == 1
+
+
 def test_list_audits_newest_first(seeded_posts: sqlite3.Connection) -> None:
     for i in range(3):
         analysis, snapshot = _pa.audit(

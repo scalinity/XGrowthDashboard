@@ -548,18 +548,23 @@ def save(
         )
         new_id = int(cur.fetchone()[0])
 
-        # Stamp the prior latest audit (if any) as superseded by the
-        # new row.
+        # Stamp ALL prior unsuperseded audits with the new row's id.
+        #
+        # P510R-5: previous shape used `LIMIT 1` to stamp only the most
+        # recent unsuperseded row. If an earlier save() failed mid-
+        # sequence (process kill, DB error) the chain could gap with
+        # multiple unsuperseded rows; the next save would only stamp
+        # the newest, leaving the older gap permanent. Dropping the
+        # LIMIT makes the back-chain self-heal: every subsequent save
+        # closes any prior gaps. At rest, AT MOST ONE row in
+        # profile_audits has superseded_by_audit_id IS NULL — the
+        # current one. This UPDATE re-asserts that invariant on every
+        # save.
         conn.execute(
             """
             UPDATE profile_audits
             SET superseded_by_audit_id = ?
-            WHERE id = (
-                SELECT id FROM profile_audits
-                WHERE id != ?
-                ORDER BY audited_at_utc DESC, id DESC
-                LIMIT 1
-            )
+            WHERE id != ?
               AND superseded_by_audit_id IS NULL
             """,
             (new_id, new_id),
