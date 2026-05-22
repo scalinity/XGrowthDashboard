@@ -32,6 +32,7 @@ from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
 from app.agent import prepublish_scorer as _prepublish_scorer
 from app.agent import repetition_guard as _repetition_guard
+from app.agent import velocity as _velocity
 from app.agent import voice_profile as _voice_profile
 from app.agent.reply_targets import (
     ACTION_TO_SCORE,
@@ -1517,6 +1518,24 @@ AGENT_TOOLS: list[ToolDef] = [
         },
         handler=lambda conn, window_days=7: _content_types.get_content_type_gaps(
             conn, window_days=int(window_days)
+        ),
+    ),
+    ToolDef(
+        name="get_velocity_projection",
+        description=(
+            "Latest v_follower_velocity row: 7d/30d velocity, current "
+            "milestone target, distance, and projected hit dates. ALL "
+            "projection fields are NULL when |delta_7d| < "
+            "velocity_projection_noise_floor_followers (default 10) OR "
+            "velocity <= 0 OR the milestone is met — never display a "
+            "precise date when the input is noise (§28.19). Use this to "
+            "ground velocity questions in real data instead of guessing."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        handler=lambda conn: (
+            _velocity.get_velocity_projection(conn).to_dict()
+            if _velocity.get_velocity_projection(conn) is not None
+            else {"error": "no snapshots — velocity projection unavailable"}
         ),
     ),
     ToolDef(

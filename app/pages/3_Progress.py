@@ -209,6 +209,97 @@ st.markdown(
 
 hairline()
 
+# Phase 5.9 / §28.19 — follower-velocity projection panel.
+# Three states (per spec):
+#   1. noise floor → "trend not yet measurable — projections suppressed".
+#   2. measurable + positive → "current pace + projected hit date".
+#   3. date-target widget — always visible; computes daily-followers-
+#      needed to hit current milestone by a Daniel-picked date.
+from app.agent import velocity as _velocity  # noqa: E402 — page-local
+from datetime import timedelta as _timedelta  # noqa: E402
+
+st.markdown("## Velocity projection")
+_proj = _velocity.get_velocity_projection(conn)
+_noise_floor = _velocity.get_noise_floor(conn)
+if _proj is None:
+    st.markdown(
+        "<p class='faint' style='font-size:0.85rem;'>"
+        "No account snapshots yet — velocity projection unavailable.</p>",
+        unsafe_allow_html=True,
+    )
+elif _proj.in_noise_floor:
+    # Suppressed state — never show a fabricated date.
+    _delta_label = (
+        f"Δ7d = {(_proj.velocity_7d_per_day * 7):+.0f}"
+        if _proj.velocity_7d_per_day is not None else "Δ7d = —"
+    )
+    st.markdown(
+        f"<div style='border-left: 2px solid {PALETTE['warn_amber']}; "
+        f"padding: 0.55rem 0.85rem; margin: 0.4rem 0; "
+        f"background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['warn_amber']}; "
+        f"letter-spacing: 0.08em; text-transform: uppercase;'>"
+        f"NOISE FLOOR · projections suppressed"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; color: {PALETTE['bone']}; "
+        f"margin-top: 0.35rem;'>"
+        f"Trend not yet measurable — projections suppressed until "
+        f"|Δ7d| ≥ {_noise_floor}. "
+        f"<span class='numeric'>({_delta_label})</span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+else:
+    _v7 = _proj.velocity_7d_per_day or 0.0
+    _projected = _proj.projected_milestone_hit_date_at_7d_pace
+    st.markdown(
+        f"<div style='border-left: 2px solid {PALETTE['phosphor']}; "
+        f"padding: 0.55rem 0.85rem; margin: 0.4rem 0; "
+        f"background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['bone_faint']}; "
+        f"letter-spacing: 0.08em; text-transform: uppercase;'>"
+        f"CURRENT PACE · {_v7:+.1f} FOLLOWERS / DAY (7D)"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 1.0rem; color: {PALETTE['bone']}; "
+        f"margin-top: 0.35rem;'>"
+        f"At this pace you'd reach <span class='numeric'>"
+        f"{_proj.current_milestone_target or '—'}"
+        f"</span> by <span class='numeric'>{_projected or '—'}</span>."
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+# Date-target widget — always visible (even in noise floor; this is the
+# "what would it take to hit X" question Daniel asks regardless of trend).
+with st.expander("Date-target widget — what pace would hit the milestone by …", expanded=False):
+    _default_target = _date_t.today() + _timedelta(days=30)
+    _picked = st.date_input(
+        "Target date",
+        value=_default_target,
+        min_value=_date_t.today() + _timedelta(days=1),
+        key="velocity_target_date",
+    )
+    _needed = _velocity.daily_followers_needed_to_hit_milestone_by_date(
+        conn, target_date=_picked
+    )
+    if _needed is None:
+        if _proj is None:
+            st.caption("No snapshot data yet.")
+        elif _proj.distance_to_current_milestone is not None and _proj.distance_to_current_milestone <= 0:
+            st.caption("Milestone already met — pick the next one in Settings.")
+        else:
+            st.caption("Target date is in the past.")
+    else:
+        st.markdown(
+            f"<div class='callout'>To hit "
+            f"<span class='numeric'>{_proj.current_milestone_target}</span> "
+            f"by <span class='numeric'>{_picked.isoformat()}</span> "
+            f"you need <span class='numeric'>+{_needed}</span> followers/day.</div>",
+            unsafe_allow_html=True,
+        )
+
+hairline()
+
 # Behaviour mini-bars.
 st.markdown("## Behaviour (last 8 weeks)")
 weekly = _weekly_post_counts(conn)

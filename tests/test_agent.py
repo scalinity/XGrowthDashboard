@@ -177,6 +177,8 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
         },
         # Phase 5.9 / §28.17 — new read tool.
         "get_content_type_gaps": {"window_days": 7},
+        # Phase 5.9 / §28.19 — velocity projection read.
+        "get_velocity_projection": {},
     }
 
     from app.agent.tools import AGENT_TOOLS
