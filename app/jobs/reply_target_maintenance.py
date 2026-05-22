@@ -47,37 +47,30 @@ def _get_expiry_hours(conn: sqlite3.Connection) -> int:
 
 
 def expire_stale_candidates(conn: sqlite3.Connection) -> list[int]:
-    """Transition stale candidates to ``status='expired'``. Returns affected ids."""
+    """Transition stale candidates to ``status='expired'``. Returns affected ids.
+
+    /review-2 🟡 #7 — collapsed from a two-step SELECT/UPDATE to a single
+    ``UPDATE ... RETURNING id`` inside one transaction. The previous shape
+    left a race window between SELECT and BEGIN IMMEDIATE during which the
+    returned id list could diverge from the rows actually updated; with
+    RETURNING the returned ids are exactly the rows the UPDATE touched.
+    Requires SQLite ≥ 3.35 (Python 3.11 ships 3.37+ on macOS and Linux).
+    """
     hours = _get_expiry_hours(conn)
-    # /review-2 🟡 #5 — datetime() modifier passed as a bind parameter rather
-    # than interpolated into the SQL string. The int() coercion already makes
-    # the f-string path safe, but parameter binding is the project's pattern
-    # elsewhere and surfaces explicit failures (TypeError) if a non-int leaks in.
     cutoff = f"-{int(hours)} hours"
-    # Two-step (SELECT then UPDATE) so the return value is exact.
-    stale_rows = conn.execute(
-        """
-        SELECT id FROM reply_targets
-        WHERE status = 'candidate'
-          AND last_checked_at_utc < datetime('now', ?)
-        """,
-        (cutoff,),
-    ).fetchall()
-    stale_ids = [int(r["id"]) for r in stale_rows]
-    if not stale_ids:
-        return []
-    placeholders = ",".join("?" for _ in stale_ids)
     with transaction(conn):
-        conn.execute(
-            f"""
+        rows = conn.execute(
+            """
             UPDATE reply_targets
             SET status = 'expired',
                 expired_at_utc = datetime('now')
-            WHERE id IN ({placeholders})
+            WHERE status = 'candidate'
+              AND last_checked_at_utc < datetime('now', ?)
+            RETURNING id
             """,
-            stale_ids,
-        )
-    return stale_ids
+            (cutoff,),
+        ).fetchall()
+    return [int(r["id"]) for r in rows]
 
 
 def stale_drafted_candidates(
