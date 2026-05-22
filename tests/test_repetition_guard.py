@@ -313,6 +313,35 @@ def test_check_never_blocks_returns_dict_not_raises(db_conn, monkeypatch) -> Non
 # ---------------------------------------------------------------------------
 # Integration with _save_draft_post — end-to-end happy path
 # ---------------------------------------------------------------------------
+def test_save_draft_post_survives_guard_crash(db_conn, monkeypatch) -> None:
+    """P58R-4: a numpy/sqlite/JSON crash inside the guard must NOT take
+    down _save_draft_post. Spec is explicit: the guard never blocks save
+    or publish."""
+    from app.agent import tools as _tools
+
+    def boom(conn, *, draft_text, draft_kind):
+        raise ValueError("simulated numpy shape mismatch")
+
+    monkeypatch.setattr(
+        "app.agent.tools._repetition_guard.check", boom
+    )
+    result = _tools._save_draft_post(
+        db_conn,
+        text="Shipped the build today.",
+        pillar="build",
+        audience="icp",
+        cta="none",
+    )
+    assert "draft_id" in result
+    assert result["similarity_warning"] is None
+    # The agent_drafts row landed with similarity_warning_json NULL.
+    stored = db_conn.execute(
+        "SELECT similarity_warning_json FROM agent_drafts WHERE id = ?",
+        (result["draft_id"],),
+    ).fetchone()[0]
+    assert stored is None
+
+
 def test_save_draft_post_writes_similarity_warning(db_conn, monkeypatch) -> None:
     from app.agent import tools as _tools
 

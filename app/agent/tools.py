@@ -43,6 +43,29 @@ from app.agent.reply_targets import (
 _LOG = logging.getLogger(__name__)
 
 
+def _safe_repetition_check(
+    conn: sqlite3.Connection, *, draft_text: str, draft_kind: str
+) -> dict | None:
+    """Wrap `_repetition_guard.check` so non-`EmbeddingsUnavailable`
+    exceptions (numpy shape mismatch, sqlite3 error in the inline
+    re-embed UPDATE, JSON encoding issue on a NaN-bearing vector) do
+    NOT take down `_save_draft_*`. The spec is explicit that the
+    guard "never blocks publish" — by extension, it must never block
+    save either. Logged at WARNING so a recurring failure surfaces in
+    the audit trail without crashing the user flow.
+    """
+    try:
+        return _repetition_guard.check(
+            conn, draft_text=draft_text, draft_kind=draft_kind
+        )
+    except Exception as exc:  # noqa: BLE001 — intentional: see docstring
+        _LOG.warning(
+            "repetition_guard.check raised %s (%s); persisting NULL warning",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
 @dataclass(frozen=True)
 class ToolDef:
     """A registered agent tool — name, description, JSON schema, handler.
@@ -799,7 +822,7 @@ def _save_draft_post(
 
         # Phase 5.8 / §28.13 — repetition guard. Returns None when the
         # embedding provider is unavailable; persist NULL and proceed.
-        similarity_warning = _repetition_guard.check(
+        similarity_warning = _safe_repetition_check(
             conn, draft_text=text, draft_kind="standalone"
         )
         if similarity_warning is not None:
@@ -891,7 +914,7 @@ def _save_draft_reply(
         )
 
         # Phase 5.8 / §28.13 — repetition guard, same degradation contract.
-        similarity_warning = _repetition_guard.check(
+        similarity_warning = _safe_repetition_check(
             conn, draft_text=text, draft_kind="reply"
         )
         if similarity_warning is not None:
