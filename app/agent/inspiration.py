@@ -344,7 +344,14 @@ def _default_caller(
             "ANTHROPIC_API_KEY is not set. See spec §28.8 for env setup."
         )
     import anthropic
-    client = anthropic.Anthropic(api_key=api_key)
+    # P511R-6: explicit timeout. Anthropic SDK defaults to 10 minutes,
+    # which blocks the Streamlit thread for the whole window if the
+    # network hangs. 60s is plenty for a transform targeting a single
+    # ~200-word post; transforms that genuinely need longer aren't the
+    # MVP path. Raised to TransformError by the surrounding try/except
+    # in the tool wrapper, so the UI sees {"status": "failed"} rather
+    # than a Streamlit hang.
+    client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
     resp = client.messages.create(
         model=model,
         max_tokens=2048,
