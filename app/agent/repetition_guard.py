@@ -209,21 +209,52 @@ def check(
     conn: sqlite3.Connection,
     *,
     draft_text: str,
-    draft_kind: str,  # noqa: ARG001 — reserved; replies vs standalones may diverge
+    draft_kind: str,
     lookback_days: int | None = None,
 ) -> dict | None:
     """Run the cosine-similarity check. Returns the JSON-ready dict, or
-    `None` when the guard cannot run (no embeddings yet, provider down,
-    etc.) — caller persists NULL in that case.
+    `None` when the guard cannot run for any reason — caller persists
+    NULL in that case.
+
+    The spec is explicit: the guard "never blocks publish." By extension
+    it must never block save either. This wrapper catches every
+    exception the inner check can throw (EmbeddingsUnavailable,
+    numpy shape mismatch, sqlite3 error in the inline re-embed UPDATE,
+    JSON-encoding issue on a NaN-bearing vector) and returns None.
+    Logged at WARNING so a recurring failure surfaces in the audit
+    trail without crashing the user flow.
 
     Side effect (P58R-26): writes to `post_embeddings` inside the
     caller's transaction via `_refresh_stale_embedding` when a corpus
     row's `source_text_hash` no longer matches its parent `posts.text`.
     If the caller's outer transaction rolls back (e.g. a CHECK
-    violation on the new draft), the inline re-embed is dropped too —
-    callers composing this inside narrower transactions should know
-    that the re-embed is not durable on rollback.
+    violation on the new draft), the inline re-embed is dropped too.
     """
+    try:
+        return _check_inner(
+            conn,
+            draft_text=draft_text,
+            draft_kind=draft_kind,
+            lookback_days=lookback_days,
+        )
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        _LOG.warning(
+            "repetition_guard.check raised %s (%s); persisting NULL warning",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _check_inner(
+    conn: sqlite3.Connection,
+    *,
+    draft_text: str,
+    draft_kind: str,  # noqa: ARG001 — reserved; replies vs standalones may diverge
+    lookback_days: int | None = None,
+) -> dict | None:
+    """Inner check — raises on infrastructure failure. Use `check()`
+    from production code; this is exposed for tests that want to assert
+    a specific exception path."""
     if not draft_text or not draft_text.strip():
         return None
     effective_lookback = (

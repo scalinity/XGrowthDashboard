@@ -314,16 +314,18 @@ def test_check_never_blocks_returns_dict_not_raises(db_conn, monkeypatch) -> Non
 # Integration with _save_draft_post — end-to-end happy path
 # ---------------------------------------------------------------------------
 def test_save_draft_post_survives_guard_crash(db_conn, monkeypatch) -> None:
-    """P58R-4: a numpy/sqlite/JSON crash inside the guard must NOT take
-    down _save_draft_post. Spec is explicit: the guard never blocks save
-    or publish."""
+    """P58R-4 + P58RF-3: a numpy/sqlite/JSON crash inside the guard
+    must NOT take down _save_draft_post. The broad-except now lives
+    inside repetition_guard.check itself (P58RF-3), so to exercise
+    the contract we patch the _check_inner helper that sits behind
+    the catch."""
     from app.agent import tools as _tools
 
-    def boom(conn, *, draft_text, draft_kind):
+    def boom(conn, *, draft_text, draft_kind, lookback_days=None):
         raise ValueError("simulated numpy shape mismatch")
 
     monkeypatch.setattr(
-        "app.agent.tools._repetition_guard.check", boom
+        "app.agent.repetition_guard._check_inner", boom
     )
     result = _tools._save_draft_post(
         db_conn,
