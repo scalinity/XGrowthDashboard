@@ -20,8 +20,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.backup import BACKUP_FILENAME_GLOB, backup_database
 from app.forms import get_setting
-from scripts.backup_db import BACKUP_FILENAME_GLOB, backup_database
 from scripts.restore_db import restore_database
 
 

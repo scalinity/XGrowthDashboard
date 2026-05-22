@@ -29,7 +29,7 @@ from app.components.theme import PALETTE, apply_theme, hairline, kicker
 from app.db import DEFAULT_DB_PATH
 from app.forms import get_setting, set_setting
 from app.pages import open_connection
-from scripts.backup_db import (
+from app.backup import (
     BACKUP_FILENAME_GLOB,
     BackupIntegrityError,
     DEFAULT_BACKUPS_DIR,
