@@ -310,108 +310,122 @@ def score_replier_pool(
             "updated_count": 0,
         }
 
+    # P59A-W11: single transaction for the whole batch with per-excerpt
+    # error capture. The prior shape opened BEGIN IMMEDIATE / COMMIT per
+    # excerpt — 30 sequential write-lock acquisitions for a 30-replier
+    # paste, and if excerpt 15 failed (CHECK violation, etc.) the prior
+    # 14 had already committed with no per-row error surface. The new
+    # shape mirrors _score_reply_candidates: collect errors in a list,
+    # write rows that succeed inside the outer transaction, and return
+    # the breakdown. CHECK violations now become entries in `errors`
+    # rather than partial commits + silent under-counts.
     created = 0
     updated = 0
     out_candidates: list[dict] = []
-    for excerpt in parsed:
-        scored = score_replier(excerpt, niche_person=nd.person)
-        # Derive a per-row target_post_url so the unique index doesn't
-        # collide across pasted batches for the same thread. Anchor on
-        # the thread URL + #replier=<handle> fragment when a handle is
-        # known; otherwise on a hashed excerpt suffix.
-        # P59A-C2: hashlib.sha1 instead of Python's built-in hash().
-        # hash() is randomized per interpreter (PYTHONHASHSEED) — using
-        # it for the idempotency key meant the same handle-less excerpt
-        # produced a different anchor on every Streamlit reload, breaking
-        # the function's "idempotent on (thread_url, handle)" contract
-        # and accumulating duplicate reply_targets rows. sha1 is process-
-        # stable; this is an integrity tag, not a security boundary.
-        anchor = scored.handle or (
-            "_" + hashlib.sha1(
-                (scored.excerpt or "").encode("utf-8")
-            ).hexdigest()[:12]
-        )
-        target_post_url = f"{thread_url}#replier={anchor}"
-        author_handle = scored.handle or "unknown"
-        action_score = ACTION_TO_SCORE.get(scored.recommended_action_label, 0)
-
-        with transaction(conn):
-            existing = conn.execute(
-                "SELECT id FROM reply_targets WHERE target_post_url = ?",
-                (target_post_url,),
-            ).fetchone()
-            if existing is None:
-                rt_id = int(conn.execute(
-                    """
-                    INSERT INTO reply_targets
-                        (discovered_via, source, target_post_url,
-                         target_author_handle, target_text,
-                         relevance_score, engagement_surface_score,
-                         saturation_score, reply_opportunity_score,
-                         recommended_action_label, recommended_action_score,
-                         score_rationale)
-                    VALUES ('manual', 'replier_under_thread', ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?)
-                    RETURNING id
-                    """,
-                    (
-                        target_post_url, author_handle, scored.excerpt,
-                        scored.relevance_score,
-                        scored.engagement_surface_score,
-                        scored.saturation_score,
-                        scored.reply_opportunity_score,
-                        scored.recommended_action_label, action_score,
-                        scored.score_rationale,
-                    ),
-                ).fetchone()[0])
-                created += 1
-            else:
-                rt_id = int(existing["id"])
-                conn.execute(
-                    """
-                    UPDATE reply_targets
-                    SET source                   = 'replier_under_thread',
-                        target_author_handle     = ?,
-                        target_text              = COALESCE(?, target_text),
-                        relevance_score          = ?,
-                        engagement_surface_score = ?,
-                        saturation_score         = ?,
-                        reply_opportunity_score  = ?,
-                        recommended_action_label = ?,
-                        recommended_action_score = ?,
-                        score_rationale          = ?,
-                        last_checked_at_utc      = datetime('now')
-                    WHERE id = ?
-                    """,
-                    (
-                        author_handle, scored.excerpt,
-                        scored.relevance_score,
-                        scored.engagement_surface_score,
-                        scored.saturation_score,
-                        scored.reply_opportunity_score,
-                        scored.recommended_action_label, action_score,
-                        scored.score_rationale, rt_id,
-                    ),
+    errors: list[str] = []
+    with transaction(conn):
+        for excerpt in parsed:
+            try:
+                scored = score_replier(excerpt, niche_person=nd.person)
+                # Derive a per-row target_post_url so the unique index
+                # doesn't collide across pasted batches for the same
+                # thread. Anchor on the thread URL + #replier=<handle>
+                # fragment when a handle is known; otherwise on a hashed
+                # excerpt suffix.
+                # P59A-C2: hashlib.sha1 (process-stable) instead of
+                # Python's built-in hash() (PYTHONHASHSEED-randomized).
+                anchor = scored.handle or (
+                    "_" + hashlib.sha1(
+                        (scored.excerpt or "").encode("utf-8")
+                    ).hexdigest()[:12]
                 )
-                updated += 1
-        out_candidates.append({
-            "reply_target_id": rt_id,
-            "handle": scored.handle,
-            "excerpt": scored.excerpt,
-            "relevance_score": scored.relevance_score,
-            "engagement_surface_score": scored.engagement_surface_score,
-            "saturation_score": scored.saturation_score,
-            "reply_opportunity_score": scored.reply_opportunity_score,
-            "thread_context_fit_score": scored.thread_context_fit_score,
-            "recommended_action_label": scored.recommended_action_label,
-            "score_rationale": scored.score_rationale,
-        })
+                target_post_url = f"{thread_url}#replier={anchor}"
+                author_handle = scored.handle or "unknown"
+                action_score = ACTION_TO_SCORE.get(
+                    scored.recommended_action_label, 0
+                )
+
+                existing = conn.execute(
+                    "SELECT id FROM reply_targets WHERE target_post_url = ?",
+                    (target_post_url,),
+                ).fetchone()
+                if existing is None:
+                    rt_id = int(conn.execute(
+                        """
+                        INSERT INTO reply_targets
+                            (discovered_via, source, target_post_url,
+                             target_author_handle, target_text,
+                             relevance_score, engagement_surface_score,
+                             saturation_score, reply_opportunity_score,
+                             recommended_action_label,
+                             recommended_action_score, score_rationale)
+                        VALUES ('manual', 'replier_under_thread', ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?)
+                        RETURNING id
+                        """,
+                        (
+                            target_post_url, author_handle, scored.excerpt,
+                            scored.relevance_score,
+                            scored.engagement_surface_score,
+                            scored.saturation_score,
+                            scored.reply_opportunity_score,
+                            scored.recommended_action_label, action_score,
+                            scored.score_rationale,
+                        ),
+                    ).fetchone()[0])
+                    created += 1
+                else:
+                    rt_id = int(existing["id"])
+                    conn.execute(
+                        """
+                        UPDATE reply_targets
+                        SET source                   = 'replier_under_thread',
+                            target_author_handle     = ?,
+                            target_text              = COALESCE(?, target_text),
+                            relevance_score          = ?,
+                            engagement_surface_score = ?,
+                            saturation_score         = ?,
+                            reply_opportunity_score  = ?,
+                            recommended_action_label = ?,
+                            recommended_action_score = ?,
+                            score_rationale          = ?,
+                            last_checked_at_utc      = datetime('now')
+                        WHERE id = ?
+                        """,
+                        (
+                            author_handle, scored.excerpt,
+                            scored.relevance_score,
+                            scored.engagement_surface_score,
+                            scored.saturation_score,
+                            scored.reply_opportunity_score,
+                            scored.recommended_action_label, action_score,
+                            scored.score_rationale, rt_id,
+                        ),
+                    )
+                    updated += 1
+            except Exception as exc:  # noqa: BLE001 — wrap per-excerpt
+                identity = excerpt.handle or "<no-handle>"
+                errors.append(f"replier {identity!r}: {type(exc).__name__}: {exc}")
+                continue
+            out_candidates.append({
+                "reply_target_id": rt_id,
+                "handle": scored.handle,
+                "excerpt": scored.excerpt,
+                "relevance_score": scored.relevance_score,
+                "engagement_surface_score": scored.engagement_surface_score,
+                "saturation_score": scored.saturation_score,
+                "reply_opportunity_score": scored.reply_opportunity_score,
+                "thread_context_fit_score": scored.thread_context_fit_score,
+                "recommended_action_label": scored.recommended_action_label,
+                "score_rationale": scored.score_rationale,
+            })
 
     return {
         "thread_url": thread_url,
         "candidates": out_candidates,
         "created_count": created,
         "updated_count": updated,
+        "errors": errors,
     }
 
 
