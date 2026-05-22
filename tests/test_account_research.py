@@ -210,24 +210,28 @@ def test_save_persists_all_snapshot_columns(
 def test_save_supports_multiple_reports_per_handle(
     db_conn: sqlite3.Connection,
 ) -> None:
-    """§28.24 versioned history — same handle, different timestamps allowed."""
-    import time
+    """§28.24 versioned history — same handle, different timestamps allowed.
 
+    P510R-15: explicit created_at_utc values instead of time.sleep.
+    """
     analysis_1 = _ar.analyze(
         target_handle="baz",
         target_bio_text="bio",
         target_recent_posts_text="early posts",
         model_caller=_fake_caller(_valid_analysis_json(overlap_score=1)),
     )
-    rid_1 = _ar.save(db_conn, analysis=analysis_1)
-    time.sleep(1.05)  # ensure created_at_utc differs (datetime('now') is second-resolution)
+    rid_1 = _ar.save(
+        db_conn, analysis=analysis_1, created_at_utc="2026-05-01T10:00:00"
+    )
     analysis_2 = _ar.analyze(
         target_handle="baz",
         target_bio_text="bio v2",
         target_recent_posts_text="later posts",
         model_caller=_fake_caller(_valid_analysis_json(overlap_score=3)),
     )
-    rid_2 = _ar.save(db_conn, analysis=analysis_2)
+    rid_2 = _ar.save(
+        db_conn, analysis=analysis_2, created_at_utc="2026-05-22T10:00:00"
+    )
 
     assert rid_1 != rid_2
     history = _ar.list_reports_for_handle(db_conn, "baz")
@@ -271,23 +275,27 @@ def test_generate_reply_target_second_click_does_not_collide(
 
     target_post_url has a UNIQUE index (migration 009). The fix uses
     a per-report fragment so each promoted target gets a unique URL.
+
+    P510R-15: explicit timestamps instead of time.sleep.
     """
-    import time
     analysis_1 = _ar.analyze(
         target_handle="zeta",
         target_bio_text="",
         target_recent_posts_text="p1",
         model_caller=_fake_caller(_valid_analysis_json()),
     )
-    report_a = _ar.save(db_conn, analysis=analysis_1)
-    time.sleep(1.05)
+    report_a = _ar.save(
+        db_conn, analysis=analysis_1, created_at_utc="2026-05-01T10:00:00"
+    )
     analysis_2 = _ar.analyze(
         target_handle="zeta",
         target_bio_text="",
         target_recent_posts_text="p2",
         model_caller=_fake_caller(_valid_analysis_json()),
     )
-    report_b = _ar.save(db_conn, analysis=analysis_2)
+    report_b = _ar.save(
+        db_conn, analysis=analysis_2, created_at_utc="2026-05-22T10:00:00"
+    )
 
     rt_a = _ar.generate_reply_target(db_conn, report_id=report_a)
     rt_b = _ar.generate_reply_target(db_conn, report_id=report_b)
