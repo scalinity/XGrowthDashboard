@@ -71,8 +71,12 @@ def _integrity_check(path: Path) -> str:
     """
     conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
     try:
-        row = conn.execute("PRAGMA integrity_check").fetchone()
-        return row[0] if row else ""
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+        if not rows:
+            return ""
+        if len(rows) == 1 and rows[0][0] == "ok":
+            return "ok"
+        return "; ".join(r[0] for r in rows)
     finally:
         conn.close()
 

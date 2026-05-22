@@ -87,8 +87,14 @@ def _open_backup_for_integrity_check(backup_path: Path) -> str:
         f"file:{backup_path}?mode=ro&immutable=1", uri=True
     )
     try:
-        row = check_conn.execute("PRAGMA integrity_check").fetchone()
-        return row[0] if row else ""
+        # fetchall (not fetchone) so a multi-corruption DB reports every
+        # symptom in the resulting error message, not just the first.
+        rows = check_conn.execute("PRAGMA integrity_check").fetchall()
+        if not rows:
+            return ""
+        if len(rows) == 1 and rows[0][0] == "ok":
+            return "ok"
+        return "; ".join(r[0] for r in rows)
     finally:
         check_conn.close()
 
