@@ -191,10 +191,16 @@ def _validate_success_criteria(payload: Mapping[str, Any]) -> dict[str, Any]:
                     f"success_criteria.{stream_name} entries must be dicts; "
                     f"got {type(entry).__name__}."
                 )
-            if not entry.get("metric") or not entry.get("target"):
+            # P511R-12: distinguish "missing" from "zero" — the integer
+            # 0 and the string "0" are legitimate targets (e.g. "spam
+            # reports: target 0", "validation errors: target 0"). Only
+            # None / "" should fail validation.
+            metric = entry.get("metric")
+            target = entry.get("target")
+            if not metric or target is None or (isinstance(target, str) and not target.strip()):
                 raise InvalidSuccessCriteriaError(
                     f"success_criteria.{stream_name} entries require "
-                    "non-empty 'metric' AND 'target' fields."
+                    "non-empty 'metric' AND a 'target' value (target=0 is allowed)."
                 )
     return {
         "distribution": [dict(e) for e in distribution],

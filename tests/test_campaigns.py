@@ -86,6 +86,28 @@ def test_create_campaign_rejects_validation_only_criteria(
         )
 
 
+def test_p511r12_create_campaign_accepts_zero_target(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P511R-12: target=0 is a legitimate criterion (e.g. 'spam reports:
+    target 0' or 'validation errors: target 0'). The previous falsy
+    check rejected integer 0 alongside None and ''."""
+    cid = _c.create_campaign(
+        db_conn,
+        name="zero target",
+        theme="t",
+        hypothesis="h",
+        start_date="2026-05-01",
+        end_date="2026-05-28",
+        success_criteria={
+            "distribution": [{"metric": "impressions", "target": "10000"}],
+            "validation": [{"metric": "spam_reports", "target": 0}],
+        },
+    )
+    camp = _c.get_campaign(db_conn, campaign_id=cid)
+    assert camp.success_criteria["validation"][0]["target"] == 0
+
+
 def test_create_campaign_rejects_missing_metric_or_target(
     db_conn: sqlite3.Connection,
 ) -> None:
