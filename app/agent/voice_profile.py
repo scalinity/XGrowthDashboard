@@ -308,13 +308,30 @@ def _read_synthesis_prompt() -> str:
 
 
 def _strip_code_fence(text: str) -> str:
-    """Tolerate Haiku occasionally wrapping JSON in ```json … ``` fences."""
+    """Tolerate Haiku occasionally wrapping JSON in ```json … ``` fences.
+
+    Handles three shapes:
+      * ```\n{...}\n``` (multi-line, the canonical form)
+      * ```json\n{...}\n```
+      * ```{...}``` (single-line — P58R-20)
+
+    Any leading ``` plus an optional `json` language tag is stripped;
+    any trailing ``` is stripped too.
+    """
     stripped = text.strip()
     if stripped.startswith("```"):
-        # drop the first fence line (```json or ```)
         nl = stripped.find("\n")
         if nl != -1:
+            # multi-line fence — drop the first fence line entirely.
             stripped = stripped[nl + 1 :]
+        else:
+            # single-line fence — strip the leading backticks (and
+            # optional `json` label) inline so `json.loads` sees the
+            # bare JSON object that follows.
+            stripped = stripped.lstrip("`")
+            if stripped.lower().startswith("json"):
+                stripped = stripped[4:]
+            stripped = stripped.lstrip()
         if stripped.rstrip().endswith("```"):
             stripped = stripped.rstrip()[:-3]
     return stripped.strip()

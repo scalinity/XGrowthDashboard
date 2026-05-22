@@ -262,6 +262,17 @@ def test_generate_strips_code_fence(db_conn: sqlite3.Connection) -> None:
     assert prof.is_active is True
 
 
+def test_strip_code_fence_handles_single_line() -> None:
+    """P58R-20: a single-line code-fenced JSON like ```{...}``` must have
+    the fence stripped inline; the prior code path bailed and json.loads
+    crashed."""
+    raw = "```json" + json.dumps(_ok_profile_json()) + "```"
+    cleaned = voice_profile._strip_code_fence(raw)
+    # Should be parseable JSON now.
+    parsed = json.loads(cleaned)
+    assert "self_description" in parsed
+
+
 # ---------------------------------------------------------------------------
 # Diff helper
 # ---------------------------------------------------------------------------
