@@ -13,6 +13,7 @@ the contract is enforced in two places.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import date as _date_t
@@ -174,8 +175,8 @@ def daily_followers_needed_to_hit_milestone_by_date(
     distance = proj.current_milestone_target - proj.followers_count
     if distance <= 0:
         return None  # milestone already met
-    # math.ceil but stay in int land for sqlite-friendly result types
-    return -(-distance // days_remaining)
+    # P59A-S13: math.ceil reads cleaner than the -(-x // y) idiom.
+    return math.ceil(distance / days_remaining)
 
 
 __all__ = [
