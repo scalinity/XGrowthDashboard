@@ -71,11 +71,21 @@ def _quote_sqlite_path(path: Path) -> str:
 
 
 def _open_backup_for_integrity_check(backup_path: Path) -> str:
-    """Open the freshly-written backup file in its own connection and run
-    ``PRAGMA integrity_check``. Returns the first result row ('ok' on
-    success). Uses a vanilla sqlite3 connection rather than the project
-    wrapper so the check is independent of any custom aggregates."""
-    check_conn = sqlite3.connect(str(backup_path))
+    """Open the freshly-written backup file read-only via SQLite URI form
+    and run ``PRAGMA integrity_check``. Returns the first result row
+    ('ok' on success).
+
+    ``mode=ro&immutable=1`` keeps SQLite from creating ``-wal``/``-shm``
+    siblings next to the backup file. A normal close would clean those
+    up under happy-path; an abrupt crash mid-check could strand them.
+    Read-only URI mode dodges the question entirely.
+
+    The vanilla sqlite3 connection (no app.db wrapper) keeps the check
+    independent of any custom aggregates the project registers.
+    """
+    check_conn = sqlite3.connect(
+        f"file:{backup_path}?mode=ro&immutable=1", uri=True
+    )
     try:
         row = check_conn.execute("PRAGMA integrity_check").fetchone()
         return row[0] if row else ""

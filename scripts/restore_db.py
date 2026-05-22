@@ -63,7 +63,13 @@ class RestoreBlockedByOpenDB(RuntimeError):
 
 
 def _integrity_check(path: Path) -> str:
-    conn = sqlite3.connect(str(path))
+    """Open ``path`` read-only via URI form and run ``PRAGMA integrity_check``.
+
+    Read-only URI mode (``mode=ro&immutable=1``) keeps SQLite from
+    creating ``-wal``/``-shm`` siblings next to the backup file when
+    this verification runs.
+    """
+    conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
     try:
         row = conn.execute("PRAGMA integrity_check").fetchone()
         return row[0] if row else ""
