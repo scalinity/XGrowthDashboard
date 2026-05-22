@@ -660,6 +660,7 @@ One row per known post/reply/quote/thread root.
 | `publish_attempt_count`      | integer default 0    | tracks retries (including the successful attempt); reset is intentional — left at the total. Migration: existing rows backfill to 0. |
 | `publish_last_error`         | text nullable        | last publish error if any; cleared (set to NULL) on a subsequent successful publish |
 | `agent_draft_id`             | int nullable         | foreign key to `agent_drafts.id` if this post originated from an agent draft |
+| `content_type`               | enum                 | `value`, `growth`, `personality`, `proof`, `unspecified`. ORTHOGONAL to pillar/audience/CTA — pillar is *topic* (stir/build/self), content_type is *purpose* per §28.16. Default `unspecified`. Existing rows backfill to `unspecified` (never retro-classified). Required (non-`unspecified`) on new agent drafts via the orchestrator. |
 
 Indexes:
 
@@ -668,6 +669,7 @@ index(created_date)
 index(type)
 index(conversation_id)
 index(utm_campaign)
+index(content_type)
 ```
 
 ---
@@ -1199,6 +1201,8 @@ Tracks agent-generated drafts before they become posts (or get rejected). The ag
 | `prepublish_score_id` | int nullable   | foreign key to `prepublish_scores.id`. Populated by the §28.11 scorer at `save_draft_*` time. NULL if the scorer hasn't run yet (e.g., legacy rows from before Phase 5.8). |
 | `confidence_label`  | enum nullable    | `fact \| inference \| speculation \| mixed`. Required by §28.2 rule #14 on every analytical claim emitted with a draft. NULL when the draft is creative-only (no analytical claim attached). |
 | `similarity_warning_json` | text nullable | JSON. `{"max_cosine": float 0-1, "nearest_post_id": int, "nearest_text_excerpt": str, "label": "near_duplicate"|"close_echo"|"distinct"}`. Written by the §28.13 repetition guard at `save_draft_*` time. NULL if embeddings layer is unavailable. |
+| `content_type`      | enum             | `value`, `growth`, `personality`, `proof`. Required on new agent drafts per §28.16 (orchestrator rejects `unspecified`). Mirrors `posts.content_type` and is copied through on save. |
+| `reply_quality_lint_passed` | boolean nullable | Per-draft result of the §28.18 reply-quality lint (forced / AI-tasting / selfishly self-promoting detector). NULL when the lint didn't run (e.g. `draft_kind != reply` or `reply_quality_lint_enabled = false`). false counts as a failed IWH revision through the same enforcement path as `dark_pattern_lint_passed`. |
 
 Indexes:
 
@@ -1331,6 +1335,35 @@ Notes:
   - `strong` if `count(scores >= 2) >= 6` and `count(scores == 3) >= 2` and no score is 0.
   - `weak` if `count(scores == 0) >= 1` or `count(scores >= 2) <= 3`.
   - `viable` otherwise.
+
+---
+
+### `personality_lore`
+
+Registry of recurring jokes, running bits, and personal motifs the agent should pick up on when drafting `content_type = personality` posts. Helps the agent build on existing threads of voice instead of inventing a new bit every time. See §28.21.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer pk | |
+| `theme` | text | short name — e.g. "water bottle in frame", "kitchen-scanner fail", "neuro-oncology long arc" |
+| `description` | text | one-paragraph explanation of the bit, written by Daniel |
+| `example_posts_json` | text nullable | JSON array of `post_id` values where this lore was previously invoked; the agent reads excerpts of these when drafting |
+| `invocation_count` | integer default 0 | how many times this lore has been called into a draft; informational, used by §28.21 to surface "over-relied on" warnings |
+| `last_invoked_at_utc` | datetime nullable | when this lore was last spliced into a draft |
+| `is_active` | boolean | included in the system prompt rotation |
+| `priority` | integer | display order in the system prompt splice; lower = earlier |
+| `added_at_utc` | datetime | |
+
+Indexes:
+
+```text
+index(is_active, priority) where is_active = true
+```
+
+Notes:
+- Lore is hand-curated by Daniel via Settings → Growth Agent → Personality lore. Never auto-generated.
+- The agent CANNOT write to this table — no tool surface exposes it. Daniel-only edit.
+- A lore row with `invocation_count > personality_lore_overuse_threshold` (default 8) AND `last_invoked_at_utc > now() - 30 days` triggers a yellow "you're leaning hard on this bit" banner in the lore panel; doesn't disable the lore, just informs.
 
 ---
 
@@ -1492,6 +1525,59 @@ else:
 ```
 
 The UI shows medians at all sample sizes but pairs them with IQR bars and the confidence label. Lanes are only sortable/rankable at "moderate" or above.
+
+---
+
+### `v_content_type_performance`
+
+Performance sliced by `content_type` (V/G/P/P) per §28.16. Mirrors `v_lane_performance` so the same graduated-confidence discipline applies — pillar is *topic*, content_type is *purpose*, and both axes get the same epistemic treatment.
+
+Fields:
+
+```text
+content_type
+post_count
+days_covered
+median_impressions
+iqr_impressions_low
+iqr_impressions_high
+median_engagement_rate
+iqr_engagement_rate_low
+iqr_engagement_rate_high
+total_bookmarks
+total_replies
+stir_signal_count
+confidence_label
+```
+
+Confidence-label logic is identical to `v_lane_performance` above — same thresholds, same rules. Rows with `content_type = 'unspecified'` are EXCLUDED from this view (they're not a meaningful category, just an unclassified backlog; the view is for active learning).
+
+A second pivot — `v_content_type_x_pillar_performance` — is V1.1+ deferred (12 cells × 4 content types = 48 cells, density won't support it at MVP volume; revisit at 500+ shipped posts).
+
+---
+
+### `v_follower_velocity`
+
+Projection math derived from `v_account_daily`. Anchors §28.19 and the §14.3 velocity panel. The view does NOT chase precision — when velocity is in the noise floor (per §13), projection columns return NULL rather than fabricated dates.
+
+Fields:
+
+```text
+snapshot_date
+followers_count
+velocity_7d_per_day                       # already in v_account_daily; re-exposed for convenience
+velocity_30d_per_day
+current_milestone_target                  # from milestones; nearest unmet distribution rung
+distance_to_current_milestone
+projected_milestone_hit_date_at_7d_pace   # NULL when |delta_7d| < noise_floor OR velocity_7d_per_day <= 0
+projected_milestone_hit_date_at_30d_pace  # NULL on same conditions
+days_until_milestone_at_7d_pace           # NULL on same conditions
+days_until_milestone_at_30d_pace          # NULL on same conditions
+```
+
+A parametric helper `daily_followers_needed_to_hit_milestone_by_date(target_date)` lives in `app/db.py` (not the view) — pure SQLite function call: `ceil((current_milestone_target - followers_count) / max((julianday(target_date) - julianday('now')), 1))`. Returns NULL if the milestone is already met or the date is in the past.
+
+**Hard rule (carried from §13):** all projection columns are suppressed in the UI when `abs(delta_7d) < noise_floor`. The UI shows "trend not yet measurable — projections suppressed" in that state. Do not display a precise-looking date when the input is noise.
 
 ---
 
@@ -2319,6 +2405,21 @@ Turn raw activity into learning.
    * Tokens used today / this week / this month
    * Estimated cost today / this week / this month
 
+10. **Niche definition** — see §28.16
+
+    * `niche_problem` (text) — one sentence: the problem you solve
+    * `niche_person` (text) — one sentence: who you solve it for
+    * "Test against bio" affordance — paste current X bio, agent critiques alignment with the niche definition (read-only — never edits the X bio itself)
+    * Empty values BLOCK agent drafting (§28.2 rule #15); banner explains why and links to this panel
+
+11. **Personality lore** — see §28.21
+
+    * List of active lore rows from `personality_lore` (theme, description, invocation_count, last_invoked_at)
+    * Add new lore (Daniel-only; agent has no write access)
+    * Toggle `is_active` per row
+    * Reorder by priority
+    * "Over-relied on" yellow banner per row when `invocation_count > personality_lore_overuse_threshold` AND `last_invoked_at_utc > now() - 30 days`
+
 ---
 
 # 14.8 Agent Chat — NEW
@@ -2863,6 +2964,15 @@ No push notification required. A "Weekly review due" banner in the app is enough
     * Repetition guard (`post_embeddings` table + `app/agent/repetition_guard.py` + `scripts/embed_posts.py` backfill) with the `similarity_warning_json` banner above the draft text.
     * Confidence labels on agent outputs (`agent_drafts.confidence_label` + `agent_messages.confidence_label` + `app/agent/confidence_patterns.py`) enforced by orchestrator parsing.
     * Approval payload hash — user-visible enforcement (extension to §28.10 modal behavior, no new table).
+
+13. **Niche & Content-Type Calibration Pack (Phase 5.9 — see §28.16 through §28.21):**
+
+    * Structured niche definition (`niche_problem`, `niche_person` settings) with system-prompt Section 1 splice + Settings → Growth Agent → Niche panel + "test against bio" affordance (§28.16).
+    * Content type axis (`posts.content_type` + `agent_drafts.content_type` + `v_content_type_performance` view + `get_content_type_gaps` agent tool + Today/Next Rep content-type recommendation + Content Performance content-type tab) (§28.17).
+    * Reply-quality lint (`agent_drafts.reply_quality_lint_passed` + extension to `app/agent/lint.py` with the "forced / AI / selfishly self-promoting" detector) (§28.18).
+    * Follower-velocity projection (`v_follower_velocity` view + §14.3 Progress velocity panel + `get_velocity_projection` agent tool) (§28.19).
+    * Replier-pool candidate discovery (extended `reply_targets.source` enum value `replier_under_thread` + new `score_replier_pool` agent tool + §29.7 Reply Target Queue "Add replier pool" affordance) (§28.20).
+    * Personality lore registry (`personality_lore` table + system-prompt Section 5 splice + Settings → Growth Agent → Personality lore panel) (§28.21).
 
 ### Can wait — V1.1+
 
@@ -3609,6 +3719,118 @@ A bundle of five additive features that strengthen the Growth Agent's drafting a
 * [ ] Update `docs/IMPLEMENTATION_STATUS.md` with the Phase 5.8 features and any deferred behaviors.
 * [ ] README addition: brief description of the Drafting Intelligence Pack and how to seed it (run `scripts/embed_posts.py` then click "Regenerate voice profile" in Settings).
 
+### Phase 5.9 — Niche & Content-Type Calibration Pack (see §28.16 through §28.21 for full spec)
+
+Six features distilled from a tactical X-growth video (Jacob Edmunds, May 2026) cross-referenced against XGrowth's existing thesis. Adds structured niche identity, an orthogonal V/G/P/P content axis, a reply-quality lint, a follower-velocity projection, a replier-pool candidate-discovery path, and a personality-lore registry. All six are additive; none changes existing contracts. Build order below; later features depend on earlier ones (notably the content_type axis feeds the content-type recommendation, which feeds the §14.1 Today panel).
+
+**Migration:**
+
+* [ ] Migration `migrations/012_niche_content_type.sql`:
+
+  * [ ] Add `posts.content_type` enum column with CHECK constraint `IN ('value', 'growth', 'personality', 'proof', 'unspecified')`. Default `'unspecified'`. Backfill all existing rows to `'unspecified'` — DO NOT retro-classify.
+  * [ ] Add `agent_drafts.content_type` enum column with same CHECK constraint, but NO `'unspecified'` default — new rows are NOT NULL via orchestrator enforcement (CHECK allows the value but orchestrator refuses to save it).
+  * [ ] Add `agent_drafts.reply_quality_lint_passed` boolean nullable.
+  * [ ] Create `personality_lore` table per §10 schema.
+  * [ ] Add or extend `reply_targets.source` to support the value `'replier_under_thread'` alongside any existing source values. If `source` already exists as a CHECK or enum, ALTER to add the new value; if it doesn't exist (Phase 5.6 baseline schema), add the column with CHECK `IN ('paste_url', 'agent_curated_account', 'replier_under_thread')` default `'paste_url'`. Migration MUST inspect the prior schema before applying.
+  * [ ] Add index `(content_type)` on `posts`.
+  * [ ] Create computed view `v_content_type_performance` per §11.
+  * [ ] Create computed view `v_follower_velocity` per §11.
+  * [ ] Add settings rows: `niche_problem = ''`, `niche_person = ''`, `reply_quality_lint_enabled = true`, `personality_lore_overuse_threshold = 8`, `content_type_recommendation_window_days = 7`, `velocity_projection_noise_floor_followers = 10`. Documented `note` per row; do NOT silently reuse §13 noise-floor settings — copy or alias the value explicitly so the Velocity view's suppression rule is auditable from one place.
+
+**Structured niche definition (§28.16):**
+
+* [ ] Implement Settings → Growth Agent → Niche panel:
+
+  * [ ] Two text fields (`niche_problem`, `niche_person`) bound to settings rows.
+  * [ ] "Test against bio" affordance: textarea for current X bio, "Critique alignment" button that calls a one-shot Haiku invocation (`config/niche_alignment_prompt.md`) returning a structured `{aligned: bool, gaps: [str], suggestions: [str]}` JSON. Never edits the X bio itself — read-only critique.
+  * [ ] Empty-state CTA: when either field is empty, show "your agent is in low-power mode — define your niche to unlock drafting" with examples from the video ("the problem I solve: how to grow on X; the person I solve it for: educational creators").
+* [ ] Extend `app/agent/prompt_builder.py`:
+
+  * [ ] Splice into §28.3 Section 1 (Identity) as a load-bearing line after the existing identity prose: `"You help **{niche_person}** with **{niche_problem}**."` (verbatim, with settings values substituted).
+  * [ ] If either setting is empty, splice `"(niche not yet defined — drafting is disabled until Daniel fills Settings → Growth Agent → Niche)"` and set a build-time flag that the orchestrator reads to refuse all `save_draft_*` calls (§28.2 rule #15 enforcement).
+  * [ ] Pre-commit drift check extended to verify the splice executes.
+* [ ] Add §28.2 rule #15 enforcement in `app/agent/session.py`: orchestrator refuses `save_draft_post` / `save_draft_reply` when either niche setting is empty; emits "niche must be defined" message back to the conversation.
+
+**Content type axis (§28.17):**
+
+* [ ] Implement `app/agent/content_types.py`:
+
+  * [ ] `CONTENT_TYPES = ('value', 'growth', 'personality', 'proof')` constant.
+  * [ ] Docstring definitions per the §28.17 table (mirror Jacob Edmunds's V/G/P/P definitions verbatim where they're load-bearing; rephrase in XGrowth voice where they'd otherwise import hype).
+  * [ ] `get_content_type_gaps(window_days: int = 7) -> dict` — returns counts per content type for the window; tool wrapper in `app/agent/tools.py`.
+* [ ] Extend §28.4 tool table:
+
+  * [ ] `save_draft_post` and `save_draft_reply` gain REQUIRED `content_type` parameter (`value | growth | personality | proof`). Orchestrator validates against the enum AND rejects `unspecified` from the agent.
+  * [ ] New tool `#12 get_content_type_gaps(window_days)` — read-only.
+* [ ] Wire `posts.content_type` into the manual-mode "Mark posted" click-handler (so manual posts get classified too).
+* [ ] Update `config/agent_system_prompt.md` Section 6 (Current taxonomy) to include the content_type axis with the four-type definition table.
+* [ ] UI surfaces:
+
+  * [ ] §14.1 Today — new "today's content type recommendation" line: derived from `get_content_type_gaps` over `content_type_recommendation_window_days`; shows the under-represented type with one-line rationale ("you've shipped 5 value posts this week, 0 personality").
+  * [ ] §14.4 Content Performance — new tab "Content type" showing `v_content_type_performance` with the same graduated-confidence treatment as `v_lane_performance`.
+  * [ ] Content Performance per-post filter gains `content_type` dropdown.
+* [ ] Unit tests: golden-input `get_content_type_gaps` over a seeded `posts` table; orchestrator-refusal test for missing `content_type` on save.
+
+**Reply-quality lint (§28.18):**
+
+* [ ] Extend `app/agent/lint.py` with `reply_quality_lint(text: str, target_post_text: str) -> tuple[bool, str]` — Haiku invocation with the one-shot prompt: *"Does this reply sound forced, AI-generated, or selfishly self-promoting (would the original poster find it annoying)? Reply yes/no with one-line reasoning."* Returns `(passed: bool, reason: str)`.
+* [ ] Wire into `_save_draft_reply` preflight, AFTER dark-pattern lint and BEFORE the agent_drafts insert. Failure counts as a failed IWH revision (same enforcement path as the dark-pattern lint — increments `iwh_attempt_index`).
+* [ ] Gated by `reply_quality_lint_enabled` setting (default `true`); on `false`, the lint short-circuits to `(True, "lint disabled")` and writes that as the `agent_drafts.reply_quality_lint_passed` value.
+* [ ] Tests:
+
+  * [ ] Synthetic forced reply ("Great post! 🔥 Check out my stuff at...") → `passed = false`, IWH increment.
+  * [ ] Genuine substantive reply addressing the target post → `passed = true`.
+  * [ ] Toggle off → both inputs return `passed = true` regardless.
+
+**Follower-velocity projection (§28.19):**
+
+* [ ] Implement `app/agent/velocity.py`:
+
+  * [ ] `get_velocity_projection() -> dict` reading `v_follower_velocity`. Tool wrapper in `app/agent/tools.py` as `#13 get_velocity_projection()`.
+  * [ ] All projection columns suppressed (return None) when `abs(delta_7d) < velocity_projection_noise_floor_followers`. §13 discipline carried through.
+* [ ] §14.3 Progress velocity panel: renders velocity_7d_per_day + projection date when not in noise floor; renders "trend not yet measurable — projections suppressed" when in noise floor.
+* [ ] Date-target widget: Daniel picks a target date; UI shows "to hit `{current_milestone_target}` by `{target_date}` you need +`{daily_followers_needed_to_hit_milestone_by_date(target_date)}`/day." If milestone already met or target date in the past, widget shows a sensible inert state.
+* [ ] Tests: noise-floor suppression path (zero projections); non-noise path returns plausible date; date helper returns expected math.
+
+**Replier-pool candidate discovery (§28.20):**
+
+* [ ] Implement `app/agent/replier_pool.py`:
+
+  * [ ] `score_replier_pool(thread_url, replier_handles_or_excerpts, lookback_minutes=60) -> list[ReplyTargetCandidate]` — same 4-dim scoring as §29.3 plus a new dimension `thread_context_fit_score` (0-3, deterministic from the replier's text + Daniel's niche definition).
+  * [ ] Tool wrapper in `app/agent/tools.py` as `#14 score_replier_pool(thread_url, replier_handles_or_excerpts_json, lookback_minutes)`.
+* [ ] Reply Target Queue (§29.7) UI: new "Add replier pool" affordance — text input for thread URL, textarea for replier handles + excerpts, submit → `score_replier_pool` → results land in `reply_targets` with `source = 'replier_under_thread'`.
+* [ ] Update `config/agent_system_prompt.md` Section 7 tool catalog with the new tool.
+* [ ] Pre-commit drift check extended to verify `reply_targets.source` enum matches across spec / `tools.py` / system prompt.
+* [ ] V1.1+ deferred: programmatic scan of top-N replies under a target post via X API. Spec out in §28.20 so the MVP paste flow isn't a dead end.
+
+**Personality lore registry (§28.21):**
+
+* [ ] Settings → Growth Agent → Personality lore panel:
+
+  * [ ] List of active lore (theme, description, invocation_count, last_invoked_at).
+  * [ ] Add lore form (theme, description, optional `example_posts_json`).
+  * [ ] Toggle `is_active`, reorder by priority, edit theme/description.
+  * [ ] "Over-relied on" yellow banner per row when `invocation_count > personality_lore_overuse_threshold` AND `last_invoked_at_utc > now() - 30 days`.
+* [ ] Extend `app/agent/prompt_builder.py`:
+
+  * [ ] Splice top-N active lore rows (default `personality_lore_splice_count = 5`, ordered by priority asc) into §28.3 Section 5 (Voice samples), AFTER the voice samples — render as a compact bullet list: `- {theme}: {description}` plus a one-line "(last invoked {relative_time})" suffix.
+  * [ ] No splice if zero active rows (silent, no banner).
+* [ ] Wire `invocation_count` and `last_invoked_at_utc` updates: when an agent draft is saved with `content_type = 'personality'`, the orchestrator scans the draft text against active lore `theme`s + `description` keywords. For each match, increment `invocation_count` and set `last_invoked_at_utc = now()`. Matches are fuzzy (case-insensitive substring of theme name in draft text OR exact `description` keyword tokens in draft text); over-counting is acceptable, under-counting is not.
+* [ ] Agent CANNOT write to `personality_lore`. Verified by registry inspection at startup: no tool entry references the table.
+* [ ] Tests: splice with zero / one / five lore rows; over-reliance banner triggers on count + recency; agent-write attempt fails (no tool exposes the table).
+
+**QA across the pack:**
+
+* [ ] All existing tests pass (target ≥210 by end of Phase 5.9).
+* [ ] Ruff clean across all new modules.
+* [ ] Boot smoke: Streamlit boots; Settings → Niche panel renders empty-state CTA when no niche defined; agent refuses to draft until set; once set, drafting works.
+* [ ] End-to-end: from a clean state, set niche → save draft post with `content_type = personality` → assert orchestrator scans lore + updates counters; save draft reply against a forced-sounding text → assert reply-quality lint fails + IWH increment; check velocity panel suppresses projections at low delta; paste a replier pool → assert candidates land with `source = 'replier_under_thread'`.
+
+**Documentation:**
+
+* [ ] Update `docs/IMPLEMENTATION_STATUS.md` with Phase 5.9 features + any deferred behaviors (V1.1+ programmatic replier scan, V1.1+ `v_content_type_x_pillar_performance` cross-pivot).
+* [ ] README addition: a short Phase 5.9 section describing the V/G/P/P axis and the niche definition as the agent's two new identity anchors.
+
 ### Phase 6 — V1.1: Data collection (deferred from MVP)
 
 * [ ] Configure xurl auth outside the app.
@@ -3774,6 +3996,7 @@ When other spec sections reference a prompt area (e.g., "voice samples are injec
 12. **Engagement psychology serves clarity, not manipulation — dark patterns are forbidden, and the prohibition is enforced by a separate lint pass.** The agent draws on engagement principles (specificity, curiosity gaps, cognitive ease, identity-affirming hooks) to make posts effective. It NEVER uses dark patterns: no fake urgency, no manufactured outrage, no fabricated social proof, no engagement bait that doesn't deliver, no "controversial takes" engineered for arguments, no manipulation of vulnerable audiences (self-doubt, fear, FOMO without basis). Enforcement: the orchestrator runs a **dark-pattern lint pass** (a separate small-model invocation with a one-shot prompt: "Does this draft use fake urgency, manufactured scarcity, fabricated social proof, or engagement-bait that doesn't deliver? Reply yes/no with one-line reasoning.") on every draft BEFORE calling `save_draft_*`. If the lint pass returns yes, the draft is treated as a failed IWH revision (counts toward `iwh_max_revision_attempts`). The agent cannot disable or short-circuit the lint pass — it lives in `app/agent/lint.py`, outside the agent loop.
 13. **Intelligence, wisdom, humility — orchestrator-tracked revision counter.** Every post should reflect substantive thought (intelligence), long-arc judgment about whether the post should exist (wisdom), and honest acknowledgment of limits (humility). If a draft fails any of those three (self-score < `iwh_self_score_minimum` OR the dark-pattern lint pass returns yes), the orchestrator increments `agent_drafts.iwh_attempt_index` and sends the draft back for revision. On attempt `iwh_max_revision_attempts + 1` (default: the 4th attempt), the orchestrator refuses to call the save_draft tool and emits a refusal back to the conversation. **The revision counter lives in `app/agent/session.py` and `agent_drafts.iwh_attempt_index`, NOT in the agent's context window** — Daniel cannot tell the agent "skip the count," and prompt-injection in pasted reply text cannot reset it. The agent emits structured `<iwh_self_score>` tags (three integers 0-3) with each draft; the orchestrator reads them and decides.
 14. **Confidence labels on every analytical claim — orchestrator-validated.** Whenever the agent emits a statement that names a number, attributes movement, or draws a conclusion from data, it MUST attach a `<confidence>` tag with one of four values: `fact` (the number/event is directly in a tool result the agent just received), `inference` (the conclusion is drawn from data but involves judgment — e.g. "self lane likely needs more reps"), `speculation` (the agent has no data and is guessing — e.g. "this hook style might land better"), `mixed` (a claim that combines factual citation with inference). The orchestrator parses these tags and persists the dominant label on `agent_drafts.confidence_label` (for claims attached to drafts) and `agent_messages.confidence_label` (for analytical messages). Untagged analytical claims are detected by a small regex sweep in `app/agent/session.py` (matches "X% increase", "lane Y is the winner", "this caused", etc. against a list in `app/agent/confidence_patterns.py`) — an untagged match counts as a Section-2 humility failure (rule #13 IWH humility score drops by 1 for that draft). The full enforcement spec is §28.14.
+15. **Niche must be defined before drafting — orchestrator-gated.** The agent refuses to call `save_draft_post` or `save_draft_reply` when either `niche_problem` or `niche_person` setting is empty. The refusal happens at the orchestrator level (`app/agent/session.py`), NOT in the agent's prompt — Daniel cannot tell the agent to "skip the niche check," and a prompt-injected reply target cannot bypass it. The agent emits a structured "niche not defined" message back to the conversation that links to Settings → Growth Agent → Niche. The reason this is a non-negotiable rule rather than a soft warning: niche identity is the load-bearing assertion that ties every other agent behavior (voice, content type, reply targets) to a coherent strategy. Drafting without it is the agent stochastically generating creator-flavored noise. See §28.16 for the Settings panel + system-prompt splice details.
 
 ### 28.3 System prompt structure
 
@@ -3913,9 +4136,19 @@ clarity and substance:
 {{ top N active voice_samples, interleaved with context_note }}
 
 # Section 6 — Current taxonomy
-Pillars: stir, build, self
+Pillars (topic): stir, build, self
 Audiences: icp, other
 CTAs: ask, none
+Content types (purpose, per §28.17): value, growth, personality, proof
+
+Pillar is *what the post is about*. Content type is *what the post is for*.
+A `build × value` post teaches something about building.
+A `build × personality` post is a behind-the-scenes from building.
+A `stir × growth` post is a polarizing-but-genuine opinion about cooking with AI.
+A `self × proof` post is a milestone or credibility marker.
+
+The orchestrator requires content_type on every saved draft; pillar/audience/CTA
+remain required as before. The two axes are orthogonal — do not collapse them.
 
 # Section 7 — Tool catalog
 {{ list of available tools (1-11) with one-line when-to-use guidance,
@@ -3976,6 +4209,8 @@ Voice samples anchor the agent's drafting voice. Workflow:
 Seed strategy: at first Phase 5.5 build, Daniel marks 3-5 of his strongest existing posts as voice samples before the first agent use. Without samples, the agent falls back to a base system prompt (banner warns).
 
 **Voice samples are complemented by the generated voice profile (§28.12).** Samples are raw exemplars Daniel hand-picked. The profile is a structural read of Daniel's actual writing across the last N days, synthesized by a small-model call into a compact JSON spec'd in §10 `voice_profiles`. Both are spliced into the system prompt — samples carry tone-by-example, profile carries cadence and vocabulary signatures. See §28.12 for the regeneration workflow.
+
+**Voice samples + voice profile are further complemented by personality lore (§28.21).** Lore is the registry of recurring jokes, running bits, and personal motifs that the agent should pick up on when drafting `content_type = personality` posts. The three layers stack: voice samples give the agent example posts to model, voice profile gives it structural cadence/vocabulary, personality lore gives it recurring narrative threads to build on. See §28.21.
 
 ### 28.6 Cost management
 
@@ -4209,6 +4444,224 @@ specificity-forward hook would likely outperform a generic one <confidence>specu
 - The token is still server-side-generated, single-use, TTL-bounded, and SHA-256-hashed at rest.
 - The agent still has no read access to `publish_confirmation_tokens` or `st.session_state`.
 - Two simultaneous modal sessions still cannot both publish — the second token-mint invalidates the first by construction.
+
+### 28.16 Structured niche definition
+
+A niche is (problem you solve, person you solve it for). Distilled from Jacob Edmunds's "first 1k followers" framework (May 2026) and reconciled with XGrowth's existing identity discipline.
+
+Two settings rows are load-bearing: `niche_problem` (one sentence: the problem) and `niche_person` (one sentence: the person). They appear together in §28.3 Section 1 (Identity) as a single load-bearing splice line: *"You help **{niche_person}** with **{niche_problem}**."*
+
+**Why this is structural, not prose:**
+
+The agent's existing Section 1 already names Stir, neuro-oncology, and ICP. That's *biography*. The niche fields are *positioning*. Biography says "here is who Daniel is"; niche positioning says "here is the precise audience-to-problem pairing the agent is optimizing for in this session." A loose biography drifts; a structured (problem, person) pair stays sharp. The agent reads both; they don't substitute for each other.
+
+**Workflow:**
+
+1. Daniel opens Settings → Growth Agent → Niche.
+2. Two textareas: `niche_problem` and `niche_person`. Each one-sentence. Examples surfaced from the source video for first-time users (problem: "how to grow on X"; person: "educational creators"). Daniel writes his own.
+3. "Test against bio" affordance: paste current X bio, click "Critique alignment." A single Haiku invocation against `config/niche_alignment_prompt.md` returns structured JSON: `{aligned: bool, gaps: [str], suggestions: [str]}`. The critique is read-only — the panel never edits the X bio itself. Suggestions are surfaced as a list Daniel can copy.
+4. Empty-state CTA when either field is unset: "Your agent is in low-power mode — drafting is disabled until your niche is defined" (rule #15 enforcement).
+
+**System prompt splice:**
+
+- `app/agent/prompt_builder.py` reads both settings at build time.
+- If BOTH are non-empty, splice line goes into §28.3 Section 1: `"You help **{niche_person}** solve **{niche_problem}**."` (verbatim, after the existing identity prose).
+- If EITHER is empty, splice `"(niche not yet defined — drafting is disabled until Daniel fills Settings → Growth Agent → Niche)"` AND set the orchestrator's `niche_defined_flag = False` for that session. Orchestrator's `save_draft_*` handlers refuse with the canonical message.
+- Pre-commit drift check extended (§28.3 build step) to verify the splice executes.
+
+**Why this is rule #15 (hard gate) rather than soft warning:**
+
+Niche identity is the load-bearing assertion that ties voice + content type + reply targets together. Drafting without it is the agent generating creator-flavored noise. Daniel's other gates (IWH, dark-pattern, repetition) check *quality*; this gate checks *whether the agent has any business drafting at all*. Same epistemological stance as §28.14 confidence labels: the structural enforcement makes the claim explicit rather than hoped-for.
+
+### 28.17 Content type axis (V/G/P/P)
+
+Every post and every agent draft carries a `content_type` enum: `value | growth | personality | proof | unspecified`. Orthogonal to pillar/audience/CTA. Distilled from Jacob Edmunds's V/G/P/P framework; reconciled with XGrowth's graduated-confidence discipline.
+
+**Definitions (load-bearing — docstring'd in `app/agent/content_types.py`):**
+
+| Type | What it does | Example for Daniel |
+| --- | --- | --- |
+| `value` | Teaches the reader how to do something. Specific, actionable, holds nothing back. | "Here's the exact prompt structure I use for kitchen-scanner item recognition." |
+| `growth` | Aims at a broader audience: reacts to niche news, shares a polarizing-but-genuine opinion, starts a conversation. Distinct from `value` because the goal is reach via conversation, not knowledge transfer. | "Hot take: kitchen scanners that don't ground in nutrition data will all converge to the same bland LLM recipes." |
+| `personality` | Humanizes. Behind-the-scenes, running jokes, the actual quirks of being Daniel. Pulls back the curtain. Pairs with `personality_lore` (§28.21). | "Day 3 of forgetting to put the rice on before the protein finishes — Cook Mode timing logic born from real grief." |
+| `proof` | Builds credibility. Milestones, viral posts you wrote, testimonials, social proof. Distinguishes from `value` because anyone can copy `value`; only the original author can show `proof`. | "100 followers. Still pre-launch. The build-in-public bet is working faster than I expected." |
+| `unspecified` | Backlog state for existing posts at Phase 5.9 install. Backfill default. NEVER assigned to new agent drafts — orchestrator rejects it. | (legacy rows only) |
+
+**Why orthogonal to pillar/audience/CTA:**
+
+Pillar is *topic* (stir / build / self). Content type is *purpose*. A `build × value × ask` post teaches how to build something and asks for input. A `build × personality × none` post is a behind-the-scenes from building. They share a pillar; they're not interchangeable. Collapsing the two axes (e.g., calling all personality posts `self`-pillar) loses information.
+
+**Enforcement:**
+
+- `posts.content_type` default `unspecified`; existing rows backfilled to it; no retro-classification.
+- `agent_drafts.content_type` required-non-`unspecified` via orchestrator validation. The CHECK constraint permits `unspecified` (to allow backfill) but the orchestrator refuses to save a row with that value.
+- §28.4 tools #4 and #5 (`save_draft_post`, `save_draft_reply`) gain a required `content_type` parameter.
+
+**New tool #12 — `get_content_type_gaps(window_days: int = 7)`:**
+
+Read-only. Returns counts per content type for the window: `{"value": int, "growth": int, "personality": int, "proof": int, "unspecified": int (counted but excluded from "under-represented" suggestion)}`. The agent uses this to suggest the under-represented type when Daniel asks "what should I post today" without specifying.
+
+**§14.1 Today panel addition:**
+
+A new line in the Today header: *"Today's content-type recommendation: `{under_represented_type}`"* with one-line rationale ("you've shipped 5 value posts this week, 0 personality"). Uses `content_type_recommendation_window_days` (default 7). When the spread is even (no clear under-represented type), the line reads "even spread — pick what you're moved by today."
+
+**§14.4 Content Performance tab:**
+
+New "Content type" tab showing `v_content_type_performance` with graduated-confidence labels (same logic as `v_lane_performance`). Daniel sees which *purpose* lands, not just which *topic*. Cross-pivot `v_content_type_x_pillar_performance` is V1.1+ deferred (density argument).
+
+**Hard rule (carried from §13 hard rule #5):** the cadence advice ("post all four every day") from the source video is NOT enforced. The framework is for *classification + slice analysis*, not for daily-posting pressure. Some days a `value × build` is the right post; some days nothing's worth posting. The dashboard's job is to surface the gap, not to manufacture content.
+
+### 28.18 Reply-quality lint
+
+A second small-model lint pass on every reply draft, gated by `reply_quality_lint_enabled` (default `true`). Catches the specific failure mode the source video calls out: "people can tell when you're forcing a reply, when you're using AI, or when you're being selfish."
+
+**Pipeline position:**
+
+In `_save_draft_reply`:
+
+1. IWH self-score preflight (rule #13).
+2. Dark-pattern lint (rule #12).
+3. **Reply-quality lint (this section).**
+4. Pre-publish scorer (§28.11).
+5. Repetition guard (§28.13).
+6. `agent_drafts` insert.
+
+Failure of step 3 is treated like failure of step 2: counts as a failed IWH revision, increments `iwh_attempt_index`, bounces back to the agent for revision. After `iwh_max_revision_attempts + 1` cumulative failures (across all gates), the orchestrator refuses to save.
+
+**The prompt (one-shot Haiku call):**
+
+```
+You are reviewing a reply to an X post. Does this reply sound forced,
+AI-generated, or selfishly self-promoting (would the original poster
+find it annoying)?
+
+Target post:
+<target_post_text>
+
+Proposed reply:
+<reply_text>
+
+Reply with exactly one of:
+- "no, this is genuine and substantive" + one-line reasoning
+- "yes, forced" + one-line reasoning
+- "yes, AI-tasting" + one-line reasoning
+- "yes, selfishly self-promoting" + one-line reasoning
+```
+
+**Persistence:**
+
+- `agent_drafts.reply_quality_lint_passed` (boolean nullable). `true` on pass, `false` on fail, NULL when `draft_kind != reply` or the lint was disabled.
+- Failure reason logged to `agent_tool_calls.notes`.
+
+**Why this is a separate lint from §28.2 #12:**
+
+Dark-pattern lint catches *manipulation* (fake urgency, fabricated social proof, engagement bait). Reply-quality lint catches *forced-ness* (the reply that's technically not manipulative but still reads as a hollow self-promo bolt-on). They overlap but are not redundant — a reply can be honest (no dark pattern) and substantive in topic but still annoy the original poster because the agent's only motive shows through.
+
+**Toggle:** `reply_quality_lint_enabled = false` skips the call (useful for cost reasons in heavy-volume seasons). When disabled, `reply_quality_lint_passed` is written as `true` with a `agent_tool_calls.notes = "lint disabled"` audit trail.
+
+### 28.19 Follower-velocity projection
+
+The arithmetic from the source video, executed with XGrowth's noise-floor discipline. The video says "to hit 1k in 30 days from 50, you need 32/day"; XGrowth says "and only if your current 7-day velocity isn't in the noise floor — otherwise don't pretend to know."
+
+**View:** `v_follower_velocity` (defined in §11).
+
+**Hard rule:** when `abs(delta_7d) < velocity_projection_noise_floor_followers` (default 10, paralleling §13's display threshold), ALL projection columns return NULL and the UI shows "trend not yet measurable — projections suppressed." Do not display a precise date when the input is noise. This is non-negotiable; the calculation is trivially fakeable and Daniel's anti-precision-theater stance applies (§11 graduated confidence, §13 noise floor).
+
+**§14.3 Progress velocity panel:**
+
+Three states:
+
+- **Noise floor (default at low follower count):** "Your 7-day delta is +3. That's in the noise floor — projections suppressed until you reach +10 or sustained 30-day velocity ≥ 0.5/day."
+- **Measurable, positive velocity:** "Current pace: +X followers / day (7d). At this pace you'd reach `{current_milestone_target}` by `{date}`."
+- **Date-target widget (always visible):** "To hit `{current_milestone_target}` by `{target_date}` (pick a date), you need +Y followers/day." Y is computed by the `daily_followers_needed_to_hit_milestone_by_date` helper. If milestone is met, widget shows "milestone met — pick the next one in Settings."
+
+**New tool #13 — `get_velocity_projection()`:**
+
+Read-only. Returns the entire `v_follower_velocity` row for the most recent snapshot, with the same null-on-noise-floor rule. Agent uses this to ground velocity-related questions ("at this pace, when do I hit 250?") in real data instead of guessing.
+
+**Anti-feature carried from §13 + §5:**
+
+- Never frame projection as a goal. The video does ("hit 1k in 30 days"); the dashboard does not. Projections are descriptive, not normative.
+- Never use velocity to recommend changing tactics ("you need to post more"). The dashboard surfaces the math; Daniel decides what to do with it.
+
+### 28.20 Replier-pool candidate discovery
+
+The most novel tactical insight from the source video: niche-relevant audiences cluster in the *reply sections* of big accounts, not just in the accounts themselves. XGrowth's existing reply target discovery (§29) covers paste-URL and curated-account paths. This subsection adds the third path: replier-under-thread.
+
+**MVP path (paste-driven, no scraping):**
+
+1. Daniel opens Reply Target Queue (§29.7) → "Add replier pool" affordance.
+2. Inputs:
+   - `thread_url` — URL of the big account's post whose reply section Daniel is mining.
+   - `replier_handles_or_excerpts` — pasted text. Either a list of @handles, or replier-text excerpts, or both (one per line).
+   - `lookback_minutes` (default 60) — for the §29.3 timing-score sub-input (V1.1+ uses this; MVP records it for future calibration).
+3. Click "Score" → calls new tool `#14 score_replier_pool(thread_url, replier_handles_or_excerpts_json, lookback_minutes)`.
+4. Each candidate is scored on the existing §29.3 4-dim model PLUS a new dimension `thread_context_fit_score` (0-3, deterministic): how well the replier's text matches Daniel's `niche_person` description from §28.16.
+5. Candidates land in `reply_targets` with `source = 'replier_under_thread'` and `agent_reasoning` populated with the per-dimension explanation.
+
+**Why the new `thread_context_fit_score` dimension and not just `relevance_score`:**
+
+§29.3's relevance score is "does this target post's topic match a Daniel pillar?" The replier-pool case is different: the replier *isn't* the original post; we're evaluating whether engaging *with the replier* is on-niche. That depends on the replier's text matching Daniel's `niche_person` definition, not the original post's pillar. Different question, different score.
+
+**Schema change:**
+
+- `reply_targets.source` enum (add value `replier_under_thread`). If `source` column doesn't yet exist (Phase 5.6 baseline may not have it), the migration adds the column with CHECK constraint `IN ('paste_url', 'agent_curated_account', 'replier_under_thread')` default `'paste_url'`; if it exists, ALTER to extend the enum.
+
+**System prompt change:**
+
+- §28.3 Section 7 (Tool catalog) gains the new tool.
+- Pre-commit drift check extended to verify `reply_targets.source` enum matches across spec / `tools.py` / system prompt.
+
+**V1.1+ deferred path:**
+
+Programmatic scan of top-N replies under a target post via X API. Drops the paste step; otherwise identical. Spec'd here so the MVP paste flow isn't a dead end. When V1.1+ lands, the same tool signature gains an optional `auto_scan: bool = false` parameter that triggers the programmatic path.
+
+**Anti-feature (carried from §5 + §29):**
+
+- No scraping. The paste flow is intentional — Daniel manually transcribes; no browser automation.
+- No follower-attribution. A reply to a replier-under-thread that produces a follow is logged as `attribution_method = self_reported` per §13.
+- No reciprocal-follow expectation. Replier-pool engagement is the same engagement as any other reply: substantive, on-niche, no follow-for-follow.
+
+### 28.21 Personality lore registry
+
+A small Daniel-curated table of recurring jokes, running bits, and personal motifs. Spliced into the system prompt's voice section so the agent draws on existing threads when drafting `content_type = personality` posts instead of inventing fresh ones every time. See §10 `personality_lore` for the schema.
+
+**Why a registry instead of letting the agent infer it from voice samples:**
+
+Voice samples are tone-by-example. The voice profile is structural (cadence, vocabulary). Neither captures *running narrative threads* — the water-bottle-in-frame joke that exists across 6 posts, the kitchen-scanner-fail story Daniel has referenced 4 times, the "neuro-oncology long arc" as a recurring identity anchor. Without an explicit registry, the agent re-invents bits each time, leading to a "new personality content trying to feel familiar" failure mode.
+
+**Workflow (Daniel-only):**
+
+1. Settings → Growth Agent → Personality lore.
+2. List of active lore rows. Each shows: `theme`, `description`, `invocation_count`, `last_invoked_at_utc`.
+3. "Add lore" form: theme name (short), description (one paragraph), optional `example_posts_json` (post IDs where this lore has been invoked previously — Daniel pastes from Content Performance).
+4. Toggle `is_active`, reorder by `priority`, edit theme/description.
+5. Per-row "over-relied on" yellow banner triggers when `invocation_count > personality_lore_overuse_threshold` (default 8) AND `last_invoked_at_utc > now() - 30 days`. Banner is informational — doesn't auto-disable.
+
+**System prompt splice:**
+
+`app/agent/prompt_builder.py` reads top-N active lore rows (default `personality_lore_splice_count = 5`, ordered by `priority` ascending) at build time and splices into §28.3 Section 5 (Voice samples), AFTER the voice samples block. Rendering:
+
+```
+**Personal lore (running bits to draw on when content_type = personality):**
+- water bottle in frame: long-running self-deprecating joke about accidentally leaving my water bottle visible in video shots. Invoked 6 times, last 19 days ago.
+- kitchen-scanner fail story: the time the scanner read "ginger" as "soap." Invoked 4 times, last 11 days ago.
+- neuro-oncology long arc: recurring reminder that Stir is a stepping stone, not the destination. Invoked 8 times, last 27 days ago.
+```
+
+When zero active rows, splice nothing (silent — no banner; Daniel doesn't need a nag for an empty optional feature).
+
+**Invocation tracking:**
+
+When an agent draft is saved with `content_type = personality`, the orchestrator scans the draft text against active lore `theme`s and `description` keyword tokens (case-insensitive). For each match, increment `invocation_count` and set `last_invoked_at_utc = now()`. Matching is fuzzy — over-counting is acceptable (a passing reference still counts), under-counting is not. The orchestrator never auto-edits the draft to insert lore; lore is *available* to the agent via prompt, not *injected* via post-processing.
+
+**Access control:**
+
+The agent has NO write access to `personality_lore`. No tool registry entry references the table. Startup-time assertion verifies this (same pattern as the publish-tool exclusion assertion in §28.4). Daniel-only edit.
+
+**Why hand-curated, not auto-extracted from past posts:**
+
+Auto-extracting would require an LLM to *guess* at recurring themes, which means hallucinated motifs would land in the prompt. Lore is identity-shaped; mis-extracted lore would warp drafts. Hand curation is a 5-minute Settings task once per quarter; auto-extraction would save those 5 minutes at the cost of an unbounded mis-attribution surface. Tradeoff is clearly worth it.
 
 ---
 
@@ -4840,6 +5293,31 @@ Deliberately rejected from the CreatorOS comparison:
 - Compare-and-swap on draft status + idempotency keys for publish jobs — meaningful in multi-instance deployments; XGrowth is single-instance and §28.10's two-step confirm + W12 `UNIQUE(post_id)` cover the realistic risk.
 - Campaigns / experiments tables — useful but expand schema scope; reconsider in V1.2 if reply-strategy iteration in §29 warrants the formal structure.
 - AI Coach as a separate view — Weekly Review (§14.6) plus the new §28.14 confidence-label discipline cover this without a dedicated surface.
+
+### Niche & Content-Type Calibration Pack addition (2026-05-22) — §28.16 through §28.21
+
+Distilled from Jacob Edmunds's "1k followers" YouTube framework (May 2026) cross-referenced against XGrowth's existing thesis. Six features selected; tactical advice that violated XGrowth's discipline (causal velocity claims, follow-for-follow, daily-V/G/P/P-cadence pressure, polarizing-for-reach) was rejected. Added as Phase 5.9 Should-ship. No existing contracts changed.
+
+78. **Structured niche definition (§28.16).** Two settings rows (`niche_problem`, `niche_person`) spliced into §28.3 Section 1 as a load-bearing identity statement. Settings → Growth Agent → Niche panel with a "test against bio" Haiku affordance. New §28.2 rule #15: agent refuses to draft when either field is empty. Orchestrator-enforced, not prompt-enforced. (§28.2 rule #15, §28.16, §14.7 Settings field 10, §25 Phase 5.9)
+
+79. **Content type axis V/G/P/P (§28.17).** New enum column on `posts` and `agent_drafts`: `value | growth | personality | proof | unspecified`. Orthogonal to pillar/audience/CTA — pillar is topic, content_type is purpose. New tool `#12 get_content_type_gaps` + new view `v_content_type_performance` (same graduated-confidence treatment as `v_lane_performance`). §14.1 Today gains a "today's content-type recommendation" line; §14.4 Content Performance gains a "Content type" tab. Daily-cadence pressure from the source video deliberately rejected. (§10 `posts.content_type`, §10 `agent_drafts.content_type`, §11 `v_content_type_performance`, §28.17, §25 Phase 5.9)
+
+80. **Reply-quality lint (§28.18).** Second Haiku lint pass on every reply draft, gated by `reply_quality_lint_enabled` (default `true`), positioned in the `_save_draft_reply` preflight between dark-pattern lint and pre-publish scorer. Catches "forced / AI-tasting / selfishly self-promoting" — distinct failure mode from §28.2 #12 manipulation. Failure counts as a failed IWH revision via the same enforcement path. `agent_drafts.reply_quality_lint_passed` persists the result. (§10 `agent_drafts.reply_quality_lint_passed`, §28.18, §25 Phase 5.9)
+
+81. **Follower-velocity projection (§28.19).** New computed view `v_follower_velocity` derived from `v_account_daily` with projection columns that return NULL when `abs(delta_7d) < velocity_projection_noise_floor_followers` (default 10). §14.3 Progress velocity panel renders the math without faking precision on noise. New tool `#13 get_velocity_projection()`. Source-video framing of velocity as a *goal* deliberately rejected; XGrowth treats projections as descriptive, not normative, per §13 + §5. (§11 `v_follower_velocity`, §28.19, §14.3, §25 Phase 5.9)
+
+82. **Replier-pool candidate discovery (§28.20).** Third reply-target discovery path beyond paste-URL and curated-account: pasted replier handles/excerpts from under a big-account thread. New tool `#14 score_replier_pool` adds a `thread_context_fit_score` dimension on top of §29.3's four. `reply_targets.source` enum extended with `replier_under_thread`. MVP is paste-driven (no scraping); V1.1+ adds the programmatic X API scan. (§10 `reply_targets.source` enum extension, §28.20, §29.7 UI extension, §25 Phase 5.9)
+
+83. **Personality lore registry (§28.21).** New tiny `personality_lore` table — Daniel-only curated, agent has no write access. Spliced into §28.3 Section 5 (Voice samples) after the raw samples. Three-layer voice stack: voice samples (tone-by-example) + voice profile (cadence/vocabulary) + personality lore (recurring narrative threads). Orchestrator tracks `invocation_count` and `last_invoked_at_utc` via fuzzy text scan when `content_type = personality` drafts are saved. (§10 `personality_lore`, §28.5 cross-reference, §28.21, §14.7 Settings field 11, §25 Phase 5.9)
+
+Deliberately rejected from the source video:
+
+- **"1k followers in 30 days" as a target.** §5 #2 + §13 already refuse causal/velocity claims. The §28.19 projection panel surfaces the arithmetic as a planning helper, never as a goal.
+- **"Post all four V/G/P/P types daily."** §28.17 explicitly carves this out — the framework is for *slice analysis*, not daily-posting pressure.
+- **"Polarizing opinions" as a content recipe.** The §28.18 reply-quality lint + §28.2 #12 dark-pattern lint together keep "polarizing-but-genuine" allowed and "polarizing-for-reach" blocked. The video's distinction is acknowledged; the recipe-ification is not.
+- **Engagement-group / follow-for-follow / gain-train tactics.** Already prohibited via §5 + §28.2 #12; reaffirmed.
+- **Community / coaching-call upsell context from the source video.** Influencer monetization framing; ignored.
+- **Auto-extraction of personality lore from past posts.** §28.21 carves this out explicitly — lore is identity-shaped and mis-attribution would warp drafts; hand curation is a tiny tax for a meaningful safety floor.
 
 [1]: https://docs.x.com/x-api/fundamentals/data-dictionary "Data Dictionary - X"
 [2]: https://docs.x.com/x-api/getting-started/about-x-api "About the X API - X"
