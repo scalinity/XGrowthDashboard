@@ -184,6 +184,65 @@ def test_save_inspiration_rejects_empty_text(
         _ins.save_inspiration(db_conn, source_post_text="   ")
 
 
+def test_p511r19_save_inspiration_rejects_non_http_scheme(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P511R-19: defense in depth. Reject javascript:, data:, vbscript:
+    URLs at save time so any downstream consumer (markdown export,
+    Obsidian sync, spec excerpt) that surfaces source_url as a link
+    doesn't become an XSS vector."""
+    for bad_url in (
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+        "file:///etc/passwd",
+    ):
+        with pytest.raises(_ins.InspirationError, match="scheme"):
+            _ins.save_inspiration(
+                db_conn,
+                source_post_text=f"probe for {bad_url}",
+                source_url=bad_url,
+            )
+
+
+def test_p511r19_save_inspiration_accepts_http_https(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """http:// and https:// (case-insensitive scheme) are allowed."""
+    sid1 = _ins.save_inspiration(
+        db_conn,
+        source_post_text="probe http",
+        source_url="http://example.com/post/1",
+    )
+    sid2 = _ins.save_inspiration(
+        db_conn,
+        source_post_text="probe https",
+        source_url="https://x.com/foo/status/123",
+    )
+    sid3 = _ins.save_inspiration(
+        db_conn,
+        source_post_text="probe HTTPS uppercase",
+        source_url="HTTPS://x.com/bar/status/456",
+    )
+    assert sid1 > 0 and sid2 > 0 and sid3 > 0
+
+
+def test_p511r19_save_inspiration_allows_null_or_empty_url(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """source_url is nullable per §10.2; NULL and empty/whitespace are fine."""
+    sid1 = _ins.save_inspiration(
+        db_conn, source_post_text="no url", source_url=None
+    )
+    sid2 = _ins.save_inspiration(
+        db_conn, source_post_text="empty url", source_url=""
+    )
+    sid3 = _ins.save_inspiration(
+        db_conn, source_post_text="whitespace url", source_url="   "
+    )
+    assert sid1 > 0 and sid2 > 0 and sid3 > 0
+
+
 def test_save_inspiration_emits_audit_row(db_conn: sqlite3.Connection) -> None:
     sid = _ins.save_inspiration(
         db_conn, source_post_text="x", source_author="@bar"

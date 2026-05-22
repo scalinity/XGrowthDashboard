@@ -239,6 +239,37 @@ def _sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+
+def _validate_source_url(source_url: str | None) -> None:
+    """P511R-19: refuse non-http(s) source_url at save time.
+
+    Single-user app today, so the threat is self-XSS at worst. But the
+    Inspiration Library is a paste-driven surface, and Daniel may
+    later export a saved row to a public note (Obsidian, weekly export,
+    spec excerpt). At that point a ``javascript:``, ``data:text/html,…``,
+    or ``vbscript:`` URL becomes a vector (CWE-79 latent). Defense in
+    depth — reject at save rather than relying on every downstream
+    consumer to sanitize.
+
+    NULL / empty source_url is allowed (the column is nullable per
+    §10.2 ``saved_inspiration_posts`` definition).
+    """
+    if source_url is None:
+        return
+    stripped = source_url.strip()
+    if not stripped:
+        return
+    # Be tolerant of capitalization (HTTPS://… is fine), strict on scheme.
+    scheme = stripped.split(":", 1)[0].lower() if ":" in stripped else ""
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise InspirationError(
+            f"source_url scheme {scheme!r} not allowed. "
+            f"Use http:// or https:// only (got {stripped[:40]!r})."
+        )
+
+
 def save_inspiration(
     conn: sqlite3.Connection,
     *,
@@ -251,11 +282,14 @@ def save_inspiration(
     """Insert a new ``saved_inspiration_posts`` row. Hash-dedupes exact text.
 
     Raises :class:`DuplicateInspirationError` when a row already exists
-    with the same ``sha256(source_post_text)``. Returns the new id on
-    success. Audit-logs an ``data/inspiration_saved`` row.
+    with the same ``sha256(source_post_text)``. Raises
+    :class:`InspirationError` when ``source_url`` has a non-http(s)
+    scheme (P511R-19). Returns the new id on success. Audit-logs a
+    ``data/inspiration_saved`` row.
     """
     if not source_post_text or not source_post_text.strip():
         raise InspirationError("source_post_text is required.")
+    _validate_source_url(source_url)
     text_hash = _sha256_hex(source_post_text)
     existing = conn.execute(
         "SELECT id FROM saved_inspiration_posts WHERE source_text_hash = ?",
