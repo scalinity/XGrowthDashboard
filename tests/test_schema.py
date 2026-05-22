@@ -75,6 +75,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "011_drafting_intelligence.sql",
     "012_niche_content_type.sql",
     "013_strategic_analysis.sql",
+    "014_velocity_view_expose_noise_floor.sql",
 )
 
 

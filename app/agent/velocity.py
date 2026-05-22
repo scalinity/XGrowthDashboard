@@ -84,18 +84,21 @@ class VelocityProjection:
 def get_velocity_projection(conn: sqlite3.Connection) -> VelocityProjection | None:
     """Latest v_follower_velocity row, or None if no snapshots exist.
 
-    The view itself suppresses projections when |delta_7d| < noise_floor;
-    we ALSO compute the suppression flag explicitly so the UI never has
-    to infer from NULL columns.
+    P59A-W6: the view now surfaces ``in_noise_floor`` and ``delta_7d``
+    directly (migration 014). One SELECT — the prior second SELECT
+    against v_account_daily is gone, and the suppression rule lives
+    in exactly one place (the view).
     """
     row = conn.execute(
         """
         SELECT snapshot_date,
                followers_count,
+               delta_7d,
                velocity_7d_per_day,
                velocity_30d_per_day,
                current_milestone_target,
                distance_to_current_milestone,
+               in_noise_floor,
                projected_milestone_hit_date_at_7d_pace,
                projected_milestone_hit_date_at_30d_pace,
                days_until_milestone_at_7d_pace,
@@ -106,20 +109,7 @@ def get_velocity_projection(conn: sqlite3.Connection) -> VelocityProjection | No
     if row is None:
         return None
 
-    # The view emits NULL projections under the same conditions, but we
-    # re-derive the suppression flag from delta_7d so the UI's "trend
-    # not yet measurable" message has an explicit anchor.
-    noise_floor = get_noise_floor(conn)
-    delta_7d_row = conn.execute(
-        """
-        SELECT delta_7d FROM v_account_daily
-        WHERE snapshot_date = ?
-        """,
-        (row["snapshot_date"],),
-    ).fetchone()
-    delta_7d = delta_7d_row["delta_7d"] if delta_7d_row is not None else None
-    in_noise_floor = delta_7d is None or abs(delta_7d) < noise_floor
-
+    in_noise_floor = bool(row["in_noise_floor"])
     return VelocityProjection(
         snapshot_date=row["snapshot_date"],
         followers_count=(
@@ -139,23 +129,21 @@ def get_velocity_projection(conn: sqlite3.Connection) -> VelocityProjection | No
         ),
         projected_milestone_hit_date_at_7d_pace=(
             row["projected_milestone_hit_date_at_7d_pace"]
-            if not in_noise_floor else None
         ),
         projected_milestone_hit_date_at_30d_pace=(
             row["projected_milestone_hit_date_at_30d_pace"]
-            if not in_noise_floor else None
         ),
         days_until_milestone_at_7d_pace=(
             int(row["days_until_milestone_at_7d_pace"])
-            if (not in_noise_floor and row["days_until_milestone_at_7d_pace"] is not None)
+            if row["days_until_milestone_at_7d_pace"] is not None
             else None
         ),
         days_until_milestone_at_30d_pace=(
             int(row["days_until_milestone_at_30d_pace"])
-            if (not in_noise_floor and row["days_until_milestone_at_30d_pace"] is not None)
+            if row["days_until_milestone_at_30d_pace"] is not None
             else None
         ),
-        in_noise_floor=bool(in_noise_floor),
+        in_noise_floor=in_noise_floor,
     )
 
 
