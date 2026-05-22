@@ -1,9 +1,9 @@
-"""Next rep — spec.md §14.2 (without the §29 reply-target panel).
+"""Next rep — spec.md §14.2.
 
 Closes the loop between measurement and the daily generative act. The view
-surfaces the lane Daniel is under-sampling and the open hypotheses needing
-data. The §29 reply-target panel slot is rendered as a clearly labelled
-placeholder so its location is stable through Phase 5.6.
+surfaces the lane Daniel is under-sampling, the open hypotheses needing
+data, and the §29 Reply Target Queue's top candidates — windowed onto the
+canonical queue per §29.2, never a parallel list.
 """
 
 from __future__ import annotations
@@ -20,7 +20,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 import streamlit as st
 
 from app.components.badges.sample_size import sample_size_badge
-from app.components.theme import PALETTE, apply_theme, callout, hairline, kicker
+from app.components.theme import (
+    PALETTE,
+    apply_theme,
+    callout,
+    hairline,
+    kicker,
+    recommended_action_badge,
+    recommended_action_keyline_color,
+    score_bank,
+)
 from app.pages import open_connection
 
 
@@ -203,25 +212,105 @@ else:
 
 hairline()
 
-# Reply-target panel placeholder — Phase 5.6 fills this in.
+# Reply-target panel — §14.2 + §29.2. Windowed view onto reply_targets.
 st.markdown("## Reply targets")
-st.markdown(
-    f"""<div style='border:1px dashed {PALETTE['hairline']};
-                     padding:1.2rem; border-radius:3px;
-                     background:{PALETTE['surface']};'>
-        <div class='kicker'>PLACEHOLDER · PHASE 5.6</div>
-        <p style='margin:0.4rem 0 0.2rem 0; color:{PALETTE['bone']};'>
-            Reply-target queue panel lands here in Phase 5.6 (§29).
-        </p>
-        <p class='faint' style='margin:0;'>
-            The MVP scoring (Relevance / Engagement surface / Saturation /
-            Reply opportunity) and the deterministic
-            <code>recommended_action_label</code> will render in this slot.
-            Keeping the slot visible now prevents accidental rebuild in 5.6.
-        </p>
-    </div>""",
-    unsafe_allow_html=True,
+st.caption(
+    "Top candidates from the Reply Target Queue. Filtered to the biggest-gap "
+    "pillar above when computable. §29.2 — one source of truth, not a "
+    "parallel list."
 )
+
+# Best-effort pillar bias: pick the pillar from the biggest gap above.
+_biggest_pillar = None
+if coverage:
+    _biggest_pillar = coverage[0][0][0]  # (pillar, audience, cta)[pillar]
+
+# Window onto the queue: top 5 candidates sorted by recommended_action_score.
+_window_sql = (
+    "SELECT * FROM reply_targets "
+    "WHERE status = 'candidate' "
+    "AND (? IS NULL OR pillar IS NULL OR pillar = ?) "
+    "ORDER BY COALESCE(recommended_action_score, -1) DESC, "
+    "         last_checked_at_utc DESC "
+    "LIMIT 5"
+)
+_window_rows = conn.execute(_window_sql, (_biggest_pillar, _biggest_pillar)).fetchall()
+
+if not _window_rows:
+    st.markdown(
+        f"""<div style='border:1px dashed {PALETTE['hairline']};
+                         padding:1rem 1.2rem; border-radius:3px;
+                         background:{PALETTE['surface']};'>
+            <p style='margin:0; color:{PALETTE['bone']};'>
+                No candidates yet — <em>add one from the queue</em>.
+            </p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    if st.button("Open Reply Target Queue →", key="next_rep_open_queue_empty"):
+        st.switch_page("pages/10_Reply_Target_Queue.py")
+else:
+    for _r in _window_rows:
+        _handle = (_r["target_author_handle"] or "unknown").lstrip("@")
+        _keyline = recommended_action_keyline_color(_r["recommended_action_label"])
+        _text_excerpt = (_r["target_text"] or "").strip().replace("\n", " ")
+        if len(_text_excerpt) > 80:
+            _text_excerpt = _text_excerpt[:79] + "…"
+        if not _text_excerpt:
+            _text_excerpt = "<span class='faint'>(no target text saved)</span>"
+        _eng_footnote = (
+            "floor — no author size"
+            if _r["target_author_follower_count"] is None
+            else None
+        )
+        st.markdown(
+            f"""<div style='border-left:3px solid {_keyline};
+                            padding:0.55rem 0.85rem 0.45rem 0.85rem;
+                            margin:0.45rem 0 0.15rem 0;
+                            background:{PALETTE['surface']};
+                            border-radius:2px;'>
+                <div style='display:flex; justify-content:space-between; align-items:baseline;'>
+                    <span style='color:{PALETTE['bone']}; font-weight:500;
+                                  font-family: "IBM Plex Sans", sans-serif;'>@{_handle}</span>
+                    <span class='numeric' style='font-size:0.75rem; color:{PALETTE['bone_faint']};'>
+                        #{int(_r['id'])}
+                    </span>
+                </div>
+                <div style='margin-top:0.2rem; color:{PALETTE['bone']};
+                            font-family: "IBM Plex Sans", sans-serif; line-height:1.35;
+                            font-size:0.9rem;'>
+                    {_text_excerpt}
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        score_bank(
+            _r["relevance_score"],
+            _r["engagement_surface_score"],
+            _r["saturation_score"],
+            _r["reply_opportunity_score"],
+            engagement_footnote=_eng_footnote,
+        )
+        st.markdown(
+            f"<div style='margin:-0.15rem 0 0.65rem 0;'>"
+            f"{recommended_action_badge(_r['recommended_action_label'])}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        f"<p class='faint' style='margin-top:0.5rem;'>Showing top "
+        f"<span class='numeric'>{len(_window_rows)}</span> candidates"
+        + (
+            f" in pillar <span class='numeric'>{_biggest_pillar}</span>."
+            if _biggest_pillar
+            else "."
+        )
+        + "</p>",
+        unsafe_allow_html=True,
+    )
+    if st.button("See full queue →", key="next_rep_open_queue"):
+        st.switch_page("pages/10_Reply_Target_Queue.py")
 
 # Account leads — Phase 5.5 surfaces curated accounts from agent_target_accounts.
 if _agent_target_accounts_available(conn):
