@@ -126,19 +126,25 @@ def export_table_to_csv(
         if not _table_exists(active, table_name):
             raise UnknownTableError(table_name)
 
-        rows = active.execute(sql).fetchall()
-        row_count = len(rows)
+        # /review-2 W7: iterate the cursor row-by-row instead of
+        # materialising every row up front. post_metric_snapshots and
+        # raw_api_responses are designed to grow unbounded; fetchall()
+        # would force the whole table into memory before writing a
+        # single byte to disk. Streaming keeps the writer O(1).
+        cursor = active.execute(sql)
+        row_count = 0
 
         # newline="" per the csv module docs to avoid blank lines on Windows
         # — even though this is a macOS-only project, the rule is harmless.
         with target.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.writer(fh)
             writer.writerow(columns)
-            for row in rows:
+            for row in cursor:
                 # sqlite3.Row supports indexing by name OR position. Use
                 # position-by-column-name so the row order in CSV exactly
                 # matches the header order.
                 writer.writerow([row[col] for col in columns])
+                row_count += 1
 
         record_export(
             active,
