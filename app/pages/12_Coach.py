@@ -509,13 +509,19 @@ def _render_sidebar(strip_window_count: int, strip_threshold: int) -> None:
     st.markdown(
         f"<div class='numeric' style='font-size:1.4rem;'>"
         f"{strip_window_count} <span class='dim' style='font-size:0.78rem;'>"
-        f"/ 20 msg threshold</span></div>",
+        f"/ 20 msg window</span></div>",
         unsafe_allow_html=True,
     )
+    # P510R-10: average-strips-per-message computation is stubbed
+    # pending the Phase 5.11 strip-log persistence format. Show a
+    # transparent "computing — Phase 5.11" placeholder rather than
+    # imply a live avg.
     st.markdown(
         f"<div class='faint' style='font-size:0.78rem; margin-top:0.2rem;'>"
-        f"avg-strips/msg threshold: <span class='numeric'>"
-        f"{strip_threshold}</span> (§28.23 strip-rate banner setting)</div>",
+        f"avg strips/msg: "
+        f"<span class='dim' style='font-style: italic;'>"
+        f"computing — Phase 5.11</span> "
+        f"<span class='numeric'>(threshold {strip_threshold})</span></div>",
         unsafe_allow_html=True,
     )
 
