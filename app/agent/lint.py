@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 _ENGAGEMENT_BAIT_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bnumber\s+\d+\s+will\s+(surprise|shock|amaze)", "engagement-bait: 'number N will surprise you'"),
-    (r"\b\d+\s+secrets?\b.*\b(don't|do not)\s+know\b", "engagement-bait: '5 secrets X don't know' framing"),
+    # RV2-26: bound the .* to avoid adversarial-input catastrophic backtracking.
+    (r"\b\d+\s+secrets?\b[^.\n]{0,200}\b(don't|do not)\s+know\b", "engagement-bait: '5 secrets X don't know' framing"),
     (r"\byou\s+won't\s+believe\b", "engagement-bait: 'you won't believe'"),
     (r"\bthis\s+one\s+(weird\s+)?trick\b", "engagement-bait: 'this one trick'"),
     (r"\b(only|just)\s+\d+\s+(spots?|seats?)\s+left\b", "fake scarcity: 'only N spots left'"),
@@ -220,7 +221,8 @@ def lint_draft(
 _EMOJI_CLASS = "[\\U0001F300-\\U0001FAFF\\u2700-\\u27BF\\u2764]"
 _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str], ...] = (
     (
-        r"\bgreat\s+(post|thread|take)!?\s*" + _EMOJI_CLASS + r".*\b(check|stop\s+by|visit|see)\b",
+        # RV2-26: bounded character class instead of .* — adversarial inputs.
+        r"\bgreat\s+(post|thread|take)!?\s*" + _EMOJI_CLASS + r"[^.\n]{0,200}\b(check|stop\s+by|visit|see)\b",
         "selfishly self-promoting: 'great post! check out my…'",
     ),
     (
@@ -511,7 +513,8 @@ _THREAD_LINT_CATEGORIES: tuple[str, ...] = (
 # behavior leans on the Haiku call.
 _RAGEBAIT_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bunpopular\s+opinion\b", "ragebait: 'unpopular opinion' framing"),
-    (r"\b(everyone|nobody)\s+(is|will|wants?)\b.*[?!]", "ragebait: us-vs-them framing"),
+    # RV2-26: bounded character class — thread classifier inputs can be longer.
+    (r"\b(everyone|nobody)\s+(is|will|wants?)\b[^.\n]{0,200}[?!]", "ragebait: us-vs-them framing"),
     (r"\bchange\s+my\s+mind\b", "ragebait: 'change my mind' framing"),
     (r"\b(prove|fight)\s+me\s+wrong\b", "ragebait: 'fight me / prove me wrong' framing"),
     (r"\b(woke|cancel\s+culture|libtard|trumptard)\b", "ragebait: tribal-culture-war terms"),
