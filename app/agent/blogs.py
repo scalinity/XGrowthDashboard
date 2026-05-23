@@ -482,111 +482,161 @@ def save_blog(
         raise InvalidBlogFieldError(f"unknown created_by: {created_by!r}")
 
     with transaction(conn):
-        blog_row = _fetch_blog_row(conn, blog_id)
-        current = _fetch_current_version(conn, blog_id)
-
-        # Resulting values (caller-supplied OR carried-forward).
-        new_body = (
-            body_markdown
-            if body_markdown is not None
-            else (blog_row["current_body_markdown"] or "")
-        )
-        new_outline = (
-            outline_markdown
-            if outline_markdown is not None
-            else blog_row["outline_markdown"]
-        )
-        new_title = title if title is not None else blog_row["title"]
-        new_status = status if status is not None else blog_row["status"]
-
-        new_body_hash = _hash_body(new_body)
-        new_length = _count_words(new_body)
-
-        # No-op detection — all four content/identity columns unchanged.
-        if current is not None:
-            unchanged = (
-                new_body_hash == current["body_text_hash"]
-                and (new_outline or None) == (current["outline_markdown_at_version"] or None)
-                and new_title == current["title_at_version"]
-                and new_status == current["status_at_version"]
-            )
-            if unchanged:
-                # Keep updated_at_utc fresh — a save-click that hit no-op
-                # is still a Daniel intent, useful for the "last edited"
-                # display. No version row, no audit row.
-                conn.execute(
-                    "UPDATE blogs SET updated_at_utc = datetime('now') WHERE id = ?",
-                    (blog_id,),
-                )
-                return None
-
-        # Demote previous current.
-        if current is not None:
-            conn.execute(
-                "UPDATE blog_versions SET is_current_for_blog = 0 WHERE id = ?",
-                (current["id"],),
-            )
-
-        next_version_number = _max_version_number(conn, blog_id) + 1
-        agent_assisted_new = (
-            1 if (blog_row["agent_assisted"] or created_by == "agent") else 0
+        new_version_id = _save_blog_in_tx(
+            conn,
+            blog_id,
+            body_markdown=body_markdown,
+            outline_markdown=outline_markdown,
+            title=title,
+            status=status,
+            created_by=created_by,
+            agent_message_id=agent_message_id,
+            agent_action=agent_action,
+            confidence_label_at_version=confidence_label_at_version,
+            daniel_revision_note=daniel_revision_note,
         )
 
-        conn.execute(
-            """
-            UPDATE blogs
-            SET current_body_markdown = ?,
-                outline_markdown = ?,
-                title = ?,
-                status = ?,
-                actual_length_words = ?,
-                agent_assisted = ?,
-                updated_at_utc = datetime('now')
-            WHERE id = ?
-            """,
-            (
-                new_body,
-                new_outline,
-                new_title,
-                new_status,
-                new_length,
-                agent_assisted_new,
-                blog_id,
-            ),
-        )
-
-        cur = conn.execute(
-            """
-            INSERT INTO blog_versions
-              (blog_id, version_number, body_markdown, body_text_hash,
-               title_at_version, outline_markdown_at_version,
-               status_at_version, created_by, agent_message_id,
-               agent_action, daniel_revision_note,
-               confidence_label_at_version, is_current_for_blog)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            RETURNING id
-            """,
-            (
-                blog_id,
-                next_version_number,
-                new_body,
-                new_body_hash,
-                new_title,
-                new_outline,
-                new_status,
-                created_by,
-                agent_message_id,
-                agent_action,
-                daniel_revision_note,
-                confidence_label_at_version,
-            ),
-        )
-        new_version_id = int(cur.fetchone()[0])
+    if new_version_id is None:
+        return None
 
     row = conn.execute(
         "SELECT * FROM blog_versions WHERE id = ?", (new_version_id,)
     ).fetchone()
     return _row_to_version(row)
+
+
+def _save_blog_in_tx(
+    conn: sqlite3.Connection,
+    blog_id: int,
+    *,
+    body_markdown: str | None = None,
+    outline_markdown: str | None = None,
+    title: str | None = None,
+    status: str | None = None,
+    created_by: Literal["daniel", "agent"] = "daniel",
+    agent_message_id: int | None = None,
+    agent_action: str | None = None,
+    confidence_label_at_version: str | None = None,
+    daniel_revision_note: str | None = None,
+) -> int | None:
+    """Same as :func:`save_blog` but assumes the caller already holds an
+    open transaction. Returns the new ``blog_versions.id`` or ``None`` on
+    no-op. The public :func:`save_blog` wraps this in ``with transaction(conn):``;
+    callers that need to compose this with other writes (e.g.
+    :func:`transition_status`, :func:`revert_to_version`) call this
+    inner helper inside their OWN single transaction so the version row +
+    surrounding writes commit together.
+
+    Re-validates ``agent_action`` / ``status`` / ``created_by`` defensively
+    because composing callers might pass through without going via
+    :func:`save_blog`'s argument-validation gate.
+    """
+    if agent_action is not None and agent_action not in VALID_AGENT_ACTIONS:
+        raise InvalidBlogFieldError(
+            f"unknown agent_action: {agent_action!r}. "
+            f"Allowed: {sorted(VALID_AGENT_ACTIONS)}."
+        )
+    if status is not None and status not in VALID_STATUSES:
+        raise InvalidBlogFieldError(f"unknown status: {status!r}")
+    if created_by not in {"daniel", "agent"}:
+        raise InvalidBlogFieldError(f"unknown created_by: {created_by!r}")
+
+    blog_row = _fetch_blog_row(conn, blog_id)
+    current = _fetch_current_version(conn, blog_id)
+
+    # Resulting values (caller-supplied OR carried-forward).
+    new_body = (
+        body_markdown
+        if body_markdown is not None
+        else (blog_row["current_body_markdown"] or "")
+    )
+    new_outline = (
+        outline_markdown
+        if outline_markdown is not None
+        else blog_row["outline_markdown"]
+    )
+    new_title = title if title is not None else blog_row["title"]
+    new_status = status if status is not None else blog_row["status"]
+
+    new_body_hash = _hash_body(new_body)
+    new_length = _count_words(new_body)
+
+    # No-op detection — all four content/identity columns unchanged.
+    if current is not None:
+        unchanged = (
+            new_body_hash == current["body_text_hash"]
+            and (new_outline or None) == (current["outline_markdown_at_version"] or None)
+            and new_title == current["title_at_version"]
+            and new_status == current["status_at_version"]
+        )
+        if unchanged:
+            # P6R-10: drop the no-op updated_at_utc bump — v_blog_pipeline
+            # reads last_edited_at from MAX(blog_versions.created_at_utc),
+            # so updated_at_utc was dead-code for the surfaced UI.
+            return None
+
+    # Demote previous current.
+    if current is not None:
+        conn.execute(
+            "UPDATE blog_versions SET is_current_for_blog = 0 WHERE id = ?",
+            (current["id"],),
+        )
+
+    next_version_number = _max_version_number(conn, blog_id) + 1
+    agent_assisted_new = (
+        1 if (blog_row["agent_assisted"] or created_by == "agent") else 0
+    )
+
+    conn.execute(
+        """
+        UPDATE blogs
+        SET current_body_markdown = ?,
+            outline_markdown = ?,
+            title = ?,
+            status = ?,
+            actual_length_words = ?,
+            agent_assisted = ?,
+            updated_at_utc = datetime('now')
+        WHERE id = ?
+        """,
+        (
+            new_body,
+            new_outline,
+            new_title,
+            new_status,
+            new_length,
+            agent_assisted_new,
+            blog_id,
+        ),
+    )
+
+    cur = conn.execute(
+        """
+        INSERT INTO blog_versions
+          (blog_id, version_number, body_markdown, body_text_hash,
+           title_at_version, outline_markdown_at_version,
+           status_at_version, created_by, agent_message_id,
+           agent_action, daniel_revision_note,
+           confidence_label_at_version, is_current_for_blog)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        RETURNING id
+        """,
+        (
+            blog_id,
+            next_version_number,
+            new_body,
+            new_body_hash,
+            new_title,
+            new_outline,
+            new_status,
+            created_by,
+            agent_message_id,
+            agent_action,
+            daniel_revision_note,
+            confidence_label_at_version,
+        ),
+    )
+    return int(cur.fetchone()[0])
 
 
 def transition_status(
@@ -610,6 +660,11 @@ def transition_status(
     Audit: one ``audit_logs`` row per successful transition with
     category ``data`` and type ``blog_status_<from>_to_<to>``.
     """
+    # P6R-1: pre-checks run OUTSIDE the transaction (read-only). The full
+    # state mutation — version row + blogs UPDATE + external_url +
+    # external_published_at + audit — commits or rolls back together inside
+    # the single `with transaction(conn):` block below. If audit fails,
+    # nothing else persists either.
     blog_row = _fetch_blog_row(conn, blog_id)
     current_status = blog_row["status"]
 
@@ -626,20 +681,14 @@ def transition_status(
             "published_externally requires external_url to be populated"
         )
 
-    # 1. Append the version row (save_blog runs its own transaction).
-    #    Doing this BEFORE the audit row keeps audit + version in lockstep:
-    #    if save_blog throws, the audit table stays clean.
-    version = save_blog(
-        conn,
-        blog_id,
-        status=new_status,
-        created_by="daniel",
-        daniel_revision_note=daniel_revision_note,
-    )
-
-    # 2. Then update external_url / external_published_at (if needed) and
-    #    log the transition. One transaction; mutually atomic.
     with transaction(conn):
+        new_version_id = _save_blog_in_tx(
+            conn,
+            blog_id,
+            status=new_status,
+            created_by="daniel",
+            daniel_revision_note=daniel_revision_note,
+        )
         if external_url is not None:
             conn.execute(
                 "UPDATE blogs SET external_url = ? WHERE id = ?",
@@ -667,13 +716,16 @@ def transition_status(
             },
         )
 
-    if version is None:
-        # Should not happen — status changed, so the no-op detection
-        # must have caught a different vector. Fall back to a query.
+    if new_version_id is None:
+        # Should not happen — status changed, so no-op detection cannot
+        # have fired. Fall back to a query for safety.
         row = _fetch_current_version(conn, blog_id)
         assert row is not None
         return _row_to_version(row)
-    return version
+    row = conn.execute(
+        "SELECT * FROM blog_versions WHERE id = ?", (new_version_id,)
+    ).fetchone()
+    return _row_to_version(row)
 
 
 def revert_to_version(
@@ -695,75 +747,87 @@ def revert_to_version(
     Reverting is recorded in ``audit_logs`` as a single ``data`` event
     with the from/to version numbers in ``details``.
     """
-    target = conn.execute(
-        """
-        SELECT *
-        FROM blog_versions
-        WHERE id = ? AND blog_id = ?
-        """,
-        (version_id, blog_id),
+    # P6R-1: target lookup + pre-checks + version-row append + audit all
+    # live inside ONE transaction so partial-failure leaves no orphan
+    # state. (Previously the pre-checks were outside any transaction and
+    # save_blog ran in its own transaction, leaving room for the audit
+    # row to fail after the version row committed.)
+    with transaction(conn):
+        target = conn.execute(
+            """
+            SELECT *
+            FROM blog_versions
+            WHERE id = ? AND blog_id = ?
+            """,
+            (version_id, blog_id),
+        ).fetchone()
+        if target is None:
+            raise BlogVersionNotFoundError(
+                f"version #{version_id} not found for blog #{blog_id}"
+            )
+
+        # If the target is already the current row, there is nothing to
+        # revert to — surface a clean error instead of writing a duplicate.
+        if int(target["is_current_for_blog"]) == 1:
+            raise InvalidBlogFieldError(
+                f"version #{version_id} is already the current version "
+                f"for blog #{blog_id}"
+            )
+
+        revert_note_pieces = [f"reverted to v{int(target['version_number'])}"]
+        if daniel_revision_note:
+            revert_note_pieces.append(daniel_revision_note.strip())
+        revert_note = ": ".join(revert_note_pieces)
+
+        current_before = _fetch_current_version(conn, blog_id)
+        current_version_number_before = (
+            int(current_before["version_number"]) if current_before is not None else None
+        )
+
+        new_version_id = _save_blog_in_tx(
+            conn,
+            blog_id,
+            body_markdown=target["body_markdown"] or "",
+            outline_markdown=target["outline_markdown_at_version"],
+            title=target["title_at_version"],
+            status=target["status_at_version"],
+            created_by="daniel",
+            daniel_revision_note=revert_note,
+        )
+        # _save_blog_in_tx returns None on no-op (target's content
+        # matches current). We already rejected the "same row" case but
+        # identical content across two distinct rows can still happen.
+        # Raising here rolls back the whole transaction so no orphan
+        # audit row is left behind.
+        if new_version_id is None:
+            raise InvalidBlogFieldError(
+                f"revert to v{int(target['version_number'])} produced no change "
+                f"(content matches current). Pick a different version."
+            )
+
+        new_version_number = conn.execute(
+            "SELECT version_number FROM blog_versions WHERE id = ?",
+            (new_version_id,),
+        ).fetchone()[0]
+
+        _audit_log.log(
+            conn,
+            event_category="data",
+            event_type="blog_reverted",
+            target_type="blog",
+            target_id=blog_id,
+            details={
+                "from_version_number": current_version_number_before,
+                "to_target_version_number": int(target["version_number"]),
+                "new_version_number": int(new_version_number),
+                "note": daniel_revision_note,
+            },
+        )
+
+    row = conn.execute(
+        "SELECT * FROM blog_versions WHERE id = ?", (new_version_id,)
     ).fetchone()
-    if target is None:
-        raise BlogVersionNotFoundError(
-            f"version #{version_id} not found for blog #{blog_id}"
-        )
-
-    # If the target is already the current row, there is nothing to revert to
-    # — surface a clean error instead of silently writing a duplicate.
-    if int(target["is_current_for_blog"]) == 1:
-        raise InvalidBlogFieldError(
-            f"version #{version_id} is already the current version for blog #{blog_id}"
-        )
-
-    revert_note_pieces = [f"reverted to v{int(target['version_number'])}"]
-    if daniel_revision_note:
-        revert_note_pieces.append(daniel_revision_note.strip())
-    revert_note = ": ".join(revert_note_pieces)
-
-    current_before = _fetch_current_version(conn, blog_id)
-    current_version_number_before = (
-        int(current_before["version_number"]) if current_before is not None else None
-    )
-
-    # save_blog handles the demote + append + blogs UPDATE atomically.
-    # We pass the target's full snapshot (body + outline + title +
-    # status) so the new row reflects the revert target's state.
-    new_version = save_blog(
-        conn,
-        blog_id,
-        body_markdown=target["body_markdown"] or "",
-        outline_markdown=target["outline_markdown_at_version"],
-        title=target["title_at_version"],
-        status=target["status_at_version"],
-        created_by="daniel",
-        daniel_revision_note=revert_note,
-    )
-    # save_blog returns None on no-op — which can happen if Daniel
-    # "reverts" to a version identical to current (e.g. v.3 == current
-    # because a no-op save was suppressed in between). We already
-    # rejected the "same row" case above, but identical content
-    # across two distinct rows can still happen. Surface that as a
-    # diagnostic-friendly error rather than a silent no-op.
-    if new_version is None:
-        raise InvalidBlogFieldError(
-            f"revert to v{int(target['version_number'])} produced no change "
-            f"(content matches current). Pick a different version."
-        )
-
-    _audit_log.log(
-        conn,
-        event_category="data",
-        event_type="blog_reverted",
-        target_type="blog",
-        target_id=blog_id,
-        details={
-            "from_version_number": current_version_number_before,
-            "to_target_version_number": int(target["version_number"]),
-            "new_version_number": int(new_version.version_number),
-            "note": daniel_revision_note,
-        },
-    )
-    return new_version
+    return _row_to_version(row)
 
 
 def list_versions(conn: sqlite3.Connection, blog_id: int) -> list[BlogVersion]:

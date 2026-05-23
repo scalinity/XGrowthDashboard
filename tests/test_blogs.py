@@ -270,6 +270,79 @@ def test_transition_status_archived_is_terminal(db_conn: sqlite3.Connection) -> 
             bm.transition_status(db_conn, b.id, s)
 
 
+def test_transition_status_atomicity_under_audit_failure(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-1: if audit_log.log raises mid-transition, the version row +
+    status change must NOT persist. Pre-fix this would have left an
+    orphan version row with the new status_at_version while no audit row
+    landed."""
+    from unittest.mock import patch
+    b = bm.create_blog(db_conn, title="atomic")
+    versions_before = db_conn.execute(
+        "SELECT COUNT(*) FROM blog_versions WHERE blog_id = ?", (b.id,)
+    ).fetchone()[0]
+    status_before = bm.get_blog(db_conn, b.id).status
+
+    with patch(
+        "app.agent.blogs._audit_log.log",
+        side_effect=sqlite3.OperationalError("simulated audit failure"),
+    ):
+        with pytest.raises(sqlite3.OperationalError):
+            bm.transition_status(db_conn, b.id, "outlining")
+
+    # No new version row landed.
+    versions_after = db_conn.execute(
+        "SELECT COUNT(*) FROM blog_versions WHERE blog_id = ?", (b.id,)
+    ).fetchone()[0]
+    assert versions_after == versions_before, (
+        "audit failure must roll back the version row too"
+    )
+    # blogs.status did not move.
+    assert bm.get_blog(db_conn, b.id).status == status_before
+
+
+def test_revert_to_version_atomicity_under_audit_failure(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-1: same invariant for revert_to_version — if audit fails,
+    the new version row + demote of the prior current must roll back."""
+    from unittest.mock import patch
+    b = bm.create_blog(db_conn, title="revert atomic")
+    v2 = bm.save_blog(db_conn, b.id, body_markdown="alpha", created_by="daniel")
+    bm.save_blog(db_conn, b.id, body_markdown="beta", created_by="daniel")
+    assert v2 is not None
+
+    versions_before = db_conn.execute(
+        "SELECT COUNT(*) FROM blog_versions WHERE blog_id = ?", (b.id,)
+    ).fetchone()[0]
+    current_id_before = db_conn.execute(
+        "SELECT id FROM blog_versions "
+        "WHERE blog_id = ? AND is_current_for_blog = 1",
+        (b.id,),
+    ).fetchone()[0]
+
+    with patch(
+        "app.agent.blogs._audit_log.log",
+        side_effect=sqlite3.OperationalError("simulated audit failure"),
+    ):
+        with pytest.raises(sqlite3.OperationalError):
+            bm.revert_to_version(db_conn, b.id, v2.id)
+
+    versions_after = db_conn.execute(
+        "SELECT COUNT(*) FROM blog_versions WHERE blog_id = ?", (b.id,)
+    ).fetchone()[0]
+    assert versions_after == versions_before
+    current_id_after = db_conn.execute(
+        "SELECT id FROM blog_versions "
+        "WHERE blog_id = ? AND is_current_for_blog = 1",
+        (b.id,),
+    ).fetchone()[0]
+    assert current_id_after == current_id_before, (
+        "demote-of-prior-current must also roll back on audit failure"
+    )
+
+
 def test_transition_status_audit_row_records_edge(
     db_conn: sqlite3.Connection,
 ) -> None:
