@@ -59,15 +59,37 @@ def get_str(conn: sqlite3.Connection, key: str, default: str) -> str:
 
 
 def get_bool(conn: sqlite3.Connection, key: str, default: bool) -> bool:
+    """Return the boolean stored at ``settings[key]`` or ``default``.
+
+    P9R-34: tighten acceptance to literal JSON booleans + numeric 0/1
+    only. Pre-fix, ``bool(json.loads(raw))`` returned True for any
+    truthy JSON value — including lists, dicts, and strings — so a
+    stray ``"yes"`` or ``[0]`` could silently flip a kill switch.
+    Reject those shapes and fall back to ``default`` with a WARNING.
+
+    Accepted shapes:
+      * ``true`` / ``false`` (JSON literal)
+      * ``0`` / ``1`` (JSON number — common settings convention)
+    Anything else logs a warning and returns ``default``.
+    """
     raw = _raw_value_json(conn, key)
     if raw is None:
         return default
     try:
-        return bool(json.loads(raw))
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
         _LOG.warning("settings[%r] unparseable as bool (%r); using default %r",
                      key, exc, default)
         return default
+    if isinstance(parsed, bool):
+        return parsed
+    if isinstance(parsed, int) and parsed in (0, 1):
+        return bool(parsed)
+    _LOG.warning(
+        "settings[%r] rejected as bool — got %r (type=%s); using default %r",
+        key, parsed, type(parsed).__name__, default,
+    )
+    return default
 
 
 def get_json(

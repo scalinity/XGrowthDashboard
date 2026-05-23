@@ -40,6 +40,9 @@ from app.agent.tools import (
     _record_reply_target,
     _score_reply_candidates,
 )
+from app.components.badges.grok_semantic import (
+    render_grok_badge_html as _render_grok_badge_html,
+)
 from app.components.theme import (
     PALETTE,
     apply_theme,
@@ -438,28 +441,9 @@ for row in rows:
     handle = (row["target_author_handle"] or "unknown").lstrip("@")
     keyline = recommended_action_keyline_color(row["recommended_action_label"])
     # Phase 9 §29.7 grok_semantic badge — surfaces when Grok firehose
-    # discovery (§29.12) inserted this row. Daniel can audit
-    # provenance at a glance and the discovered_via filter above lets
-    # him zoom into just-Grok or just-manual sets.
-    _row_discovered_via = (row["discovered_via"] or "").strip()
-    _grok_badge_html = ""
-    if _row_discovered_via == "grok_semantic":
-        _grok_badge_html = (
-            "<span style='display:inline-block;"
-            "background:rgba(126,201,126,0.12);"
-            "color:#7ec97e;"
-            "font-family:\"JetBrains Mono\", monospace;"
-            "font-size:0.65rem;"
-            "letter-spacing:0.04em;"
-            "text-transform:uppercase;"
-            "padding:0.08rem 0.4rem;"
-            "border:1px solid rgba(126,201,126,0.28);"
-            "border-radius:2px;"
-            "margin-left:0.45rem;"
-            "vertical-align:middle;'>"
-            "grok_semantic"
-            "</span>"
-        )
+    # discovery (§29.12) inserted this row. P9R-47: badge HTML lives in
+    # app/components/badges/grok_semantic.py so it can be unit-tested.
+    _grok_badge_html = _render_grok_badge_html(row["discovered_via"])
     # /review-2 🟡 #1 — also label when the absolute floor (rather than the
     # %-of-followers calc) is the binding threshold; a 200-follower author's
     # pct calc rounds below the 15-likes floor, so the floor wins silently.

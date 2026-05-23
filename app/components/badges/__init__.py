@@ -11,6 +11,7 @@ from app.components.badges.confidence_label import (
     confidence_badge,
     ui_label_for_db_label,
 )
+from app.components.badges.grok_semantic import render_grok_badge_html
 from app.components.badges.prepublish_label import (
     COMPOSITE_LABEL_PRESENTATION,
     prepublish_chip,
@@ -28,6 +29,7 @@ __all__ = [
     "claim_confidence_chip",
     "confidence_badge",
     "prepublish_chip",
+    "render_grok_badge_html",
     "render_score_panel",
     "repetition_banner",
     "sample_size_badge",

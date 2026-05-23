@@ -1081,7 +1081,7 @@
               <li><code>engagement_surface_thresholds(...)</code> — <span class="spec">29.4</span> with floor fallback when <code>target_author_follower_count</code> is NULL.</li>
               <li><code>engagement_surface_score(...)</code> — 0..3 mapping; 2→3 boundary is <code>3 * high_threshold</code> (working interpretation of "saturated viral"; flagged in spec ambiguities below).</li>
               <li><code>saturation_score(...)</code> — 0..3 mapping from <code>reply_count</code> per <span class="spec">29.3</span> thread-position bands.</li>
-              <li>Single source of truth tuples: <code>REPLY_INTENT_ENUM</code>, <code>SKIP_REASON_ENUM</code>, <code>DISCOVERED_VIA_ENUM</code> (MVP set; <code>grok_semantic</code> deferred to V1.2), <code>STATUS_ENUM</code>.</li>
+              <li>Single source of truth tuples: <code>REPLY_INTENT_ENUM</code>, <code>SKIP_REASON_ENUM</code>, <code>DISCOVERED_VIA_ENUM</code> (MVP set; <code>grok_semantic</code> added by Phase 9 — see migration 021), <code>STATUS_ENUM</code>.</li>
             </ul>
           </div>
         </details>
@@ -1239,7 +1239,7 @@
               <li><code>velocity_score</code> and <code>timing_score</code> columns exist with CHECK constraints but stay NULL until V1.1 metrics-refresh lands.</li>
               <li>Thread-classifier lint pass (<span class="spec">29.10</span>) is V1.1+; <code>lint_blocked</code> is always 0 at MVP and the "Force-draft" affordance isn't built (no lint to override yet).</li>
               <li>X API enrichment of <code>target_author_follower_count</code> is V1.1+.</li>
-              <li><code>grok_semantic</code> discovered_via enum value is V1.2-deferred and not in the CHECK constraint.</li>
+              <li><span style="text-decoration: line-through; opacity: 0.6;"><code>grok_semantic</code> discovered_via enum value is V1.2-deferred and not in the CHECK constraint.</span> <strong>[Resolved by Phase 9, migration 021 — see <a href="#phase-9">phase-9</a>.]</strong></li>
             </ul>
           </div>
         </details>

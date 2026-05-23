@@ -596,3 +596,163 @@ def test_replier_under_thread_source_still_valid(db_conn: sqlite3.Connection) ->
         "WHERE target_post_url = 'https://x.com/r/status/300'"
     ).fetchone()
     assert row["source"] == "replier_under_thread"
+
+
+# ---------------------------------------------------------------------------
+# P9R-32: GrokUnavailable on network-layer failure.
+# ---------------------------------------------------------------------------
+def test_grok_unavailable_on_urllib_url_error(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network-layer failure (DNS / refused) → GrokUnavailable AND a
+    grok_api_responses audit row with rejection_reason='http_error_other'."""
+    import urllib.error
+
+    def _fake_urlopen(*_args: Any, **_kwargs: Any) -> Any:
+        raise urllib.error.URLError(reason="DNS lookup failed")
+
+    monkeypatch.setattr(
+        grok_client.urllib.request, "urlopen", _fake_urlopen
+    )
+    monkeypatch.setenv("XAI_API_KEY", "dummy")
+
+    with pytest.raises(grok_client.GrokUnavailable):
+        grok_client.search("test", conn=db_conn)
+
+    row = db_conn.execute(
+        "SELECT rejection_reason FROM grok_api_responses "
+        "WHERE rejection_reason = 'http_error_other' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+
+
+# ---------------------------------------------------------------------------
+# P9R-33: X API rate-limit during verification.
+# ---------------------------------------------------------------------------
+def test_sweep_handles_xapi_rate_limit_during_verification(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """X API XApiRateLimited during verify → wait ≤ cap pauses, wait > cap aborts."""
+    from app import x_client
+
+    candidates = [
+        grok_client.GrokCandidate(
+            target_x_post_id="9999",
+            target_post_url="https://x.com/x/status/9999",
+            target_author_handle="x",
+        ),
+    ]
+    _stub_grok_search(monkeypatch, candidates)
+
+    # Stub verify to raise XApiRateLimited with retry_after EXCEEDING the
+    # in-job cap so the sweep aborts.
+    def _fake_verify(*_args: Any, **_kwargs: Any) -> Any:
+        raise x_client.XApiRateLimited(
+            "rate limited",
+            retry_after_seconds=999.0,
+        )
+
+    monkeypatch.setattr(
+        grok_discovery_sweep,
+        "verify_grok_candidate_against_x_api",
+        _fake_verify,
+    )
+
+    summary = grok_discovery_sweep.run(
+        db_conn,
+        settings_override={
+            "grok_api_enabled": True,
+            "grok_query_list_json": ["x"],
+            "engagement_surface_floor_likes": 15,
+            "engagement_surface_pct_of_author": 0.001,
+            "engagement_surface_high_floor_likes": 50,
+            "engagement_surface_high_pct": 0.005,
+        },
+    )
+    assert summary["rate_limit_aborts"] == 1
+    assert "exceeds in-job cap" in (summary["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# P9R-39: candidates_verified counter — end-to-end (happy + dedupe).
+# ---------------------------------------------------------------------------
+def test_candidates_verified_counts_pass_not_insert(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P9R-9 + P9R-39: candidates_verified counts 'passed §29.2', not
+    'got inserted'. Seed a manual row → run sweep against same post id →
+    expect verified=1, inserted=0, dedupe_dropped=1."""
+    db_conn.execute(
+        "INSERT INTO reply_targets "
+        "(discovered_via, target_post_url, target_x_post_id, "
+        " target_author_handle) "
+        "VALUES ('manual', "
+        "'https://x.com/sometwo/status/9990001111', "
+        "'9990001111', 'sometwo')"
+    )
+
+    candidates = [
+        grok_client.GrokCandidate(
+            target_x_post_id="9990001111",
+            target_post_url="https://x.com/sometwo/status/9990001111",
+            target_author_handle="sometwo",
+        ),
+    ]
+    _stub_grok_search(monkeypatch, candidates)
+
+    settings_override = {
+        "grok_api_enabled": True,
+        "grok_query_list_json": ["x"],
+        "engagement_surface_floor_likes": 15,
+        "engagement_surface_pct_of_author": 0.001,
+        "engagement_surface_high_floor_likes": 50,
+        "engagement_surface_high_pct": 0.005,
+    }
+    with use_cassette(monkeypatch, "grok_verify_200_dedupe"):
+        summary = grok_discovery_sweep.run(
+            db_conn, settings_override=settings_override
+        )
+    assert summary["candidates_verified"] == 1
+    assert summary["candidates_inserted"] == 0
+    assert summary["candidates_dedupe_dropped"] == 1
+
+
+# ---------------------------------------------------------------------------
+# P9R-52: twitter.com → x.com URL canonicalization contract.
+# ---------------------------------------------------------------------------
+def test_twitter_dot_com_citation_canonicalizes_to_x_dot_com() -> None:
+    """The regex accepts both x.com and twitter.com hosts but the parsed
+    candidate's target_post_url always uses x.com — same post deduped via
+    target_x_post_id regardless of which host Grok cited."""
+    body = {
+        "choices": [{"message": {"content": ""}}],
+        "citations": [
+            "https://twitter.com/foo/status/123",
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    cands = grok_client._parse_candidates_from_response(body)
+    assert len(cands) == 1
+    assert cands[0].target_x_post_id == "123"
+    assert cands[0].target_post_url == "https://x.com/foo/status/123"
+
+
+# ---------------------------------------------------------------------------
+# P9R-47: Queue UI grok_semantic badge helper.
+# ---------------------------------------------------------------------------
+def test_render_grok_badge_html_returns_pill_for_grok_semantic() -> None:
+    from app.components.badges import render_grok_badge_html
+
+    html_out = render_grok_badge_html("grok_semantic")
+    assert "grok_semantic" in html_out
+    assert "#7ec97e" in html_out  # phosphor-green accent
+    assert "<span" in html_out
+
+
+def test_render_grok_badge_html_returns_empty_for_other_provenance() -> None:
+    from app.components.badges import render_grok_badge_html
+
+    for value in ("manual", "agent_score", "next_rep_seed", "v1.1_api_search",
+                  None, "", "GROK_SEMANTIC"):
+        assert render_grok_badge_html(value) == ""
