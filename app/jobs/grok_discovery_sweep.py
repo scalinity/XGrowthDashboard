@@ -212,9 +212,13 @@ def _insert_candidate(
     # P9R-38: prefer canonical handle from the X API includes.users[0]
     # over the (possibly stale) handle parsed from the Grok citation
     # URL. Falls back to the URL-derived value when X API didn't carry
-    # the expansion. P9R-43: source='paste_url' is the closest
-    # existing CHECK enum value — the discovered_via column carries
-    # the canonical 'grok_semantic' provenance.
+    # the expansion.
+    #
+    # P9R-43: source='grok_firehose' (migration 022 extended the
+    # source CHECK enum). The discovered_via column carries the
+    # canonical 'grok_semantic' provenance; source now also tells the
+    # truth so a future grep for source='paste_url' doesn't surface
+    # Grok rows.
     effective_handle = (
         score_block.get("target_author_handle")
         or candidate.target_author_handle
@@ -233,7 +237,7 @@ def _insert_candidate(
                  engagement_surface_score, saturation_score,
                  timing_score, status)
             VALUES
-                ('grok_semantic', 'paste_url', 'x',
+                ('grok_semantic', 'grok_firehose', 'x',
                  ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, 'candidate')
