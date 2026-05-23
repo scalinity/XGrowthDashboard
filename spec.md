@@ -241,8 +241,8 @@ The dominant question should be:
 * **SQLite** for local-first storage.
 * **Streamlit + `st.connection`** for the local dashboard UI with built-in query caching. Connection setup MUST execute `PRAGMA foreign_keys = ON` on every connection — SQLite disables FK enforcement by default, and the spec relies on `ON DELETE SET NULL` for `posts.published_via_agent_message_id` and `agent_messages.resulted_in_published_post_id` (§10.2). Without this PRAGMA, FK behaviors documented in the schema silently no-op.
 * **Manual entry as the default data collection path** — daily snapshot form is pinned to the top of the Today view.
-* **`xurl` as the V1.1 upgrade path** once the manual loop has proven the dashboard's value.
-* **Direct X API client deferred to V1.2** when cost justifies it.
+* **`xurl` integration ships in Phase 7 (X API reads)** once the manual loop has proven the dashboard's value. See §25 Phase 7 + §29.1 for the full read-side scope; defaults to enabled (`data_collection_mode = 'api'`) after migration 018.
+* **Direct X API write integration ships in Phase 8** under §28.10's existing publish-flow contract — replaces the stubbed manual-clipboard-only branch with a real `POST /2/tweets` call alongside the manual fallback, gated by `publish_via_api_enabled` (default TRUE).
 * **Python scripts** for batch operations (export, weekly report generation) but not as the primary daily data path.
 * **`cron`/`launchd` only when a real API integration exists** — there is nothing to schedule when collection is manual.
 * **CSV export** for portability.
@@ -289,15 +289,15 @@ x_growth_dashboard/
   data/
     x_growth.sqlite
     backups/                 # VACUUM INTO targets, dated
-    raw_api/                 # empty until V1.1
+    raw_api/                 # empty until Phase 7
     exports/
     weekly_reports/
   scripts/
     backup_db.py             # VACUUM INTO with date suffix
     export_weekly_report.py
-    collect_account_snapshot.py   # stub until V1.1
-    collect_recent_posts.py       # stub until V1.1
-    refresh_post_metrics.py       # stub until V1.1
+    collect_account_snapshot.py   # stub until Phase 7
+    collect_recent_posts.py       # stub until Phase 7
+    refresh_post_metrics.py       # stub until Phase 7
   app/
     db.py                    # st.connection wrapper + schema bootstrap
     streamlit_app.py
@@ -363,7 +363,7 @@ sqlite3 data/x_growth.sqlite "VACUUM INTO 'data/backups/x_growth_$(date +%Y%m%d_
                          └───────────┬─────────────┘
                                      │
                          ┌───────────┴─────────────┐
-                         │  xurl / X API (V1.1+)   │
+                         │  xurl / X API (Phase 7+) │
                          │  same tables, source=api │
                          └───────────┬─────────────┘
                                      │
