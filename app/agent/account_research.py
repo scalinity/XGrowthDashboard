@@ -34,9 +34,10 @@ from app.agent.untrusted_wrap import (
     strip_code_fence as _strip_code_fence_shared,
     wrap_untrusted as _wrap_untrusted_shared,
 )
-from app.db import transaction
+from app.db import PROJECT_ROOT, transaction
+# P6R-37: PROJECT_ROOT centralized on app.db rather than recomputed
+# per-module.
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 ACCOUNT_RESEARCH_PROMPT_PATH: Path = (
     PROJECT_ROOT / "config" / "account_research_prompt.md"
 )

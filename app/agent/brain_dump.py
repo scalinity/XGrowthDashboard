@@ -49,8 +49,8 @@ from app.agent.untrusted_wrap import (
     strip_code_fence as _strip_code_fence_shared,
     wrap_untrusted as _wrap_untrusted_shared,
 )
+from app.db import PROJECT_ROOT  # P6R-37: centralized in app.db.
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 BRAIN_DUMP_PROMPT_PATH: Path = PROJECT_ROOT / "config" / "brain_dump_prompt.md"
 
 DEFAULT_MODEL: str = "claude-opus-4-7"

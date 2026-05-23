@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from app.db import transaction
+from app.db import PROJECT_ROOT, transaction  # P6R-37: PROJECT_ROOT centralized.
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+
 VOICE_PROFILE_PROMPT_PATH: Path = PROJECT_ROOT / "config" / "voice_profile_prompt.md"
 
 DEFAULT_WINDOW_DAYS: int = 90

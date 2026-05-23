@@ -24,8 +24,8 @@ import sqlite3
 from pathlib import Path
 
 from app.agent import niche, personality_lore, tools, voice, voice_profile
+from app.db import PROJECT_ROOT  # P6R-37: centralized in app.db.
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 PROMPT_TEMPLATE_PATH: Path = PROJECT_ROOT / "config" / "agent_system_prompt.md"
 SPEC_PATH: Path = PROJECT_ROOT / "spec.md"
 

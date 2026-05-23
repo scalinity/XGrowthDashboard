@@ -33,9 +33,9 @@ from app.agent.untrusted_wrap import (
     strip_code_fence as _strip_code_fence_shared,
     wrap_untrusted as _wrap_untrusted_shared,
 )
-from app.db import transaction
+from app.db import PROJECT_ROOT, transaction  # P6R-37: PROJECT_ROOT centralized.
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+
 PROFILE_AUDIT_PROMPT_PATH: Path = (
     PROJECT_ROOT / "config" / "profile_audit_prompt.md"
 )

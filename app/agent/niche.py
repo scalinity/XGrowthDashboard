@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import settings_io
-from app.db import transaction
+from app.db import PROJECT_ROOT, transaction  # P6R-37: PROJECT_ROOT centralized.
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+
 NICHE_ALIGNMENT_PROMPT_PATH: Path = PROJECT_ROOT / "config" / "niche_alignment_prompt.md"
 
 DEFAULT_ALIGNMENT_MODEL: str = "claude-haiku-4-5-20251001"

@@ -37,10 +37,9 @@ from app.agent.untrusted_wrap import (
     strip_code_fence as _strip_code_fence,
     wrap_untrusted as _wrap_untrusted,
 )
-from app.db import transaction
+from app.db import PROJECT_ROOT, transaction  # P6R-37: PROJECT_ROOT centralized.
 
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 INSPIRATION_PROMPT_PATH: Path = (
     PROJECT_ROOT / "config" / "inspiration_transform_prompt.md"
 )
