@@ -158,8 +158,18 @@ def _highest_committed_x_post_id(conn: sqlite3.Connection) -> str | None:
     `since_id` to GET /2/users/:id/tweets bounds the response to posts
     that landed AFTER our last known state.
     """
+    # P8R-9: cast to INTEGER so the MAX is numeric, not lexicographic.
+    # Today every snowflake ID is 19 chars so lex == numeric, but as
+    # X mints more IDs the digit count is monotonically increasing
+    # and any future shorter-than-19-char value (legacy migration row,
+    # test fixture) would silently sort wrong against a 19-char
+    # production ID. The CAST makes the assumption explicit.
     row = conn.execute(
-        "SELECT MAX(x_post_id) AS m FROM posts WHERE x_post_id IS NOT NULL"
+        """
+        SELECT MAX(CAST(x_post_id AS INTEGER)) AS m
+          FROM posts
+         WHERE x_post_id IS NOT NULL
+        """
     ).fetchone()
     if row is None or row["m"] is None:
         return None
