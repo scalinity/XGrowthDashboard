@@ -4680,17 +4680,14 @@ Examples of things this tool cannot tell you:
   * [ ] Agent attempts `save_draft_reply` against a URL not in `reply_targets`: orchestrator auto-creates + scores, three tool-call blocks visible.
   * [ ] Recommended-action resolver is unit-tested over all 256 (4^4) score combinations.
 
-### Phase 5.7 — Reply Target Discovery V1.1 (deferred from MVP)
+### Phase 5.7 — Reply Target Discovery V1.1 → ABSORBED (no labeled phase shipped)
 
-* [ ] Create `reply_target_snapshots` table per §29.6 schema.
-* [ ] V1.1 metrics-refresh job: pull current engagement on each `status='candidate'` row at configurable cadence; insert a `reply_target_snapshots` row; update the parent's denormalized columns.
-* [ ] Compute `velocity_score` from the last two snapshots.
-* [ ] Compute `timing_score` from `post_age_minutes` + author-tier rules.
-* [ ] Implement `app/agent/reply_target_lint.py` (Haiku invocation) per §29.10; wire `lint_blocked` to the Queue's "Draft reply" button enabled state.
-* [ ] "Force-draft (overrides lint)" affordance with mandatory one-line reason logged to `agent_tool_calls.notes`.
-* [ ] Detect 404 on `target_x_post_id` → transition `status='target_deleted'`; surface "draft orphaned" banner where applicable.
-* [ ] Day-21 calibration view: show four engagement-surface thresholds vs. actual distribution of `engagement_surface_score` on posted replies; show lint block + override rate.
-* [ ] X API rate-limit handling on the refresh job: log and skip without silent score drift.
+Phase 5.7 never shipped as a labeled phase. Its specced scope split into two destinations:
+
+* **Already shipped in Phase 5.9 (Niche & Content-Type Calibration Pack):** the `app/agent/lint.py::reply_quality_lint` surface (§28.18). Note: this is the *draft-side* lint (catches "forced / AI / selfishly self-promoting" reply drafts Daniel writes) — a different surface from the §29.10 thread-classifier lint (categorizes the *target post's thread quality* before Daniel even starts drafting).
+* **Absorbed into Phase 7 (X API reads, migration 018):** `reply_target_snapshots` schema, metrics-refresh job, velocity_score / timing_score computation, §29.10 thread-classifier lint with force-draft override, 404 → `status='target_deleted'` detection, X API rate-limit handling, and the day-21 calibration view.
+
+See §25 Phase 7 below for the full absorbed-scope checklist. This block is preserved as a historical pointer so cross-references to "Phase 5.7" in earlier §30 changelog items resolve to a real anchor.
 
 ### Phase 5.8 — Drafting Intelligence Pack (see §28.11 through §28.15 for full spec)
 
@@ -4875,7 +4872,7 @@ Six features distilled from a tactical X-growth video (Jacob Edmunds, May 2026) 
 * [ ] Reply Target Queue (§29.7) UI: new "Add replier pool" affordance — text input for thread URL, textarea for replier handles + excerpts, submit → `score_replier_pool` → results land in `reply_targets` with `source = 'replier_under_thread'`.
 * [ ] Update `config/agent_system_prompt.md` Section 7 tool catalog with the new tool.
 * [ ] Pre-commit drift check extended to verify `reply_targets.source` enum matches across spec / `tools.py` / system prompt.
-* [ ] V1.1+ deferred: programmatic scan of top-N replies under a target post via X API. Spec out in §28.20 so the MVP paste flow isn't a dead end.
+* [ ] Phase 7 deferred: programmatic scan of top-N replies under a target post via X API (ships with the broader X API reads phase; see §28.20 and §25 Phase 7 sub-section "Account Researcher / Profile Audit / Replier-pool auto-pull"). Phase 5.9 specs out the paste flow so it isn't a dead end.
 
 **Personality lore registry (§28.21):**
 
@@ -4902,7 +4899,7 @@ Six features distilled from a tactical X-growth video (Jacob Edmunds, May 2026) 
 
 **Documentation:**
 
-* [ ] Update `docs/IMPLEMENTATION_STATUS.md` with Phase 5.9 features + any deferred behaviors (V1.1+ programmatic replier scan, V1.1+ `v_content_type_x_pillar_performance` cross-pivot).
+* [ ] Update `docs/IMPLEMENTATION_STATUS.md` with Phase 5.9 features + any deferred behaviors (programmatic replier scan moves to Phase 7; `v_content_type_x_pillar_performance` cross-pivot remains V1.1+ deferred for density reasons, not API).
 * [ ] README addition: a short Phase 5.9 section describing the V/G/P/P axis and the niche definition as the agent's two new identity anchors.
 
 ### Phase 5.10 — Strategic Analysis Pack (see §28.22 through §28.25 for full spec)
