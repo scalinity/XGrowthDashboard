@@ -71,6 +71,15 @@ def _read_reply_intent_required(conn: sqlite3.Connection) -> bool:
         return _REPLY_INTENT_REQUIRED_DEFAULT
 
 
+# Phase 10 S8 — structured error codes for the reply_intent gate so
+# audit-row callers can filter on `code` instead of fuzzy-matching the
+# message body. Codes are stable strings; messages are presentation.
+REPLY_INTENT_GATE_CODES: tuple[str, ...] = (
+    "INTENT_MISSING",
+    "INTENT_INVALID",
+)
+
+
 def _validate_reply_intent_or_error(
     conn: sqlite3.Connection, tool_input: dict[str, Any]
 ) -> str | None:
@@ -81,6 +90,14 @@ def _validate_reply_intent_or_error(
     Returns a non-empty error string when the gate refuses; the caller
     surfaces it as a status='error' tool result with the canonical
     refuse-reason audit notes.
+
+    Phase 10 S8 — the returned error string has the structured shape
+    ``"<CODE>: <human message>"`` where CODE is one of
+    REPLY_INTENT_GATE_CODES. The dispatcher's audit row carries the
+    full message; downstream queryability gets the code as a stable
+    prefix (e.g. ``WHERE error_message LIKE 'INTENT_MISSING:%'``).
+    Message body still enumerates the valid enum so the agent gets the
+    actionable info to retry.
 
     The single source of truth for the enum is
     ``app.agent.reply_targets.REPLY_INTENT_ENUM`` (also used by the
@@ -96,15 +113,15 @@ def _validate_reply_intent_or_error(
         if not required:
             return None  # escape hatch — NULL passes when toggle is off
         return (
-            "reply_intent is required (§29.5 Phase 10). Pick one of "
-            f"{list(REPLY_INTENT_ENUM)} or skip the reply. Disable via "
-            "Settings → Growth Agent → Reply discipline → "
+            "INTENT_MISSING: reply_intent is required (§29.5 Phase 10). "
+            f"Pick one of {list(REPLY_INTENT_ENUM)} or skip the reply. "
+            "Disable via Settings → Growth Agent → Reply discipline → "
             "reply_intent_required if this is creating calibration friction."
         )
     if intent not in REPLY_INTENT_ENUM:
         return (
-            f"reply_intent={intent!r} not in §29.5 enum. Valid values: "
-            f"{list(REPLY_INTENT_ENUM)}."
+            f"INTENT_INVALID: reply_intent={intent!r} not in §29.5 enum. "
+            f"Valid values: {list(REPLY_INTENT_ENUM)}."
         )
     return None
 

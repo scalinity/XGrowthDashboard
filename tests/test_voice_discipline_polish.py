@@ -1111,6 +1111,8 @@ def test_dispatcher_refuses_save_draft_reply_without_intent(
     assert result["status"] == "error"
     assert "reply-intent gate" in result["error"]
     assert "§29.5" in result["error"]
+    # Phase 10 S8 — structured error code in the message prefix.
+    assert "INTENT_MISSING:" in result["error"]
     # No draft landed.
     n = db_conn.execute("SELECT COUNT(*) FROM agent_drafts").fetchone()[0]
     assert n == 0
@@ -1139,6 +1141,8 @@ def test_dispatcher_refuses_invalid_reply_intent(
     assert result["status"] == "error"
     assert "reply-intent gate" in result["error"]
     assert "not in §29.5 enum" in result["error"]
+    # Phase 10 S8 — structured error code prefix for INVALID branch.
+    assert "INTENT_INVALID:" in result["error"]
 
 
 def test_dispatcher_accepts_valid_reply_intent(
