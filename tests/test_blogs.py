@@ -203,6 +203,44 @@ def test_save_blog_records_agent_action_and_confidence(
     assert blog.agent_assisted is True
 
 
+def test_agent_assisted_is_sticky_once_set(db_conn: sqlite3.Connection) -> None:
+    """P6R-38 (P6R-22 regression test): agent_assisted is write-once-
+    then-sticky. Once any save with created_by='agent' lands, the flag
+    stays 1 forever — subsequent manual saves do NOT clear it. This is
+    intentional epistemic disclosure (a reader of the exported blog
+    should know it was EVER AI-touched, not just whether the current
+    version is). The contract has no test surface pre-P6R-38 — adding
+    one so a future refactor can't break it silently."""
+    b = bm.create_blog(db_conn, title="sticky")
+    # Initial state: agent_assisted = False.
+    assert bm.get_blog(db_conn, b.id).agent_assisted is False
+
+    # Manual save first — flag still False.
+    bm.save_blog(db_conn, b.id, body_markdown="daniel wrote this", created_by="daniel")
+    assert bm.get_blog(db_conn, b.id).agent_assisted is False
+
+    # Agent save — flag flips to True.
+    bm.save_blog(
+        db_conn, b.id, body_markdown="agent drafted this", created_by="agent",
+        agent_action="draft", confidence_label_at_version="inference",
+    )
+    assert bm.get_blog(db_conn, b.id).agent_assisted is True
+
+    # Subsequent manual save — flag STAYS True (sticky).
+    bm.save_blog(
+        db_conn, b.id, body_markdown="daniel rewrote it manually", created_by="daniel"
+    )
+    assert bm.get_blog(db_conn, b.id).agent_assisted is True, (
+        "agent_assisted must remain True after manual saves following an agent save"
+    )
+
+    # Another manual save — still sticky.
+    bm.save_blog(
+        db_conn, b.id, body_markdown="daniel rewrote again", created_by="daniel"
+    )
+    assert bm.get_blog(db_conn, b.id).agent_assisted is True
+
+
 def test_save_blog_rejects_unknown_agent_action(db_conn: sqlite3.Connection) -> None:
     b = bm.create_blog(db_conn, title="bad action")
     with pytest.raises(bm.InvalidBlogFieldError):
