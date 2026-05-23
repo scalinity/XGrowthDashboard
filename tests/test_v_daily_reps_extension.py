@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
 
 
-def _today() -> str:
-    return date.today().isoformat()
+def _today(conn: sqlite3.Connection) -> str:
+    """P6R-35: read 'today' from SQLite's ``date('now')`` (UTC) so the
+    seed date matches the view's UTC-based cutoffs. Python's
+    ``date.today()`` returns LOCAL date — near UTC midnight the two
+    differ by a day and the view's filters drop the seeded daily_activity
+    row, causing the test to fail at certain wall-clock times."""
+    return conn.execute("SELECT date('now')").fetchone()[0]
 
 
 def _today_row(conn: sqlite3.Connection):
     """Return today's v_daily_reps row, creating the daily_activity row if missing."""
+    today_str = _today(conn)
     conn.execute(
         "INSERT OR IGNORE INTO daily_activity (activity_date) VALUES (?)",
-        (_today(),),
+        (today_str,),
     )
     return conn.execute(
-        "SELECT * FROM v_daily_reps WHERE activity_date = ?", (_today(),)
+        "SELECT * FROM v_daily_reps WHERE activity_date = ?", (today_str,)
     ).fetchone()
 
 

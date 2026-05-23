@@ -22,8 +22,17 @@ from app.agent import voice_profile
 def _seed_posts(conn: sqlite3.Connection, count: int, *, days_back_each: int = 1) -> None:
     """Insert `count` posts, dated `days_back_each` days apart from today
     back. Every post is `x_post_id IS NOT NULL` so it's in scope.
+
+    P6R-35: anchor "today" to SQLite's ``date('now')`` (UTC) rather
+    than Python's ``date.today()`` (LOCAL). Near UTC midnight, the
+    LOCAL date and UTC date differ by 1 day; the view's
+    ``date('now', '-N days')`` cutoff uses UTC, so a seed using LOCAL
+    today() puts the oldest in-window post on the wrong side of the
+    cutoff. Pulling the anchor from SQLite makes the seed and cutoff
+    use the same clock.
     """
-    today = date.today()
+    today_utc_str = conn.execute("SELECT date('now')").fetchone()[0]
+    today = date.fromisoformat(today_utc_str)
     for i in range(count):
         when = (today - timedelta(days=i * days_back_each)).isoformat()
         conn.execute(
