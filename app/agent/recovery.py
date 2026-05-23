@@ -216,7 +216,25 @@ def reconcile_orphans_via_x_api(
             max_results=min(100, max(25, len(orphans) * 2)),
             conn=conn,
         )
-    except Exception as exc:  # pragma: no cover — api_get_recent_tweets already swallows XApi*
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, ValueError, KeyError, TypeError) as exc:
+        # P8R-7: narrowed from bare `except Exception` so a real bug
+        # (e.g. an unanticipated NameError from a refactor, or a
+        # contract drift that breaks parsing) bubbles instead of being
+        # swallowed into a silent "remaining_for_manual" with no
+        # diagnostic trail. The narrow tuple covers the genuinely
+        # demotable failure modes: DB hiccups during the audit-log
+        # insert, malformed responses, missing keys. Anything else
+        # bubbles to the caller (typically the app-boot scan) where
+        # it surfaces in the Streamlit error stream.
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "reconcile_orphans_via_x_api: api_get_recent_tweets failed (%s); "
+            "all %d orphans routed to manual reconcile",
+            exc,
+            len(orphans),
+            exc_info=True,
+        )
         return ReconciliationResult(
             orphans_scanned=len(orphans),
             auto_matched=[],
