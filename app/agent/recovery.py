@@ -283,23 +283,11 @@ def reconcile_orphans_via_x_api(
     )
 
 
-def _read_publish_via_api_enabled(conn: sqlite3.Connection) -> bool:
-    """Mirror of `publish._read_publish_via_api_enabled` (kept local to
-    avoid cross-module imports for a single boolean read).
-    """
-    import json
-
-    try:
-        row = conn.execute(
-            "SELECT value_json FROM settings WHERE key = ?",
-            ("publish_via_api_enabled",),
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return True
-    if row is None or row["value_json"] is None:
-        return True
-    try:
-        parsed = json.loads(row["value_json"])
-    except (TypeError, json.JSONDecodeError):
-        return True
-    return bool(parsed)
+# P8R-5: was a duplicate of publish._read_publish_via_api_enabled.
+# Import from publish.py instead so the settings reader has one source
+# of truth — if the default flips (TRUE→FALSE) or the key is renamed,
+# only the canonical implementation needs to change. publish.py doesn't
+# import recovery, so there's no circular-import constraint.
+from app.agent.publish import (  # noqa: E402 — kept at module bottom for clarity
+    _read_publish_via_api_enabled,
+)
