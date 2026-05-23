@@ -10,10 +10,27 @@ Every call is logged to ``raw_api_responses`` so the Settings "Recent X
 API failures" panel (§17 Phase 7) can surface non-2xx outcomes and the
 audit trail covers what data we pulled from where.
 
-The Phase 8 write surface (``POST /2/tweets`` + cold-reply 403 UX) lives
-in this same module but is added in migration 019 / Phase 8 — the
-``request`` function below already accepts a ``method`` argument so the
-Phase 8 additions are call-site changes rather than a parallel wrapper.
+Phase 8 adds the write surface (``POST /2/tweets``) in this same module
+(§28.10 Phase 5.5 → Phase 8 transition; §25 Phase 8 checklist). The
+write path reuses ``request()`` — POST is already a first-class method
+argument — and layers ``publish_post_to_x_via_api()`` on top with:
+
+* Bounded retry per ``x_posting_publish_retry_attempts_per_token`` on
+  5xx (X-side transient).
+* No retry on 429 (rate-limit), 403 (cold-reply), or timeout — those
+  map to specific token-consumed outcomes in ``app/agent/publish.py``
+  and retrying would either burn the token (429) or risk a duplicate
+  post (timeout).
+* Typed exception hierarchy (``XApiColdReplyError``,
+  ``XApiServerError``, ``XApiTimeoutError``, plus the existing
+  ``XApiRateLimited``) so the publish wrapper can take the right
+  except branch without re-parsing error messages.
+
+The sliding-window write quota is enforced by
+``check_write_rate_capacity()``, called BEFORE the X API call inside
+the §28.10 atomic transaction. On capacity exhausted the function
+returns ``(False, reason)`` and the publish flow surfaces "rate-limited
+until {reset_time}" with the confirmation token UN-consumed.
 
 Manual fallback is sacrosanct (CLAUDE.md scope discipline / §29.1
 "Manual workflows remain inviolable"): every consumer of this module
@@ -34,6 +51,7 @@ import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Literal
 
 _log = logging.getLogger(__name__)
@@ -83,6 +101,45 @@ class XApiNotFound(XApiError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, status_code=404)
+
+
+class XApiColdReplyError(XApiError):
+    """X API returned 403 on a write — typically a cold reply.
+
+    Per §22 / §29.11: X requires the authenticated user to have engaged
+    with a target account before the API will accept a reply to that
+    account. The publish wrapper treats this as a "X accepted the
+    request and refused it" outcome — the confirmation token is
+    CONSUMED (X considers it a real attempt) and no ``posts`` row is
+    created. UX surfaces "engage with this author's posts first, or
+    use the manual fallback."
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, status_code=403)
+
+
+class XApiServerError(XApiError):
+    """X API returned a 5xx after the retry budget was exhausted.
+
+    Per §22: the publish wrapper ROLLBACKs the transaction, sets
+    ``publish_last_error``, and consumes the token per rule #10(f). The
+    crash-recovery scan reconciles on next app boot via
+    ``api_get_recent_tweets()`` matched by text hash.
+    """
+
+
+class XApiTimeoutError(XApiUnavailable):
+    """xurl subprocess timed out mid-write.
+
+    Subclasses ``XApiUnavailable`` so existing read-side ``except
+    XApiUnavailable`` handlers (which fall back to manual paste) still
+    catch it. The publish wrapper has a dedicated ``except
+    XApiTimeoutError`` branch that ROLLBACKs the transaction, sets
+    ``publish_last_error``, and leaves the orphan for crash-recovery to
+    reconcile — we MUST NOT retry on timeout because X may have actually
+    processed the request and a retry would double-post.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +237,11 @@ def request(
             status_code=None,
             notes=f"subprocess timeout; {log_notes or ''}".strip(),
         )
-        raise XApiUnavailable(
+        # Distinct typed exception for Phase 8 write timeouts — the
+        # publish wrapper has a dedicated branch (ROLLBACK + crash-
+        # recovery handoff) that read-side callers don't need. Subclass
+        # of XApiUnavailable so existing read-side handlers still match.
+        raise XApiTimeoutError(
             f"xurl call timed out after {timeout_seconds}s for {method} {endpoint}"
         ) from exc
 
@@ -238,6 +299,15 @@ def request(
         raise XApiUnavailable(
             f"X API returned 401 for {method} {endpoint} — "
             f"xurl auth missing or expired. See docs/X_API_SETUP.md."
+        )
+    if status_code == 403:
+        # Phase 8 write surface: 403 on POST /2/tweets is X's "cold
+        # reply" refusal. Token is consumed (X accepted the request,
+        # then refused it). Read-side callers don't currently hit 403,
+        # so raising the typed exception here is forward-compatible.
+        raise XApiColdReplyError(
+            f"X API returned 403 for {method} {endpoint}: "
+            f"{stdout.strip()[:300]!r}"
         )
     if status_code == 404:
         raise XApiNotFound(
@@ -423,6 +493,11 @@ def _infer_status_code(
                     return 404
                 if "too many" in title or "rate" in title:
                     return 429
+                # Phase 8: 403 cold-reply error envelope is keyed
+                # "Forbidden" — match before the broader "auth" check
+                # below so we don't misclassify as 401.
+                if "forbidden" in title or "cold" in title:
+                    return 403
                 if "unauthorized" in title or "auth" in title:
                     return 401
         if "data" in body or "meta" in body:
@@ -477,14 +552,350 @@ def _parse_retry_after(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Phase 8 — write surface (§28.10 Phase 5.5 → Phase 8 transition).
+# ---------------------------------------------------------------------------
+# Default bounded retry on 5xx — overridable per call. The
+# `x_posting_publish_retry_attempts_per_token` settings row holds the
+# operational value; this constant is the conservative fallback when the
+# settings table isn't reachable (which never happens in production but
+# keeps the function usable in narrow unit tests).
+_DEFAULT_WRITE_RETRY_ATTEMPTS: int = 2
+_DEFAULT_WRITE_RETRY_SLEEP_SECONDS: float = 0.5
+
+
+def publish_post_to_x_via_api(
+    text: str,
+    *,
+    in_reply_to_x_post_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
+    retry_attempts: int | None = None,
+    xurl_bin: str | None = None,
+) -> dict[str, Any]:
+    """POST ``/2/tweets`` via xurl. Return the parsed ``data`` body on success.
+
+    Used by the §28.10 Phase 8 branch of ``publish_post_atomic`` when
+    ``publish_via_api_enabled = TRUE``. The publish wrapper holds the
+    six-check + atomic-transaction logic; this function is the X API
+    call itself.
+
+    Bounded retry on 5xx via ``retry_attempts`` (default 2, sourced from
+    ``x_posting_publish_retry_attempts_per_token`` when available).
+    NEVER retries on:
+
+    * 429 — would burn the token without recovery; re-raised
+      immediately so the publish wrapper can leave the token UN-consumed
+      and surface "rate-limited until …".
+    * 403 — X has refused this specific request (typically a cold
+      reply). Re-raised as ``XApiColdReplyError``; publish wrapper
+      consumes the token and skips the posts row insert.
+    * Timeout — X may have already processed the request and a retry
+      would double-post. Re-raised as ``XApiTimeoutError``; publish
+      wrapper ROLLBACKs and hands off to crash-recovery.
+
+    Returns the X API response's ``data`` dict — shaped::
+
+        {"id": "1234...", "edit_history_tweet_ids": ["1234..."], "text": "..."}
+
+    Raises ``XApiServerError`` after the retry budget is exhausted on 5xx.
+    """
+    if retry_attempts is None:
+        retry_attempts = _read_write_retry_attempts(conn)
+
+    body_payload: dict[str, Any] = {"text": text}
+    if in_reply_to_x_post_id:
+        # X API v2 reply shape — see https://docs.x.com/x-api/posts/creation-of-a-post
+        body_payload["reply"] = {"in_reply_to_tweet_id": str(in_reply_to_x_post_id)}
+
+    attempt = 0
+    last_server_error: XApiError | None = None
+    while attempt <= retry_attempts:
+        try:
+            response = request(
+                "/2/tweets",
+                method="POST",
+                conn=conn,
+                body_json=body_payload,
+                xurl_bin=xurl_bin,
+                log_source="xurl",
+                log_notes=(
+                    f"publish_post_to_x_via_api attempt {attempt + 1}/{retry_attempts + 1}"
+                ),
+            )
+        except XApiRateLimited:
+            # Re-raise unchanged. The publish wrapper leaves the token
+            # UN-consumed (no X-side state change on a 429).
+            raise
+        except XApiColdReplyError:
+            # 403 — X refused this request. Token will be consumed by
+            # the publish wrapper; no retry.
+            raise
+        except XApiTimeoutError:
+            # Timeout mid-call. X may have processed the request. Do NOT
+            # retry — risk of duplicate post. Crash-recovery picks up.
+            raise
+        except XApiUnavailable:
+            # xurl missing / auth / non-JSON output — this is an env
+            # failure not an X API failure. Re-raise unchanged; publish
+            # wrapper takes the same crash-recovery handoff path.
+            raise
+        except XApiError as exc:
+            if exc.status_code is not None and exc.status_code >= 500:
+                last_server_error = exc
+                attempt += 1
+                if attempt > retry_attempts:
+                    break
+                time.sleep(_DEFAULT_WRITE_RETRY_SLEEP_SECONDS)
+                continue
+            # Other 4xx (excluding 401 / 403 / 404 / 429 already handled
+            # inside `request()`) — surface unchanged.
+            raise
+        else:
+            data = response.body.get("data") if isinstance(response.body, dict) else None
+            if not isinstance(data, dict) or "id" not in data:
+                raise XApiServerError(
+                    "X API POST /2/tweets returned 200 without a valid "
+                    f"data.id field. body={response.body!r}",
+                    status_code=response.status_code,
+                )
+            return data
+
+    # Retry budget exhausted on 5xx.
+    raise XApiServerError(
+        "X API POST /2/tweets failed after "
+        f"{retry_attempts + 1} attempts: {last_server_error}",
+        status_code=last_server_error.status_code if last_server_error else None,
+    ) from last_server_error
+
+
+@dataclass(frozen=True, slots=True)
+class WriteRateCapacity:
+    """Outcome of ``check_write_rate_capacity``.
+
+    ``ok=True`` → caller may proceed with the publish.
+    ``ok=False`` → caller surfaces ``reason`` to the user and leaves the
+    confirmation token UN-consumed. ``reset_at_utc`` is the earliest
+    moment the window is expected to roll over (best-effort — wallclock
+    based, not X-API-reported).
+    """
+
+    ok: bool
+    reason: str | None
+    count_15min: int
+    count_24h: int
+    limit_15min: int
+    limit_24h: int
+    reset_at_utc: datetime | None
+
+
+def check_write_rate_capacity(conn: sqlite3.Connection) -> WriteRateCapacity:
+    """Sliding-window read of recent successful publishes.
+
+    Honors ``x_write_rate_limit_per_15min`` and
+    ``x_write_rate_limit_per_24h``. Counts rows from ``posts`` where
+    ``published_to_x_at IS NOT NULL`` and the timestamp falls inside
+    each window. Manual-clipboard publishes count too — Daniel is rate-
+    limited globally on his X account, not per branch.
+    """
+    limit_15min = _read_int_setting(conn, "x_write_rate_limit_per_15min", default=50)
+    limit_24h = _read_int_setting(conn, "x_write_rate_limit_per_24h", default=1000)
+
+    now = datetime.now(timezone.utc)
+    window_15min_start = now - timedelta(minutes=15)
+    window_24h_start = now - timedelta(hours=24)
+
+    count_15min = _count_recent_publishes(conn, since=window_15min_start)
+    count_24h = _count_recent_publishes(conn, since=window_24h_start)
+
+    if count_15min >= limit_15min:
+        oldest_in_window = _oldest_publish_since(conn, since=window_15min_start)
+        reset_at = (
+            (oldest_in_window + timedelta(minutes=15)) if oldest_in_window else None
+        )
+        reason = (
+            f"rate-limited until {reset_at.isoformat() if reset_at else 'window rolls over'} "
+            f"({count_15min} of {limit_15min} per-15min publishes used)"
+        )
+        return WriteRateCapacity(
+            ok=False,
+            reason=reason,
+            count_15min=count_15min,
+            count_24h=count_24h,
+            limit_15min=limit_15min,
+            limit_24h=limit_24h,
+            reset_at_utc=reset_at,
+        )
+
+    if count_24h >= limit_24h:
+        oldest_in_window = _oldest_publish_since(conn, since=window_24h_start)
+        reset_at = (
+            (oldest_in_window + timedelta(hours=24)) if oldest_in_window else None
+        )
+        reason = (
+            f"rate-limited until {reset_at.isoformat() if reset_at else 'window rolls over'} "
+            f"({count_24h} of {limit_24h} per-24h publishes used)"
+        )
+        return WriteRateCapacity(
+            ok=False,
+            reason=reason,
+            count_15min=count_15min,
+            count_24h=count_24h,
+            limit_15min=limit_15min,
+            limit_24h=limit_24h,
+            reset_at_utc=reset_at,
+        )
+
+    return WriteRateCapacity(
+        ok=True,
+        reason=None,
+        count_15min=count_15min,
+        count_24h=count_24h,
+        limit_15min=limit_15min,
+        limit_24h=limit_24h,
+        reset_at_utc=None,
+    )
+
+
+def api_get_recent_tweets(
+    *,
+    since_id: str | None = None,
+    max_results: int = 25,
+    conn: sqlite3.Connection | None = None,
+    xurl_bin: str | None = None,
+) -> list[dict[str, Any]]:
+    """Pull recent tweets from the authenticated user's timeline.
+
+    Used by the §28.10 step 8 crash-recovery scan: when a publish
+    transaction ROLLBACKs after the X API call may have succeeded, this
+    function lets ``app/agent/recovery.py`` query recent tweets and
+    match by text hash against ``draft_text_hash_at_issue``.
+
+    Returns an empty list (instead of raising) on ``XApiUnavailable`` so
+    the recovery scan degrades gracefully to the existing manual-
+    reconcile UI when xurl isn't installed.
+    """
+    params = ["max_results=" + str(max(5, min(max_results, 100)))]
+    if since_id:
+        params.append("since_id=" + str(since_id))
+    endpoint = "/2/users/me/tweets?" + "&".join(params)
+
+    try:
+        response = request(
+            endpoint,
+            method="GET",
+            conn=conn,
+            xurl_bin=xurl_bin,
+            log_source="xurl",
+            log_notes="api_get_recent_tweets — crash-recovery scan",
+        )
+    except XApiUnavailable:
+        return []
+    except XApiError:
+        # 4xx / 5xx — degrade to manual-reconcile UI.
+        return []
+
+    body = response.body
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data")
+    if not isinstance(data, list):
+        return []
+    return [row for row in data if isinstance(row, dict)]
+
+
+# ---------------------------------------------------------------------------
+# Settings-table helpers (Phase 8).
+# ---------------------------------------------------------------------------
+def _read_int_setting(
+    conn: sqlite3.Connection, key: str, *, default: int
+) -> int:
+    """Read an integer settings value or fall back to ``default``."""
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if row is None or row["value_json"] is None:
+        return default
+    try:
+        parsed = json.loads(row["value_json"])
+    except (TypeError, json.JSONDecodeError):
+        return default
+    if isinstance(parsed, bool):
+        # bool is a subclass of int in Python; guard so a stray TRUE
+        # doesn't become 1 here.
+        return default
+    if isinstance(parsed, int):
+        return parsed
+    return default
+
+
+def _read_write_retry_attempts(conn: sqlite3.Connection | None) -> int:
+    """Resolve the per-token retry budget from settings."""
+    if conn is None:
+        return _DEFAULT_WRITE_RETRY_ATTEMPTS
+    return _read_int_setting(
+        conn,
+        "x_posting_publish_retry_attempts_per_token",
+        default=_DEFAULT_WRITE_RETRY_ATTEMPTS,
+    )
+
+
+def _count_recent_publishes(
+    conn: sqlite3.Connection, *, since: datetime
+) -> int:
+    """Count ``posts`` rows with ``published_to_x_at >= since``."""
+    since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM posts
+        WHERE published_to_x_at IS NOT NULL
+          AND published_to_x_at >= ?
+        """,
+        (since_iso,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def _oldest_publish_since(
+    conn: sqlite3.Connection, *, since: datetime
+) -> datetime | None:
+    """Return the oldest ``published_to_x_at`` inside the window, as a UTC datetime."""
+    since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
+    row = conn.execute(
+        """
+        SELECT MIN(published_to_x_at) AS oldest FROM posts
+        WHERE published_to_x_at IS NOT NULL
+          AND published_to_x_at >= ?
+        """,
+        (since_iso,),
+    ).fetchone()
+    if row is None or row["oldest"] is None:
+        return None
+    try:
+        return datetime.strptime(row["oldest"], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
 __all__ = [
     "HttpMethod",
+    "WriteRateCapacity",
+    "XApiColdReplyError",
     "XApiError",
     "XApiNotFound",
     "XApiRateLimited",
     "XApiResponse",
+    "XApiServerError",
+    "XApiTimeoutError",
     "XApiUnavailable",
+    "api_get_recent_tweets",
     "batch_request",
+    "check_write_rate_capacity",
     "is_available",
+    "publish_post_to_x_via_api",
     "request",
 ]
