@@ -4031,22 +4031,41 @@ No push notification required. A "Weekly review due" banner in the app is enough
     * Bidirectional X ↔ blog repurposing via `#29 repurpose_blog_to_x` and `#30 repurpose_x_to_blog_idea`; outputs flow through full Phase 5.8 drafts pipeline AND the §28.29 plagiarism guard (§28.34).
     * Unified identity: same niche definition + voice profile + voice samples + personality lore feed blog drafting as feed X drafting. The point of this phase.
 
-### Can wait — V1.1+
+### Promoted to Phase 7 / 8 / 9 (no longer deferred)
+
+The following capabilities — originally "V1.1+ deferred" or "V1.2 deferred" — are now in v1 scope per §0's sixth revision note, slotted into the three new phases after Phase 6 Blogs shipped:
+
+**Phase 7 (X API reads, migration 018):**
 
 1. xurl-based account snapshot collection.
-2. xurl-based recent post import.
+2. xurl-based recent post import (one-shot backfill + daily incremental).
 3. xurl-based post metric refresh.
-4. Raw response preservation pipeline (table exists, empty until V1.1).
-5. Direct OAuth UI inside app.
-6. Auto-posting.
-7. Website analytics API integration.
-8. App Store Connect API integration for Stir download data.
-9. Automatic follower classification.
-10. Recommendation engine.
-11. v2 taxonomy expansion (when data justifies it).
-12. **Agent `submit_post` in true API mode** — direct posting via X API (MVP uses clipboard handoff + intent URL).
-13. **Agent `find_reply_targets` using X API search** — surfaces real-time posts in lane (MVP uses curated `agent_target_accounts`).
-14. **Agent auto-pulls metrics** on agent-shipped posts after a delay (currently same flow as manual posts).
+4. Raw response preservation pipeline (`raw_api_responses` populated).
+5. xurl OAuth wiring (one-time `xurl auth login`; tokens live under `~/.xurl/`).
+6. Reply-target metrics refresh + velocity/timing scoring (§29.3).
+7. Thread-classifier lint pass (§29.10) with force-draft override.
+8. Account Researcher X API auto-pull (§28.24), Profile Audit bio auto-pull (§28.25), Replier-pool programmatic scan (§28.20).
+
+**Phase 8 (X API writes, migration 019):**
+
+9. **Agent `submit_post` / `publish_post_to_x` in real API mode** — `POST /2/tweets` replaces the stubbed manual-clipboard-only branch, gated by `publish_via_api_enabled` (default TRUE). Manual clipboard fallback always available.
+10. **Agent `submit_reply` / `publish_reply_to_x` in real API mode** — same gate, same fallback, same §28.10 six-check + atomic-transaction contract.
+11. **Agent auto-pulls metrics** on agent-shipped posts is handled by Phase 7's `post_metrics_refresh` job picking up the new `posts.x_post_id` rows.
+
+**Phase 9 (Grok integration, migration 020):**
+
+12. Grok firehose discovery as a third reply-target source alongside manual paste and curated `agent_target_accounts` (`discovered_via='grok_semantic'`).
+
+### Can wait — V1.1+ (genuinely deferred)
+
+1. Direct OAuth UI inside app (xurl shell-out is the Phase 7+ path).
+2. Website analytics API integration.
+3. App Store Connect API integration for Stir download data.
+4. Automatic follower classification.
+5. Recommendation engine.
+6. v2 taxonomy expansion (when data justifies it).
+7. `v_content_type_x_pillar_performance` cross-pivot — density argument (12 cells × 4 content types = 48 cells, revisit at 500+ shipped posts), not an API blocker.
+8. `audience_quality_score` — seventh resolver dimension; deferred entirely (data source unresolved; see §29.3 V1.2+ note).
 
 ---
 
@@ -4054,22 +4073,13 @@ No push notification required. A "Weekly review due" banner in the app is enough
 
 After MVP works for 1–2 weeks.
 
-### V1.1 — API collection layer
+### Phase 7 / 8 / 9 — X API + Grok integration
 
-* xurl-based account snapshot collector.
-* Store raw response.
-* Switch `data_collection_mode` setting to `xurl`.
-* Manual form remains, but stops auto-pinning when API snapshots are succeeding.
-* API cost/request tracking.
-* Scheduled job status page.
-* Better error handling and retry logs.
+See §25 Phases 7, 8, 9 for the full per-phase checklists; the §0 sixth revision note covers the framing. In short:
 
-### V1.2 — Direct API client
-
-* Direct X API Python client (replaces xurl for higher-volume needs).
-* Post metric refresh on schedule.
-* Raw response browser UI.
-* Cost dashboard.
+* **Phase 7 (migration 018)** wires xurl, ships the four scheduled read jobs (§17), populates `reply_target_snapshots`, activates velocity + timing scoring, ships the §29.10 thread-classifier lint with force-draft override, and adds programmatic X API auto-pull to §28.20 / §28.24 / §28.25. Defaults `data_collection_mode` to `'api'`.
+* **Phase 8 (migration 019)** replaces the §28.10 stubbed manual-clipboard-only publish branch with a real `POST /2/tweets` branch alongside the existing manual branch. Adds `publish_via_api_enabled` (default TRUE) as the per-publish gate. Manual clipboard remains as Settings-selectable fallback. Tests use vcr.py-recorded fixtures.
+* **Phase 9 (migration 020)** adds Grok firehose discovery as a third reply-target source (`discovered_via='grok_semantic'`). Defaults `grok_api_enabled` to TRUE. Combined Anthropic + xAI cost ceiling (§28.6) at $30/month by default.
 
 ### V1.3 — Better analysis
 
