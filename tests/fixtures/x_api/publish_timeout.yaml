@@ -1,0 +1,9 @@
+interactions:
+  - request:
+      method: POST
+      uri: /2/tweets
+      body:
+        text: ANY
+    response:
+      raise: subprocess.TimeoutExpired
+      timeout_seconds: 30

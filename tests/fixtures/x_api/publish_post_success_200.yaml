@@ -1,0 +1,20 @@
+# Phase 8 fixture cassette — successful POST /2/tweets for a standalone post.
+# Loaded by tests/_xurl_fixture.py via a subprocess.run patcher.
+# Format is vcr.py-compatible so a future transport migration to native
+# Python HTTP (requests/httpx) can play back the same YAML without rewriting.
+interactions:
+  - request:
+      method: POST
+      uri: /2/tweets
+      body:
+        text: ANY
+    response:
+      status_code: 200
+      body:
+        data:
+          id: "1747000000000000001"
+          edit_history_tweet_ids:
+            - "1747000000000000001"
+          text: ECHO
+      stderr: ""
+      exit_code: 0

@@ -1,0 +1,17 @@
+interactions:
+  - request:
+      method: GET
+      uri: /2/users/me/tweets
+      body: null
+    response:
+      status_code: 200
+      body:
+        data:
+          - id: "1747000000000000099"
+            text: PHASE_8_CRASH_RECOVERY_ORPHAN_TEXT
+            edit_history_tweet_ids:
+              - "1747000000000000099"
+        meta:
+          result_count: 1
+      stderr: ""
+      exit_code: 0

@@ -1,0 +1,18 @@
+interactions:
+  - request:
+      method: POST
+      uri: /2/tweets
+      body:
+        text: ANY
+        reply:
+          in_reply_to_tweet_id: ANY
+    response:
+      status_code: 200
+      body:
+        data:
+          id: "1747000000000000002"
+          edit_history_tweet_ids:
+            - "1747000000000000002"
+          text: ECHO
+      stderr: ""
+      exit_code: 0

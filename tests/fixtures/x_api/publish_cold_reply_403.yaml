@@ -1,0 +1,18 @@
+interactions:
+  - request:
+      method: POST
+      uri: /2/tweets
+      body:
+        text: ANY
+        reply:
+          in_reply_to_tweet_id: ANY
+    response:
+      status_code: 403
+      body:
+        errors:
+          - status: 403
+            title: "Forbidden"
+            detail: "You are not permitted to reply to this user. The authenticated user must engage with this author before replying via the API."
+            type: "https://api.twitter.com/2/problems/cold-reply"
+      stderr: ""
+      exit_code: 0

@@ -1,0 +1,16 @@
+interactions:
+  - request:
+      method: POST
+      uri: /2/tweets
+      body:
+        text: ANY
+    response:
+      status_code: 429
+      body:
+        errors:
+          - status: 429
+            title: "Too Many Requests"
+            detail: "Rate limit exceeded for POST /2/tweets"
+            reset: 1747000300
+      stderr: "x-rate-limit-reset: 1747000300\n"
+      exit_code: 0

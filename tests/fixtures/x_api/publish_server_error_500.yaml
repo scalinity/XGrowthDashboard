@@ -1,0 +1,15 @@
+interactions:
+  - request:
+      method: POST
+      uri: /2/tweets
+      body:
+        text: ANY
+    response:
+      status_code: 500
+      body:
+        errors:
+          - status: 500
+            title: "Internal Server Error"
+            detail: "An unexpected error occurred. Please try again."
+      stderr: ""
+      exit_code: 0

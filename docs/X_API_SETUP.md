@@ -151,8 +151,79 @@ the new token.
 
 - Not Phase 9 (Grok / xAI). `XAI_API_KEY` lives in `.env`, not
   `~/.xurl/`; see Phase 9 docs when migration 020 lands.
-- Not Phase 8 write-side fixture recording. `scripts/rerecord_x_api_fixtures.py`
-  (Phase 8) covers that.
 - Not a general OAuth tutorial — refer to X developer portal for the
   app-registration prerequisites (creating a developer project and an
   app + redirect URI) that xurl assumes are already in place.
+
+---
+
+## 8. Phase 8 — write scope augmentation
+
+Phase 8 (migration 019) adds `POST /2/tweets` calls. xurl's existing
+auth state is reused — the only install step is augmenting the granted
+scope set to include `tweet.write`. Re-run:
+
+```bash
+xurl auth login
+```
+
+When prompted for scopes, paste this exact string (note the added
+`tweet.write`):
+
+```
+tweet.read tweet.write users.read offline.access
+```
+
+xurl updates `~/.xurl/` in place — no DB migration is required; the
+already-granted refresh token is exchanged for one carrying the
+augmented scope set.
+
+### Verify the new scope took effect
+
+```bash
+xurl /2/users/me
+```
+
+Then run a low-risk write smoke (deletes itself):
+
+```bash
+xurl --request POST /2/tweets --data '{"text":"phase 8 smoke @ $(date +%s)"}'
+# returns {"data":{"id":"1234...","text":"phase 8 smoke @ 1747..."}}
+xurl --request DELETE /2/tweets/<that-id>
+```
+
+If the POST returns a 403 with `"You currently have access to a subset
+of X API V2 endpoints"`, your X developer app project is on the wrong
+tier — see the Phase 8 README section for the tier table.
+
+### Endpoints Phase 8 hits
+
+| Endpoint | Caller |
+| --- | --- |
+| `POST /2/tweets` | `app/x_client.publish_post_to_x_via_api()` (called by `app/agent/publish.publish_post_atomic` when `publish_via_api_enabled = TRUE`) |
+| `GET /2/users/me/tweets?since_id=…&max_results=…` | `app/x_client.api_get_recent_tweets()` (crash-recovery orphan reconciliation per §28.10 step 8) |
+
+### Rate-limit settings
+
+Phase 8 adds two settings keys (defaults match §25 Phase 8):
+
+* `x_write_rate_limit_per_15min` (integer, default 50)
+* `x_write_rate_limit_per_24h` (integer, default 1000)
+
+The sliding window is enforced in
+`app/x_client.check_write_rate_capacity()` against
+`posts.published_to_x_at` — manual-clipboard publishes count too. On
+capacity exhausted the publish modal surfaces "rate-limited until
+{reset_time}" and the confirmation token stays UN-consumed.
+
+If your X tier disagrees with these defaults, tune the rows live in
+Settings → Growth Agent → Publishing. No code change needed.
+
+### Fixture recording (testing)
+
+Phase 8 tests use vcr.py-shaped YAML cassettes under
+`tests/fixtures/x_api/`. To re-record them when X API contracts change:
+see [`docs/X_API_FIXTURES.md`](X_API_FIXTURES.md). The re-record
+procedure posts real tweets to Daniel's sandbox account and
+auto-deletes them via `DELETE /2/tweets/{id}` — the script enforces
+the cleanup before exit.
