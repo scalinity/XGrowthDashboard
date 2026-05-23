@@ -6640,26 +6640,49 @@ This reframes what "a reply" optimizes for. Under a low-engagement post, the rep
 
 ### 29.1 Scope and version boundaries
 
-**MVP (this section, Phase 5.6 in §25):**
+**MVP (Phase 5.6 in §25):**
 
 * Manual candidate entry (Daniel pastes URLs, optionally with text and engagement-metric snapshots).
 * Four scoring dimensions, no composite score.
 * Status lifecycle (`candidate → drafted → posted → expired | skipped | target_deleted`).
-* Reply Target Queue view (§29.6) and integration with §14.2 Next Rep.
+* Reply Target Queue view (§29.7) and integration with §14.2 Next Rep.
 * Agent extensions to §28.4 tools #6 `score_reply_candidates` and #7 `record_reply_target`.
 * Manual reply posting only (clipboard handoff + URL backfill).
 
-**V1.1 — adds X API read access:**
+**Phase 7 — adds X API read access (migration 018):**
 
-* Automatic candidate enrichment (pull current likes/replies/reposts on save).
-* `Velocity` dimension activated (requires repeated snapshots → see `reply_target_snapshots`).
+* Automatic candidate enrichment via xurl (pull current likes/replies/reposts on save and on metrics-refresh).
+* `reply_target_snapshots` table promoted to v1 schema; populated by the hourly `reply_target_metrics_refresh` job (§17).
+* `Velocity` dimension activated (requires repeated snapshots).
 * `Timing` dimension activated.
-* Thread-classifier lint pass (§29.10; mirrors §28.2 rule #12 dark-pattern lint pattern).
+* `posts.last_metrics_refresh_at_utc` populated by hourly `post_metrics_refresh` job.
+* §29.10 thread-classifier lint pass (`ragebait` / `meme_with_no_serious_reply_path` / `low_quality_reply_thread` / `hijacking_required_to_mention_stir`) with `lint_blocked` + force-draft override + mandatory `force_drafted_reason`.
+* `target_deleted` detection: X API 404 on `target_x_post_id` → `status='target_deleted'`.
+* Programmatic X API auto-pull paths for §28.20 replier-pool, §28.24 Account Researcher, §28.25 Profile Audit (all share the Phase 7 xurl wrapper).
+* `data_collection_mode` default flips to `'api'`.
+* Resolver consumes 6 dimensions (4⁶ = 4096-combo pure-function test); `audience_quality_score` remains NULL-tolerated (deferred — see V1.2+ below).
 
-**V1.2 — adds X API write access:**
+**Phase 8 — adds X API write access (migration 019):**
 
-* Direct reply posting via X API, *only* under the §28.10 publish-flow contract (token-gated, atomic, auditable). X API may return 403 on cold replies to third-party posts; the manual path remains the always-available fallback.
-* **Evaluate Grok X-Search as an optional discovery provider.** Decision deferred to V1.2 explicitly. The unique value Grok offers is real-time X-firehose access for trending discovery in Daniel's lanes — not semantic query expansion (Claude does that adequately, and ~20 hand-written saved searches capture most of it). At MVP and V1.1 candidate volume (~15/day), the cost difference between Grok X-Search ($5 / 1,000 calls) and X API search via xurl is rounding error in either direction; pick on capability, not cost. If Grok is integrated, it slots in via `reply_targets.discovered_via='grok_semantic'` (new enum value) and stays subject to the same §29.2 verification rule: Grok-discovered candidates must still have their engagement metrics confirmed against the X API before they affect `engagement_surface_score`. Grok never replaces the X API as the source of truth for any metric.
+* Direct reply / post publishing via X API under the §28.10 publish-flow contract (token-gated, atomic, auditable). Replaces the Phase-5.5-stubbed manual-clipboard-only branch with a real `POST /2/tweets` branch alongside the existing manual branch.
+* `publish_via_api_enabled` setting (default TRUE) gates the per-publish API-vs-manual branch.
+* X API may return 403 on cold replies to third-party posts; surfaces "engage with this author's posts first, or use the manual fallback" UX. Manual clipboard path remains the always-available, Settings-selectable fallback.
+* vcr.py-recorded fixtures for write-side tests; `scripts/rerecord_x_api_fixtures.py` documented.
+
+**Phase 9 — adds Grok firehose discovery (migration 020):**
+
+* Grok X-Search integration as a third reply-target source alongside manual paste and curated `agent_target_accounts`.
+* `reply_targets.discovered_via` CHECK constraint extended with `'grok_semantic'`.
+* New `grok_api_responses` audit table; all Grok calls logged.
+* `grok_api_enabled` setting defaults TRUE; `grok_query_list_json` (Daniel-maintained); `grok_discovery_sweep_interval_minutes` default 120.
+* **Verification invariant (extends §29.2):** Grok-discovered candidates MUST be verified against the X API (via Phase 7's xurl) before any score affects `engagement_surface_score`. On 404 the candidate is rejected and logged; Grok never replaces the X API as the source of truth for any metric.
+* Combined Anthropic + xAI cost ceiling (§28.6) applies; 100% pauses the sweep.
+
+**Manual workflows remain inviolable.** Every API path has a separately-tested manual-equivalent path that's always available via Settings. Manual paste-URL discovery, manual snapshot entry, manual `Mark posted`, and manual reply logging never go away.
+
+**V1.2+ — still deferred:**
+
+* `audience_quality_score` — seventh resolver dimension. Data source unresolved (could be ICP-tagged author list, follower-overlap heuristic against §28.20 replier-pool primitives, or something else). Schema column persists as NULL-tolerated; resolver ignores. Not Phase 7/8/9's fight.
 
 **Never in scope:**
 
