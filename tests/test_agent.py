@@ -24,6 +24,7 @@ import pytest
 from app.agent import audit, confirmation, publish, recovery
 from app.agent._internal_tools import INTERNAL_TOOLS, publish_post_to_x
 from app.agent.tools import AGENT_TOOLS, _save_draft_post, _revise_draft, get_tool
+from tests._xurl_fixture import use_cassette
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,17 @@ def _agent_message_id(conn: sqlite3.Connection) -> int:
         (conv_id,),
     )
     return int(cur.lastrowid)
+
+
+def _disable_api_publish_branch(conn: sqlite3.Connection) -> None:
+    """Flip publish_via_api_enabled to FALSE so the publish wrapper takes
+    the Phase 5.5 manual-clipboard branch. Used by tests that pin the
+    manual fallback's contract (per §29.1 "Manual workflows remain
+    inviolable as Settings-selectable fallbacks forever")."""
+    conn.execute(
+        "UPDATE settings SET value_json = 'false' WHERE key = 'publish_via_api_enabled'"
+    )
+    conn.commit()
 
 
 # ===========================================================================
@@ -414,7 +426,7 @@ def test_dispatch_tool_call_blocks_engagement_bait_via_lint(db_conn, monkeypatch
     assert drafts["n"] == 0
 
 
-def test_revised_drafts_are_publishable(db_conn):
+def test_revised_drafts_are_publishable(db_conn, monkeypatch):
     """C2 regression: every revise_draft must mint a posts row so the
     publish modal can find it via `WHERE agent_draft_id = ?`.
 
@@ -430,7 +442,6 @@ def test_revised_drafts_are_publishable(db_conn):
     rev = _revise_draft(
         db_conn, draft_post_id=out["draft_id"], feedback="weak", new_text="v2"
     )
-    # The revise tool MUST return a post_id and the row MUST exist.
     assert "post_id" in rev, "revise_draft did not return a post_id"
     post_row = db_conn.execute(
         "SELECT id, text, agent_draft_id, manual_confirmation_status FROM posts WHERE id = ?",
@@ -442,17 +453,21 @@ def test_revised_drafts_are_publishable(db_conn):
     assert post_row["manual_confirmation_status"] == "draft"
 
     # Daniel can now mint a token + publish — i.e. the modal's lookup
-    # succeeds.
+    # succeeds. Phase 8: the default publish_via_api_enabled=TRUE means
+    # this routes through the API branch; vcr.py cassette serves the
+    # canned POST /2/tweets success response so the test stays hermetic.
     minted = confirmation.mint_confirmation_token(
         db_conn, post_id=int(rev["post_id"]), draft_text="v2"
     )
-    result = publish_post_to_x(
-        db_conn,
-        post_id=int(rev["post_id"]),
-        confirmation_token=minted.raw_token,
-    )
+    with use_cassette(monkeypatch, "publish_post_success_200"):
+        result = publish_post_to_x(
+            db_conn,
+            post_id=int(rev["post_id"]),
+            confirmation_token=minted.raw_token,
+        )
     assert result.success is True
-    assert result.method == "manual_clipboard"
+    assert result.method == "agent_confirmed"
+    assert result.x_post_id == "1747000000000000001"
 
 
 # ===========================================================================
@@ -578,7 +593,14 @@ def test_validation_failure_leaves_token_unconsumed_and_marks_attempt(db_conn):
 
 
 def test_publish_success_consumes_token_and_stages_manual_clipboard(db_conn):
-    """MVP happy path — publish_method = manual_clipboard, token consumed."""
+    """Manual-clipboard fallback path — pinned by §29.1 "Manual workflows
+    remain inviolable as Settings-selectable fallbacks forever."
+
+    Phase 8 flipped the default to the API branch; this test explicitly
+    selects the manual fallback by setting publish_via_api_enabled=FALSE.
+    No X API call fires (no monkeypatch needed); publish_method stays
+    'manual_clipboard'."""
+    _disable_api_publish_branch(db_conn)
     post_id = _make_draft_post(db_conn, text="ship me")
     minted = confirmation.mint_confirmation_token(
         db_conn, post_id=post_id, draft_text="ship me"
@@ -591,7 +613,6 @@ def test_publish_success_consumes_token_and_stages_manual_clipboard(db_conn):
     # urlencode uses form-encoding ('+' for spaces) — fine for twitter.com/intent.
     assert result.intent_url is not None and "ship+me" in result.intent_url
 
-    # Token consumed; post staged.
     token_row = db_conn.execute(
         "SELECT consumed_at_utc FROM publish_confirmation_tokens WHERE id = ?",
         (minted.token_id,),
@@ -610,24 +631,35 @@ def test_publish_success_consumes_token_and_stages_manual_clipboard(db_conn):
 # ===========================================================================
 # 5. Double-publish rejected by check (f)
 # ===========================================================================
-def test_double_publish_rejected_by_check_f(db_conn):
-    """§28.10 hard constraint: no auto-publish of already-confirmed posts."""
+def test_double_publish_rejected_by_check_f(db_conn, monkeypatch):
+    """§28.10 hard constraint: no auto-publish of already-confirmed posts.
+
+    Phase 8: the first publish routes through the API branch (success
+    cassette); the second publish fails at check (f) BEFORE the API call
+    so no second cassette is needed.
+    """
     post_id = _make_draft_post(db_conn, text="once and done")
     minted_first = confirmation.mint_confirmation_token(
         db_conn, post_id=post_id, draft_text="once and done"
     )
-    result = publish_post_to_x(
-        db_conn, post_id=post_id, confirmation_token=minted_first.raw_token
-    )
+    with use_cassette(monkeypatch, "publish_post_success_200"):
+        result = publish_post_to_x(
+            db_conn, post_id=post_id, confirmation_token=minted_first.raw_token
+        )
     assert result.success is True
 
-    # Simulate Daniel marking the post confirmed via the existing flow.
-    db_conn.execute(
-        "UPDATE posts SET manual_confirmation_status = 'confirmed', x_post_id = 'fake-x-id' WHERE id = ?",
+    # The API branch already set manual_confirmation_status='confirmed' +
+    # x_post_id from the cassette's data.id. No manual UPDATE needed.
+    confirmed_row = db_conn.execute(
+        "SELECT manual_confirmation_status, x_post_id FROM posts WHERE id = ?",
         (post_id,),
-    )
+    ).fetchone()
+    assert confirmed_row["manual_confirmation_status"] == "confirmed"
+    assert confirmed_row["x_post_id"] is not None
 
     # Mint a second token and attempt re-publish — check (f) rejects.
+    # No cassette: the publish wrapper short-circuits on the validation
+    # failure before reaching the API call.
     minted_second = confirmation.mint_confirmation_token(
         db_conn, post_id=post_id, draft_text="once and done"
     )
@@ -648,17 +680,21 @@ def test_double_publish_rejected_by_check_f(db_conn):
 # ===========================================================================
 # 6. Raw-token redaction
 # ===========================================================================
-def test_raw_token_redacted_from_arguments_json(db_conn):
-    """§28.2 rule #11: raw confirmation_token NEVER persists in audit log."""
+def test_raw_token_redacted_from_arguments_json(db_conn, monkeypatch):
+    """§28.2 rule #11: raw confirmation_token NEVER persists in audit log.
+
+    Phase 8 routes through the API branch by default; success cassette
+    serves the canned POST /2/tweets response. The redaction wrapper
+    runs in either branch (audit.log_tool_call is the shared seam)."""
     post_id = _make_draft_post(db_conn, text="audit me")
     minted = confirmation.mint_confirmation_token(
         db_conn, post_id=post_id, draft_text="audit me"
     )
-    publish_post_to_x(
-        db_conn, post_id=post_id, confirmation_token=minted.raw_token
-    )
+    with use_cassette(monkeypatch, "publish_post_success_200"):
+        publish_post_to_x(
+            db_conn, post_id=post_id, confirmation_token=minted.raw_token
+        )
 
-    # Find the audit row.
     row = db_conn.execute(
         """
         SELECT arguments_json, redacted_arguments, status
@@ -678,7 +714,6 @@ def test_raw_token_redacted_from_arguments_json(db_conn):
     )
     assert "confirmation_token_id" in args
     assert args["confirmation_token_id"] == minted.token_id
-    # The raw UUID hex must NOT appear anywhere in the serialized args.
     assert minted.raw_token not in row["arguments_json"]
 
 
