@@ -66,6 +66,31 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         "Toggle to 'manual' in Settings to disable scheduled jobs; manual "
         "fallback paths remain available regardless of the toggle.",
     ),
+    # Phase 8 — X API writes (§28.10 Phase 5.5 → Phase 8 transition;
+    # §29.6 Phase 8 block). Mirrors migration 019_x_api_writes.sql so a
+    # fresh DB initialized via init_db agrees with one initialized via
+    # raw migrations only.
+    (
+        "publish_via_api_enabled",
+        True,
+        "Phase 8 gate (§28.10 transition; §29.6). TRUE: publish flow takes the "
+        "real POST /2/tweets branch. FALSE: publish flow takes the manual-clipboard "
+        "fallback branch (always available, Settings-selectable, never deprecated).",
+    ),
+    (
+        "x_write_rate_limit_per_15min",
+        50,
+        "Sliding-window cap on X API writes per 15 minutes. Honored by "
+        "app.x_client.check_write_rate_capacity() before each publish call. "
+        "Default matches §25 Phase 8; tune live as X API tier allows.",
+    ),
+    (
+        "x_write_rate_limit_per_24h",
+        1000,
+        "Sliding-window cap on X API writes per 24 hours. Honored by "
+        "app.x_client.check_write_rate_capacity() before each publish call. "
+        "Default matches §25 Phase 8; tune live as X API tier allows.",
+    ),
     # Sample-size thresholds used by v_lane_performance.
     # Stored here so the UI can expose them; the view's CASE expression hard-
     # codes the same numbers per §11.
