@@ -298,6 +298,20 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
         3,
         "Informational ceiling on consecutive draft_blog calls within an editing session (§28.32). UI surfaces a soft warning; not enforced.",
     ),
+    # Phase 10 — Voice Discipline Polish Pack (§28.11 + §28.18 + §29.5).
+    # Mirrors migration 023_voice_discipline_polish.sql so a fresh DB
+    # initialized via init_db agrees with one initialized via raw
+    # migrations only.
+    (
+        "screenshot_test_minimum_for_strong",
+        2,
+        "composite_label cannot be 'strong' if screenshot_test_score is non-NULL and below this floor (§28.11 Phase 10 gating). NULL passes through.",
+    ),
+    (
+        "reply_intent_required",
+        True,
+        "When true (default), dispatch_tool_call refuses save_draft_reply without a valid §29.5 reply_intent. False is the calibration escape hatch (§29.5 Phase 10 promotion).",
+    ),
 ]
 
 

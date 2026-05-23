@@ -84,6 +84,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "020_force_drafted_reason_required.sql",
     "021_grok_integration.sql",
     "022_phase9_review_followups.sql",
+    "023_voice_discipline_polish.sql",
 )
 
 
