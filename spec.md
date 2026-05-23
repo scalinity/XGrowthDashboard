@@ -2907,11 +2907,20 @@ Monthly reviews are the longer-arc counterpart to weekly: they reference complet
 
 6. **Data sources**
 
-   * X API mode:
+   * X API mode (`data_collection_mode`):
 
-     * **manual (default for MVP)**
-     * xurl (V1.1)
-     * direct API (V1.2)
+     * **manual** (MVP default until Phase 7 ships)
+     * **`api`** (default once Phase 7 migration 018 applies — xurl-backed reads)
+   * X API writes (`publish_via_api_enabled`, default TRUE after Phase 8):
+
+     * TRUE — §28.10 publish-flow calls `POST /2/tweets`.
+     * FALSE — §28.10 takes the manual-clipboard branch (always-available fallback).
+   * Grok discovery (`grok_api_enabled`, default TRUE after Phase 9):
+
+     * TRUE — Grok sweep job runs at `grok_discovery_sweep_interval_minutes` cadence (default 120).
+     * FALSE — Grok kill switch; manual + X API search paths still work.
+   * Grok query list panel (Phase 9): CRUD over `grok_query_list_json` (one query per line), "Run sweep now" button, "Recent Grok failures (last 7 days)" from `grok_api_responses`.
+   * X API failures panel (Phase 7): "Recent X API failures (last 7 days)" from `raw_api_responses` + last-refresh timestamp per scheduled job (see §17).
    * Website analytics:
 
      * disabled
