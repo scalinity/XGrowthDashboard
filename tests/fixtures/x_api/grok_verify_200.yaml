@@ -2,7 +2,10 @@
 # Grok-candidate verification. Loaded by tests/_xurl_fixture.py via
 # the subprocess.run patcher. The response data shape matches what
 # X API actually returns: a single tweet object with public_metrics,
-# created_at, and text fields.
+# created_at, and text fields PLUS the P9R-3 includes.users
+# expansion with public_metrics.followers_count + username (so the
+# §29.4 relative-threshold math works and the sweep can override
+# any stale handle from the Grok citation URL).
 interactions:
   - request:
       method: GET
@@ -22,5 +25,14 @@ interactions:
             quote_count: 0
             bookmark_count: 7
             impression_count: 1200
+        includes:
+          users:
+            - id: "777000111"
+              username: "danielcoder"
+              public_metrics:
+                followers_count: 1500
+                following_count: 200
+                tweet_count: 4321
+                listed_count: 5
       stderr: ""
       exit_code: 0

@@ -1,6 +1,7 @@
 # Phase 9 fixture cassette — duplicate verification. Same shape as
 # grok_verify_200.yaml but a separate cassette file so the dedupe
-# test can use it in sequence with another 200 cassette.
+# test can use it in sequence with another 200 cassette. Includes
+# the P9R-3 includes.users expansion.
 interactions:
   - request:
       method: GET
@@ -20,5 +21,14 @@ interactions:
             quote_count: 0
             bookmark_count: 1
             impression_count: 400
+        includes:
+          users:
+            - id: "777000112"
+              username: "sometwo"
+              public_metrics:
+                followers_count: 300
+                following_count: 150
+                tweet_count: 1200
+                listed_count: 1
       stderr: ""
       exit_code: 0

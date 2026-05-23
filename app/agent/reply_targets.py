@@ -28,6 +28,7 @@ composes these helpers and writes the result onto a ``reply_targets`` row.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
 
@@ -479,24 +480,31 @@ class GrokVerificationResult:
     this helper before any score affects ``engagement_surface_score``.
 
     * ``verified=True`` → the X API returned 200; ``tweet`` holds the
-      ``data`` object (public_metrics, created_at, text, etc.) and the
-      sweep continues with X API metrics as source of truth.
+      ``data`` object (public_metrics, created_at, text, etc.) and
+      ``author`` holds the corresponding includes.users[0] entry when
+      the X API returned the ``expansions=author_id`` payload (with
+      ``public_metrics.followers_count`` + canonical ``username``).
     * ``verified=False`` and ``status_code=404`` → the post was
       deleted between Grok discovery and our verification; the sweep
       rejects the candidate and logs to
       ``grok_api_responses.rejection_reason='verification_404'``.
+
+    P9R-3 added ``author`` so the §29.4 relative-threshold math has a
+    live follower count. P9R-38 uses ``author.username`` to override
+    any stale handle in the original Grok citation URL.
     """
 
     verified: bool
     status_code: int | None
     tweet: dict[str, Any] | None
     error: str | None
+    author: dict[str, Any] | None = None
 
 
 def verify_grok_candidate_against_x_api(
     target_x_post_id: str,
     *,
-    conn: Any = None,
+    conn: sqlite3.Connection | None = None,
     xurl_bin: str | None = None,
 ) -> GrokVerificationResult:
     """Verify a Grok-discovered candidate against the X API.
@@ -537,9 +545,18 @@ def verify_grok_candidate_against_x_api(
     # (X API only returns non_public for tweets the authenticated user
     # owns; for third-party posts this field is omitted, which is fine
     # — the candidate scores off public_metrics alone).
+    #
+    # P9R-3: expansions=author_id + user.fields=public_metrics,username
+    # so the response's includes.users[0] carries the current
+    # followers_count (for the §29.4 relative-threshold math) and the
+    # canonical handle (some authors change handles after the URL Grok
+    # cited was captured — P9R-38). One round-trip, no extra X-API
+    # budget vs. a separate /2/users call.
     endpoint = (
         f"/2/tweets/{target_x_post_id}"
         f"?tweet.fields=public_metrics,non_public_metrics,created_at,author_id"
+        f"&expansions=author_id"
+        f"&user.fields=public_metrics,username"
     )
     try:
         response = x_client.request(
@@ -576,9 +593,28 @@ def verify_grok_candidate_against_x_api(
             tweet=None,
             error="X API response missing 'data' object",
         )
+
+    # P9R-3: pull the matching includes.users[0] entry — public_metrics.
+    # followers_count drives §29.4 relative thresholds. None when the
+    # X API omitted the expansion (older Phase 7 cassettes, or fields=
+    # set restricted).
+    author: dict[str, Any] | None = None
+    includes = body.get("includes") or {}
+    if isinstance(includes, dict):
+        users = includes.get("users")
+        if isinstance(users, list):
+            tweet_author_id = data.get("author_id")
+            for u in users:
+                if isinstance(u, dict) and (
+                    tweet_author_id is None or u.get("id") == tweet_author_id
+                ):
+                    author = u
+                    break
+
     return GrokVerificationResult(
         verified=True,
         status_code=response.status_code,
         tweet=data,
         error=None,
+        author=author,
     )

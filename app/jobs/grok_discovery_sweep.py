@@ -48,10 +48,12 @@ queue's manual-paste affordance.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,7 @@ from app.agent.reply_targets import (  # noqa: E402
     timing_score,
     verify_grok_candidate_against_x_api,
 )
+from app.agent.timeparse import parse_x_api_datetime  # noqa: E402
 from app.db import DEFAULT_DB_PATH, connect  # noqa: E402
 
 _log = logging.getLogger(__name__)
@@ -134,9 +137,27 @@ def _verify_and_score(
     bookmark_count = public.get("bookmark_count")
     impression_count = public.get("impression_count")
 
+    # P9R-3: pull follower count from the includes.users expansion the
+    # verify call requests. NULL falls back to the §29.4 absolute
+    # floors — same conservative behavior as a Phase-5.6 manual paste
+    # whose author follower_count is unknown — only on X API responses
+    # that omit the expansion (no test cassette currently does so).
+    follower_count: int | None = None
+    canonical_handle: str | None = None
+    if result.author and isinstance(result.author, dict):
+        author_metrics = result.author.get("public_metrics") or {}
+        if isinstance(author_metrics, dict):
+            fc = author_metrics.get("followers_count")
+            if isinstance(fc, int):
+                follower_count = fc
+        # P9R-38: prefer the canonical handle from the X API over the
+        # one parsed from the Grok citation URL (handles change).
+        u = result.author.get("username")
+        if isinstance(u, str) and u.strip():
+            canonical_handle = u.strip()
+
     medium_th, high_th = engagement_surface_thresholds(
-        None,  # follower_count unknown until next /2/users call
-        settings_dict,
+        follower_count, settings_dict
     )
     eng = engagement_surface_score(like_count, medium_th, high_th)
     sat = saturation_score(reply_count)
@@ -145,8 +166,6 @@ def _verify_and_score(
     age_minutes: int | None = None
     created_at = result.tweet.get("created_at")
     if created_at:
-        from datetime import datetime, timezone
-        from app.agent.timeparse import parse_x_api_datetime
         created_dt = parse_x_api_datetime(created_at)
         if created_dt is not None:
             age_minutes = int(
@@ -154,7 +173,10 @@ def _verify_and_score(
             )
     tim: int | None = None
     if age_minutes is not None:
-        tim = timing_score(age_minutes, None)
+        # P9R-16: feed the real follower count into timing_score too.
+        # None still falls back to the small-niche window (correct
+        # behavior when follower count truly is unknown).
+        tim = timing_score(age_minutes, follower_count)
 
     score_block = {
         "like_count": like_count,
@@ -169,6 +191,8 @@ def _verify_and_score(
         "post_age_minutes": age_minutes,
         "target_text": result.tweet.get("text"),
         "target_created_at_utc": created_at,
+        "target_author_follower_count": follower_count,  # P9R-3
+        "target_author_handle": canonical_handle,  # P9R-38 — None = keep URL-derived
     }
     return (result, score_block)
 
@@ -185,13 +209,24 @@ def _insert_candidate(
     on ``target_x_post_id`` / ``target_post_url`` rejected the insert
     (dedupe — first insert wins per §29.11).
     """
+    # P9R-38: prefer canonical handle from the X API includes.users[0]
+    # over the (possibly stale) handle parsed from the Grok citation
+    # URL. Falls back to the URL-derived value when X API didn't carry
+    # the expansion. P9R-43: source='paste_url' is the closest
+    # existing CHECK enum value — the discovered_via column carries
+    # the canonical 'grok_semantic' provenance.
+    effective_handle = (
+        score_block.get("target_author_handle")
+        or candidate.target_author_handle
+    )
     try:
         cur = conn.execute(
             """
             INSERT INTO reply_targets
                 (discovered_via, source, source_platform,
                  target_post_url, target_x_post_id,
-                 target_author_handle, target_text,
+                 target_author_handle, target_author_follower_count,
+                 target_text,
                  target_created_at_utc, post_age_minutes,
                  like_count, reply_count, repost_count, quote_count,
                  bookmark_count, impression_count,
@@ -199,7 +234,7 @@ def _insert_candidate(
                  timing_score, status)
             VALUES
                 ('grok_semantic', 'paste_url', 'x',
-                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, 'candidate')
             RETURNING id
@@ -207,7 +242,8 @@ def _insert_candidate(
             (
                 candidate.target_post_url,
                 candidate.target_x_post_id,
-                candidate.target_author_handle,
+                effective_handle,
+                score_block.get("target_author_follower_count"),  # P9R-3
                 score_block.get("target_text"),
                 score_block.get("target_created_at_utc"),
                 score_block.get("post_age_minutes"),
@@ -431,8 +467,6 @@ def _log_verification_404(
     machine-readable record that §29.2 verification dropped this
     candidate — the Settings "Recent Grok failures" panel surfaces it.
     """
-    import json
-
     try:
         conn.execute(
             """

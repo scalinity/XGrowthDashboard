@@ -202,7 +202,12 @@ def test_happy_path_grok_candidate_ingestion(
     assert row["like_count"] == 42
     assert row["reply_count"] == 3
     assert row["target_author_handle"] == "danielcoder"
-    # Engagement-surface score from §29.4 thresholds (42 likes, floor 15 / high 50).
+    # P9R-3: follower count from includes.users expansion drives §29.4
+    # relative thresholds. The cassette returns 1500 followers; at the
+    # default 0.001 (= 0.1%) pct, medium=max(15, 1.5)=15 likes; at high
+    # pct 0.005 (0.5%), high=max(50, 7.5)=50 likes. 42 likes → 1.
+    assert row["target_author_follower_count"] == 1500
+    # Engagement-surface score from §29.4 thresholds.
     assert row["engagement_surface_score"] == 1
 
 
