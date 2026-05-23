@@ -366,6 +366,92 @@ def test_failure_mode_enum_has_eleven_canonical_values() -> None:
     assert "hedging_that_erases" in lint.REPLY_QUALITY_FAILURE_MODES
 
 
+# ---------------------------------------------------------------------------
+# Phase 10 C1 fix — verify the live Haiku call reads the eleven-verdict
+# prompt file (not the legacy four-verdict inline string).
+# ---------------------------------------------------------------------------
+def test_reply_quality_lint_prompt_present() -> None:
+    ok, n_bytes = lint.verify_reply_quality_lint_prompt_present()
+    assert ok is True
+    assert n_bytes > 0
+
+
+def test_reply_quality_lint_prompt_drift_check_raises_on_missing(
+    tmp_path: Path,
+) -> None:
+    fake_path = tmp_path / "missing.md"
+    with pytest.raises(lint.ReplyQualityLintPromptMissingError):
+        lint.verify_reply_quality_lint_prompt_present(path=fake_path)
+
+
+def test_reply_quality_lint_prompt_drift_check_raises_on_empty(
+    tmp_path: Path,
+) -> None:
+    empty_path = tmp_path / "empty.md"
+    empty_path.write_text("", encoding="utf-8")
+    with pytest.raises(lint.ReplyQualityLintPromptMissingError):
+        lint.verify_reply_quality_lint_prompt_present(path=empty_path)
+
+
+def test_reply_quality_lint_prompt_contains_all_eleven_verdicts() -> None:
+    """Loaded prompt must enumerate every canonical failure mode so
+    Haiku's verdict surface covers all eleven categories."""
+    prompt = lint.load_reply_quality_lint_prompt()
+    for mode in lint.REPLY_QUALITY_FAILURE_MODES:
+        assert mode in prompt, f"prompt missing verdict token: {mode}"
+
+
+def test_reply_quality_lint_live_call_uses_prompt_file(
+    monkeypatch,
+) -> None:
+    """C1 acceptance: when Haiku is invoked, the message content is the
+    file-loaded prompt body — not the legacy inline string.
+
+    The legacy inline string explicitly listed only FOUR verdicts;
+    the file lists ELEVEN. We pin the presence of any new-category
+    verdict token to confirm the wiring crosses the boundary correctly.
+    """
+    # Force live-path entry: clear LINT_OFFLINE, install fake API key.
+    monkeypatch.delenv("LINT_OFFLINE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-test-key")
+
+    captured_content: dict[str, str] = {}
+
+    class _FakeAnthropicResp:
+        def __init__(self) -> None:
+            class _Block:
+                type = "text"
+                text = "no, this is genuine and substantive — fake response"
+            self.content = [_Block()]
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured_content["body"] = kwargs["messages"][0]["content"]
+            return _FakeAnthropicResp()
+
+    class _FakeAnthropicClient:
+        def __init__(self, **kwargs) -> None:  # noqa: ARG002
+            self.messages = _FakeMessages()
+
+    import anthropic as _anthropic
+    monkeypatch.setattr(_anthropic, "Anthropic", _FakeAnthropicClient)
+
+    result = lint.reply_quality_lint(
+        "any reply text", target_post_text="any target", enabled=True,
+    )
+    assert result.passed is True  # fake response says no/genuine
+    body = captured_content.get("body", "")
+    # The eleven-verdict file mentions every Phase 10 category verbatim.
+    # The legacy inline string did NOT — pin two new tokens that could
+    # only come from the file.
+    assert "engagement_bait" in body, (
+        "C1 regression: Haiku call body lacks 'engagement_bait' verdict — "
+        "the legacy inline 4-verdict prompt is back."
+    )
+    assert "diving_preamble" in body
+    assert "hedging_that_erases" in body
+
+
 def test_parse_response_recognizes_new_categories() -> None:
     """Haiku response parser handles all 8 new verdict tokens."""
     for mode in (

@@ -17,10 +17,25 @@ this; it lets the dark-pattern test from §25 run without an API key.
 
 from __future__ import annotations
 
+import functools
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from app.db import PROJECT_ROOT
+
+_LOG = logging.getLogger(__name__)
+
+# Phase 10 / §28.18 — reply-quality lint prompt file. Hand-curated
+# eleven-verdict surface lives at config/reply_quality_lint_prompt.md;
+# the live Haiku call reads it at runtime so the offline regex matcher
+# and the live model see the same eleven-category vocabulary.
+REPLY_QUALITY_LINT_PROMPT_PATH: Path = (
+    PROJECT_ROOT / "config" / "reply_quality_lint_prompt.md"
+)
 
 # ---------------------------------------------------------------------------
 # Offline-mode pattern matchers — used by tests and by the safety fallback
@@ -406,22 +421,70 @@ class ReplyQualityResult:
     api_call_failed: bool = False
 
 
-_REPLY_QUALITY_PROMPT = """You are reviewing a reply to an X post. Does this reply sound forced,
-AI-generated, or selfishly self-promoting (would the original poster
-find it annoying)?
+# Phase 10 / §28.18 — load the eleven-verdict prompt from disk so the
+# live Haiku call sees the same vocabulary as the offline regex matcher.
+# mtime-keyed cache lets Daniel iterate on the prompt without restarting
+# Streamlit (the prior Phase 10 lru_cache(maxsize=1) variant defeated
+# hot-reload — addressed alongside C1 since this is the first time the
+# file is read in production).
+@functools.lru_cache(maxsize=8)
+def _load_reply_quality_prompt_cached(mtime_ns: int) -> str:  # noqa: ARG001 — mtime keys the cache
+    return REPLY_QUALITY_LINT_PROMPT_PATH.read_text(encoding="utf-8")
 
-Target post:
-{target_post}
 
-Proposed reply:
-{reply}
+class ReplyQualityLintPromptMissingError(RuntimeError):
+    """Drift-check error: the §28.18 reply-quality lint prompt file is
+    missing or empty. Same severity as Section4AnchorMissingError —
+    the live Haiku path has no inline fallback, so a missing file means
+    the gate silently runs only the offline regex matcher in production.
+    """
 
-Reply with exactly one of:
-- "no, this is genuine and substantive" + one-line reasoning
-- "yes, forced" + one-line reasoning
-- "yes, AI-tasting" + one-line reasoning
-- "yes, selfishly self-promoting" + one-line reasoning
-"""
+
+def verify_reply_quality_lint_prompt_present(
+    path: Path | None = None,
+) -> tuple[bool, int]:
+    """Drift check — assert the §28.18 lint prompt exists and is nonempty.
+
+    Returns ``(exists, byte_count)``. Callers (pre-commit / CI / tests)
+    assert ``exists is True AND byte_count > 0``. Mirrors
+    ``prompt_builder.verify_voice_profile_prescriptive_present``.
+    """
+    p = path or REPLY_QUALITY_LINT_PROMPT_PATH
+    if not p.exists():
+        raise ReplyQualityLintPromptMissingError(
+            f"reply-quality lint prompt not found at {p}. The §28.18 "
+            "live Haiku call has no inline fallback (Phase 10 C1 fix)."
+        )
+    contents = p.read_bytes()
+    if not contents.strip():
+        raise ReplyQualityLintPromptMissingError(
+            f"reply-quality lint prompt at {p} is empty. An empty file "
+            "yields a zero-instruction Haiku call — populate or restore."
+        )
+    return (True, len(contents))
+
+
+def load_reply_quality_lint_prompt() -> str:
+    """Read the §28.18 reply-quality lint prompt template.
+
+    The cache key is the file's mtime in nanoseconds so an in-place edit
+    invalidates the cache on the next read without a process restart.
+    """
+    try:
+        mtime = REPLY_QUALITY_LINT_PROMPT_PATH.stat().st_mtime_ns
+    except FileNotFoundError:
+        # Surface a hard error: the live Haiku path has no fallback.
+        # The drift check (verify_reply_quality_lint_prompt_present)
+        # catches missing files at CI time; reaching this in production
+        # means the file vanished between checks.
+        raise FileNotFoundError(
+            f"reply-quality lint prompt missing at "
+            f"{REPLY_QUALITY_LINT_PROMPT_PATH}. The §28.18 live Haiku "
+            "call has no inline fallback — restore the file or run "
+            "tests/test_voice_discipline_polish.py::test_reply_quality_lint_prompt_present "
+            "to verify."
+        )
+    return _load_reply_quality_prompt_cached(mtime)
 
 
 def _parse_reply_quality_response(
@@ -594,18 +657,17 @@ def reply_quality_lint(
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
+        prompt_template = load_reply_quality_lint_prompt()
+        # Phase 10 / §28.18 — substitute the two delimiters. Using
+        # .replace (not .format) keeps the prompt's literal `{` / `}`
+        # characters in surrounding markdown unescaped. C1 fix.
+        prompt_body = prompt_template.replace(
+            "{target_post}", target_post_text or "(target post not provided)"
+        ).replace("{reply}", text)
         resp = client.messages.create(
             model=model,
             max_tokens=200,
-            messages=[
-                {
-                    "role": "user",
-                    "content": _REPLY_QUALITY_PROMPT.format(
-                        target_post=(target_post_text or "(target post not provided)"),
-                        reply=text,
-                    ),
-                }
-            ],
+            messages=[{"role": "user", "content": prompt_body}],
         )
         body = ""
         for block in resp.content:
