@@ -424,6 +424,23 @@ def _log_raw(
     by tests that don't want to set up a DB just to verify the
     subprocess plumbing.
 
+    RV2-4 rollback-survival promise (§17 Phase 7 / §28.30 "every xurl
+    call is logged"): the audit row survives caller-transaction
+    rollback BY ARCHITECTURE — the publish flow (publish_post_atomic
+    in app/agent/publish.py) runs the X API call OUTSIDE any open
+    transaction in its split-txn design (step 2). When the X API call
+    fires, ``conn`` is in autocommit mode, so this INSERT commits
+    immediately. A subsequent ROLLBACK in publish_post_atomic step 3
+    cannot affect the already-committed audit row.
+
+    Side-channel auto-commit writes were considered but rejected: SQLite
+    permits only one writer at a time, so a second connection trying to
+    INSERT into the same DB while the caller holds BEGIN IMMEDIATE would
+    deadlock on the writer lock. The architectural invariant
+    (X-API-outside-transaction) is the load-bearing guarantee; the
+    invariant is pinned by ``tests/test_x_api_reads.py``
+    ``test_log_raw_survives_publish_flow_outside_transaction``.
+
     Logging never raises — a failed audit insert must not also fail the
     upstream API call. The OperationalError catch mirrors the
     best-effort pattern from ``app/backup.py``.

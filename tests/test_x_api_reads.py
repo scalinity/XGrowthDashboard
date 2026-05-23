@@ -553,6 +553,157 @@ def test_x_client_log_raw_inserts_audit_row(
 # in_reply_to_x_post_id for the X API call. Earlier Phase 8 code did a
 # local-id PK lookup that silently turned replies into standalone tweets.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# RV2-4: raw_api_responses MUST survive publish-flow rollback.
+#
+# The rollback-survival promise (§17 Phase 7 / §28.30 "every xurl call is
+# logged") is satisfied BY ARCHITECTURE: publish_post_atomic in
+# app/agent/publish.py runs the X API call OUTSIDE any open transaction
+# in its split-txn design (step 2). When the X API call fires, conn is
+# in autocommit mode, so _log_raw's INSERT commits immediately. A
+# subsequent ROLLBACK in publish_post_atomic step 3 cannot affect the
+# already-committed audit row.
+#
+# These tests pin the architectural invariant. If a future refactor
+# wraps the X API call in a transaction (e.g. by moving step 2 inside a
+# new `with transaction(conn):` block), the audit row would be wiped on
+# rollback and these tests would fail loudly.
+# ---------------------------------------------------------------------------
+def test_log_raw_outside_transaction_commits_immediately(tmp_path: Path) -> None:
+    """Autocommit invariant: when called outside any transaction (the
+    actual publish flow's step 2 state), _log_raw's INSERT commits
+    immediately. Verified by reading from a SECOND connection — only
+    committed rows are visible cross-connection."""
+    from app.db import connect
+
+    db_path = tmp_path / "rv2_4_autocommit.db"
+    conn = connect(db_path)
+    apply_migrations(conn)
+    seed_settings(conn)
+
+    raw_id = x_client._log_raw(
+        conn,
+        source="xurl",
+        endpoint="/2/users/me",
+        method="GET",
+        body_json=None,
+        response_text='{"data": {"id": "1"}}',
+        status_code=200,
+        notes="RV2-4 autocommit invariant",
+    )
+    assert raw_id is not None
+
+    # Read from a SEPARATE connection — only sees committed rows.
+    other = connect(db_path)
+    row = other.execute(
+        "SELECT id, status_code, notes FROM raw_api_responses WHERE id = ?",
+        (raw_id,),
+    ).fetchone()
+    other.close()
+    conn.close()
+    assert row is not None, (
+        "RV2-4: _log_raw must commit immediately when called outside any "
+        "open transaction (publish flow step 2 state). A second connection "
+        "should see the audit row."
+    )
+    assert row["status_code"] == 200
+
+
+def test_log_raw_post_publish_failure_audit_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: the publish-flow architecture means _log_raw inside
+    publish_post_to_x_via_api commits the audit row BEFORE any later
+    ROLLBACK in publish_post_atomic step 3. This test simulates the
+    real flow shape (X API call OUTSIDE the transaction, then a
+    transactional commit that fails) and confirms the audit survives.
+    """
+    from app.db import connect, transaction
+
+    db_path = tmp_path / "rv2_4_e2e.db"
+    conn = connect(db_path)
+    apply_migrations(conn)
+    seed_settings(conn)
+
+    # Step 1+2: X API call OUTSIDE any txn (per publish_post_atomic's
+    # split-txn design). _log_raw commits in autocommit mode.
+    raw_id = x_client._log_raw(
+        conn,
+        source="xurl",
+        endpoint="/2/tweets",
+        method="POST",
+        body_json={"text": "hello"},
+        response_text='{"data":{"id":"1234567890","text":"hello"}}',
+        status_code=200,
+        notes="publish_post_to_x_via_api attempt 1/3",
+    )
+    assert raw_id is not None
+
+    # Step 3: post-API commit transaction fires + rolls back.
+    try:
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO posts (text, type, posted_via, created_date, "
+                "manual_confirmation_status) VALUES (?, ?, ?, ?, ?)",
+                ("hello", "standalone", "agent_assisted", "2026-05-22", "draft"),
+            )
+            raise sqlite3.IntegrityError("simulated commit-time failure")
+    except sqlite3.IntegrityError:
+        pass
+
+    # The audit row written BEFORE the transaction must still exist —
+    # the rollback only affects what was inside the txn.
+    row = conn.execute(
+        "SELECT id, status_code, notes FROM raw_api_responses WHERE id = ?",
+        (raw_id,),
+    ).fetchone()
+    conn.close()
+    assert row is not None, (
+        "RV2-4 regression: publish-flow audit row was wiped by a later "
+        "rollback. The split-txn architecture must keep _log_raw outside "
+        "the transaction so the audit commits independently."
+    )
+    assert "publish_post_to_x_via_api" in row["notes"]
+
+
+def test_publish_post_atomic_keeps_x_api_call_outside_transaction() -> None:
+    """RV2-4 architectural invariant pin: a structural inspection of
+    publish_post_atomic confirms the X API call lives in step 2 OUTSIDE
+    any `with transaction(conn):` block. If anyone moves the X API call
+    inside a transaction (whether by accident or by refactor), this
+    test will fail."""
+    import inspect
+
+    from app.agent import publish
+
+    source = inspect.getsource(publish.publish_post_atomic)
+    # Find the X API call line.
+    api_call_idx = source.index("publish_post_to_x_via_api(")
+    api_call_line_start = source.rfind("\n", 0, api_call_idx) + 1
+    # Find the nearest enclosing transaction context above the API call.
+    pre_call = source[:api_call_line_start]
+    # The publish flow's split-txn pattern: there's a step-3 commit
+    # transaction, but it lives AFTER the X API call, not wrapping it.
+    last_txn_open = pre_call.rfind("with transaction(conn):")
+    if last_txn_open >= 0:
+        # The transaction opened before the X API call must have closed
+        # — i.e., there's a dedent before the API call. Check that the
+        # last `with transaction(conn):` is followed by a return/exception
+        # before the API call. Simplest proxy: count indent of the API
+        # call line vs the last transaction open line.
+        txn_line_start = pre_call.rfind("\n", 0, last_txn_open) + 1
+        txn_indent = last_txn_open - txn_line_start
+        api_line_indent = api_call_idx - api_call_line_start
+        assert api_line_indent <= txn_indent, (
+            "RV2-4 architectural invariant violated: publish_post_to_x_via_api "
+            "appears to live INSIDE a `with transaction(conn):` block. The "
+            "split-txn design requires the X API call to be OUTSIDE any open "
+            "transaction so _log_raw's audit row commits immediately and "
+            "survives any later rollback. See app/x_client.py::_log_raw "
+            "docstring."
+        )
+
+
 def test_import_recent_posts_in_reply_to_round_trips_through_publish_resolver(
     db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
