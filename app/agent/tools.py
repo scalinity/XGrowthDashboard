@@ -1662,15 +1662,19 @@ def _audit_profile_to_dict(
     if auto_pull_bio and not bio_text.strip():
         from app import x_client  # local — Phase 7-only dependency
 
-        # Resolve Daniel's handle from settings.
+        # Resolve Daniel's handle from settings. RV2-8: validate before
+        # interpolating into the xurl URL path.
         handle_row = conn.execute(
             "SELECT value_json FROM settings WHERE key = 'x_handle'"
         ).fetchone()
         daniel_handle: str = "dannyscalant"
         if handle_row and handle_row[0]:
             try:
-                daniel_handle = (json.loads(handle_row[0]) or daniel_handle).lstrip("@")
-            except (TypeError, json.JSONDecodeError):
+                raw = json.loads(handle_row[0]) or daniel_handle
+                daniel_handle = x_client.validate_x_handle(raw)
+            except (TypeError, json.JSONDecodeError, ValueError):
+                # Fall back to the hardcoded default rather than letting
+                # an invalid x_handle setting compromise the URL path.
                 pass
 
         try:
@@ -1767,11 +1771,14 @@ def _analyze_account_to_dict(
     if auto_pull:
         from app import x_client  # local — Phase 7-only dependency
 
-        handle_clean = target_handle.lstrip("@").strip()
-        if not handle_clean:
+        # RV2-8: validate handle shape at the tool boundary so we never
+        # interpolate '/', '?', '&', '..', '%' into the xurl URL path.
+        try:
+            handle_clean = x_client.validate_x_handle(target_handle)
+        except ValueError as exc:
             return {
                 "status": "failed",
-                "error": "auto_pull requires a non-empty target_handle",
+                "error": f"auto_pull requires a valid X handle: {exc}",
             }
 
         # Endpoint 1 — bio + follower count.

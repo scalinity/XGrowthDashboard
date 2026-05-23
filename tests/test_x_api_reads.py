@@ -524,6 +524,35 @@ def test_x_client_parse_retry_after_from_body():
     assert 80 < ra < 100
 
 
+def test_rv2_8_validate_x_handle_rejects_path_injection_attempts() -> None:
+    """RV2-8: handle validation refuses anything that could escape the
+    intended endpoint when interpolated into a xurl URL path."""
+    import pytest
+    bad_handles = [
+        "foo/../tweets?max_results=1000",  # path traversal
+        "foo?expansions=author_id",         # query injection
+        "foo&user.fields=email",            # ampersand injection
+        "foo%2Ftweets",                      # url-encoded slash
+        "foo bar",                            # whitespace
+        "foo.bar",                            # dot
+        "this-handle-is-way-too-long-to-be-valid",  # > 15 chars
+        "",                                   # empty
+        "  ",                                 # whitespace-only
+    ]
+    for handle in bad_handles:
+        with pytest.raises(ValueError):
+            x_client.validate_x_handle(handle)
+
+
+def test_rv2_8_validate_x_handle_accepts_normal_shapes() -> None:
+    """RV2-8: real X handle shapes pass through cleanly, '@' stripped."""
+    assert x_client.validate_x_handle("dannyscalant") == "dannyscalant"
+    assert x_client.validate_x_handle("@dannyscalant") == "dannyscalant"
+    assert x_client.validate_x_handle("  @user_15  ") == "user_15"
+    assert x_client.validate_x_handle("X") == "X"  # 1 char is min
+    assert x_client.validate_x_handle("a" * 15) == "a" * 15  # 15 is max
+
+
 def test_x_client_log_raw_inserts_audit_row(
     db_conn: sqlite3.Connection,
 ) -> None:

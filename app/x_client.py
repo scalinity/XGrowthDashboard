@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -67,6 +68,36 @@ _DEFAULT_TIMEOUT_SECONDS: float = 30.0
 _DEFAULT_XURL_BIN: str = "xurl"
 
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE"]
+
+
+# RV2-8: X handles are limited to [A-Za-z0-9_]{1,15}. Validate at the
+# tool boundary so an agent-supplied or hallucinated handle (e.g.
+# "foo/../tweets?max_results=1000" or "foo?expansions=author_id") can't
+# escape the intended endpoint path when interpolated into a xurl URL.
+# CWE-20 / CWE-88.
+_X_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+
+def validate_x_handle(handle: str) -> str:
+    """Return the normalized handle (no @, stripped) or raise ValueError.
+
+    Rules per X's handle spec:
+    - 1–15 characters
+    - Only A-Z, a-z, 0-9, _
+    - Leading '@' is stripped (Daniel often pastes with the @)
+    - Whitespace is stripped
+
+    Rejects anything with '/', '?', '&', '..', '%', spaces, or path
+    separators so the handle is safe to interpolate into a URL path
+    component.
+    """
+    clean = (handle or "").lstrip("@").strip()
+    if not _X_HANDLE_RE.match(clean):
+        raise ValueError(
+            f"invalid X handle: {handle!r} "
+            f"(expected ^[A-Za-z0-9_]{{1,15}}$ after @-stripping)"
+        )
+    return clean
 
 
 class XApiError(Exception):

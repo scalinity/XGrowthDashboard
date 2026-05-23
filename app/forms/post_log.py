@@ -205,6 +205,31 @@ def add_post_id(
             field_errors={"post_id": "Update affected zero rows."},
         )
 
+    # P8R-8: backfill publish_confirmation_tokens.consumed_by_x_post_id
+    # for the most-recently-consumed token attached to this post (if any).
+    # The API branch in app/agent/publish.py populates this column at
+    # publish-success time; the manual-clipboard flow used to leave it
+    # NULL forever, breaking analytics that join from a consumed token
+    # to its resulting X post. Idempotent: only updates rows whose
+    # column is currently NULL (manual reconcile via Mark posted runs
+    # at most once per post). NULL-tolerant: posts logged outside the
+    # agent flow (no confirmation token at all) silently no-op.
+    conn.execute(
+        """
+        UPDATE publish_confirmation_tokens
+           SET consumed_by_x_post_id = ?
+         WHERE id = (
+             SELECT id FROM publish_confirmation_tokens
+              WHERE post_id = ?
+                AND consumed_at_utc IS NOT NULL
+                AND consumed_by_x_post_id IS NULL
+              ORDER BY consumed_at_utc DESC
+              LIMIT 1
+         )
+        """,
+        (x_post_id, post_id),
+    )
+
 
 def render(conn: sqlite3.Connection, *, key_prefix: str = "post_log") -> None:
     """Streamlit fragment: post/reply logging."""
