@@ -54,6 +54,7 @@ def _init_session_state() -> None:
         "editor_export_error": None,
         "editor_export_success": None,
         "editor_export_warning": None,
+        "editor_auto_open_export": False,
         "editor_repurpose_error": None,
         "editor_repurpose_result": None,
         "editor_repurpose_blocked": None,
@@ -685,7 +686,14 @@ def main() -> None:
         )
 
         with action_cols[2]:
-            with st.expander("export ▾", expanded=False):
+            # P6R-16: if Daniel clicked the per-row Export button on the
+            # Blogs index, auto-open the expander on arrival. One-shot
+            # flag — consume it so the expander goes back to closed-by-
+            # default on the next render.
+            auto_open = bool(st.session_state.get("editor_auto_open_export"))
+            if auto_open:
+                st.session_state["editor_auto_open_export"] = False
+            with st.expander("export ▾", expanded=auto_open):
                 _render_export_dialog(blog_id)
 
         with action_cols[3]:

@@ -205,6 +205,15 @@ def _open_blog_cb(*, blog_id: int) -> None:
     _navigate_to_editor(blog_id)
 
 
+def _open_blog_with_export_intent_cb(*, blog_id: int) -> None:
+    """P6R-16: the per-row Export button on the index navigates to the
+    editor AND sets a session-state flag the editor reads to auto-open
+    the export expander on arrival. Pre-fix this button just opened
+    the editor; the label was a lie."""
+    st.session_state["editor_auto_open_export"] = True
+    _navigate_to_editor(blog_id)
+
+
 # ---------------------------------------------------------------------------
 # Main render.
 # ---------------------------------------------------------------------------
@@ -381,7 +390,7 @@ def main() -> None:
                 action_cols[1].button(
                     "export",
                     key=f"export_quick_{r['blog_id']}",
-                    on_click=_open_blog_cb,
+                    on_click=_open_blog_with_export_intent_cb,
                     kwargs={"blog_id": int(r["blog_id"])},
                 )
 
