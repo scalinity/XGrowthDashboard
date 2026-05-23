@@ -610,6 +610,13 @@ def _save_blog_in_tx(
         )
 
     next_version_number = _max_version_number(conn, blog_id) + 1
+    # P6R-22: agent_assisted is STICKY — once an agent draft/outline/edit
+    # touches the blog, the flag stays 1 even if Daniel rewrites every
+    # subsequent version manually. This is intentional disclosure: a
+    # reader of the exported blog should know any version of it was
+    # ever AI-touched, not just the current one. Recomputing "is any
+    # current version still agent-touched?" would let the disclosure
+    # disappear with a single manual save, which defeats the point.
     agent_assisted_new = (
         1 if (blog_row["agent_assisted"] or created_by == "agent") else 0
     )
