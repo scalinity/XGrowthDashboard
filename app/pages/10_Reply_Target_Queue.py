@@ -532,19 +532,18 @@ for row in rows:
                 lint_rationale = str(_classif.get("rationale") or "")
             except (_json.JSONDecodeError, TypeError, ValueError):
                 lint_rationale = ""
-        # Phase 10 / §29.7 — tighter badge format: "Lint: <category>"
-        # instead of "Lint blocked — <category>". The category itself
-        # is the failure mode (ragebait / hijacking_required / etc.)
-        # so Daniel sees the *reason* immediately rather than the
-        # state ("blocked") + reason. Force-draft override flow is
-        # unchanged.
+        # Phase 10 / §29.7 — badge format includes both the block state
+        # AND the specific failure mode. S7 restored the "blocked"
+        # token after /review-2 flagged that screen-reader / muted-
+        # theme users lose the explicit block indicator when only
+        # color conveys state. Format: "Lint blocked: <category>".
         _badge_category = lint_category or "unknown"
         st.markdown(
             f"<div style='border-left:3px solid {PALETTE['flag_amber']};"
             f"padding:0.55rem 0.85rem;margin:0.4rem 0 0.5rem 0;"
             f"background:{PALETTE.get('bg_soft', '#1b1a18')};color:{PALETTE['text']};"
             f"font-family:\"IBM Plex Sans\", sans-serif;'>"
-            f"<strong style='color:{PALETTE['flag_amber']};'>Lint: {_badge_category}</strong><br>"
+            f"<strong style='color:{PALETTE['flag_amber']};'>Lint blocked: {_badge_category}</strong><br>"
             f"<span style='color:{PALETTE.get('text_muted', PALETTE['text'])};'>{lint_rationale or '(no rationale recorded)'}</span>"
             f"</div>",
             unsafe_allow_html=True,
@@ -562,7 +561,7 @@ for row in rows:
                 key=f"rtq_draft_{rt_id}",
                 width="stretch",
                 disabled=True,
-                help=f"Lint: {lint_category}. Use Force-draft to override.",
+                help=f"Lint blocked: {lint_category}. Use Force-draft to override.",
             )
             force_key = f"rtq_force_draft_open_{rt_id}"
             if st.button(
