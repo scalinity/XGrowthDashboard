@@ -846,3 +846,17 @@ def thread_classifier_lint(
             model_used="offline-fallback",
             api_call_failed=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# RV2-27: public re-exports of the offline pattern catalogues.
+# ---------------------------------------------------------------------------
+# Tests + ops tooling can address these directly without touching private
+# names. If a future false positive needs a targeted regression test, the
+# entry → label mapping is here. Same tuple objects as the private
+# definitions above — no duplication; just a public alias.
+ENGAGEMENT_BAIT_PATTERNS = _ENGAGEMENT_BAIT_PATTERNS
+REPLY_QUALITY_PATTERNS = _REPLY_QUALITY_PATTERNS
+RAGEBAIT_PATTERNS = _RAGEBAIT_PATTERNS
+MEME_PATTERNS = _MEME_PATTERNS
+LOW_QUALITY_THREAD_PATTERNS = _LOW_QUALITY_THREAD_PATTERNS
