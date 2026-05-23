@@ -2216,24 +2216,19 @@ if st.button(
     try:
         with st.spinner("Running Grok sweep (this may take 30–60 seconds)…"):
             try:
+                # P9R-49: the sweep call + summary formatting are both
+                # in app/jobs/grok_discovery_sweep.py so they're
+                # unit-testable without a Streamlit AppTest.
                 from app.jobs.grok_discovery_sweep import (  # noqa: E402
+                    format_sweep_summary_for_ui as _format_sweep_summary,
                     run as _run_grok_sweep,
                 )
                 _sweep_summary = _run_grok_sweep(conn)
-                if _sweep_summary.get("error"):
-                    st.warning(
-                        f"sweep finished with note: {_sweep_summary['error']} "
-                        f"(discovered={_sweep_summary.get('candidates_discovered', 0)}, "
-                        f"inserted={_sweep_summary.get('candidates_inserted', 0)})"
-                    )
+                _severity, _message = _format_sweep_summary(_sweep_summary)
+                if _severity == "warning":
+                    st.warning(_message)
                 else:
-                    st.success(
-                        f"sweep OK · queries_run={_sweep_summary.get('queries_run', 0)} · "
-                        f"discovered={_sweep_summary.get('candidates_discovered', 0)} · "
-                        f"verified={_sweep_summary.get('candidates_verified', 0)} · "
-                        f"inserted={_sweep_summary.get('candidates_inserted', 0)} · "
-                        f"rejected_404={_sweep_summary.get('candidates_rejected_404', 0)}"
-                    )
+                    st.success(_message)
             except Exception as _sweep_err:
                 # Surface the exception class explicitly so Daniel can
                 # disambiguate ceiling vs rate-limit vs network from the toast.

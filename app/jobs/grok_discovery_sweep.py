@@ -168,6 +168,103 @@ def _read_settings(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _extract_public_metrics(tweet: dict[str, Any]) -> dict[str, Any]:
+    """Pull the X API public_metrics + non_public_metrics into a flat dict.
+
+    P9R-48 split helper. Returns a dict shaped for the reply_targets
+    INSERT — like_count / reply_count / repost_count / quote_count /
+    bookmark_count / impression_count. NULLable for the two
+    non_public columns since X API only returns them for tweets the
+    authenticated user owns.
+    """
+    public = tweet.get("public_metrics") or {}
+    return {
+        "like_count": int(public.get("like_count") or 0),
+        "reply_count": int(public.get("reply_count") or 0),
+        "repost_count": int(public.get("retweet_count") or 0),
+        "quote_count": int(public.get("quote_count") or 0),
+        "bookmark_count": public.get("bookmark_count"),
+        "impression_count": public.get("impression_count"),
+    }
+
+
+def _extract_author_fields(
+    author: dict[str, Any] | None,
+) -> tuple[int | None, str | None]:
+    """Pull (follower_count, canonical_handle) from the includes.users entry.
+
+    P9R-48 split helper. P9R-3 + P9R-38: live follower_count and the
+    current username, both straight from the X API expansion. Returns
+    (None, None) when X API omitted the expansion — the sweep falls
+    back to §29.4 absolute floors + the URL-derived handle.
+    """
+    if not author or not isinstance(author, dict):
+        return (None, None)
+    follower_count: int | None = None
+    canonical_handle: str | None = None
+    metrics = author.get("public_metrics") or {}
+    if isinstance(metrics, dict):
+        fc = metrics.get("followers_count")
+        if isinstance(fc, int):
+            follower_count = fc
+    u = author.get("username")
+    if isinstance(u, str) and u.strip():
+        canonical_handle = u.strip()
+    return (follower_count, canonical_handle)
+
+
+def _compute_age_minutes(created_at: str | None) -> int | None:
+    """Convert an X API created_at string into minutes-since-now or None.
+
+    P9R-48 split helper. parse_x_api_datetime tolerates both the
+    Phase-7 ISO-T shape and the legacy fixed-width SQLite shape.
+    """
+    if not created_at:
+        return None
+    created_dt = parse_x_api_datetime(created_at)
+    if created_dt is None:
+        return None
+    return int(
+        (datetime.now(timezone.utc) - created_dt).total_seconds() / 60.0
+    )
+
+
+def _build_score_block(
+    tweet: dict[str, Any],
+    *,
+    follower_count: int | None,
+    canonical_handle: str | None,
+    settings_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Run §29.3/§29.4 scoring against extracted X API metrics.
+
+    P9R-48 split helper. All three scoring dimensions (engagement
+    surface, saturation, timing) are derived; relevance_score +
+    reply_opportunity_score stay NULL until Daniel reviews the
+    candidate per §29.12 'Daniel-judged dimensions stay NULL'.
+    """
+    metrics = _extract_public_metrics(tweet)
+    medium_th, high_th = engagement_surface_thresholds(
+        follower_count, settings_dict
+    )
+    metrics["engagement_surface_score"] = engagement_surface_score(
+        metrics["like_count"], medium_th, high_th
+    )
+    metrics["saturation_score"] = saturation_score(metrics["reply_count"])
+    age_minutes = _compute_age_minutes(tweet.get("created_at"))
+    # P9R-16: feed real follower count into timing_score.
+    metrics["timing_score"] = (
+        timing_score(age_minutes, follower_count)
+        if age_minutes is not None else None
+    )
+    metrics["post_age_minutes"] = age_minutes
+    metrics["target_text"] = tweet.get("text")
+    metrics["target_created_at_utc"] = tweet.get("created_at")
+    metrics["target_author_follower_count"] = follower_count
+    metrics["target_author_handle"] = canonical_handle
+    return metrics
+
+
 def _verify_and_score(
     conn: sqlite3.Connection,
     *,
@@ -175,6 +272,10 @@ def _verify_and_score(
     settings_dict: dict[str, Any],
 ) -> tuple[GrokVerificationResult, dict[str, Any] | None]:
     """Verify a Grok candidate against X API and pre-compute the score block.
+
+    P9R-48: orchestrates four small pure helpers (verify → extract
+    metrics → extract author → score). Each step is independently
+    testable; this function just routes the data through.
 
     Returns ``(verification_result, score_block_or_None)``. On 404 or
     any other non-200 outcome the score block is None and the caller
@@ -186,72 +287,13 @@ def _verify_and_score(
     )
     if not result.verified or result.tweet is None:
         return (result, None)
-
-    public = result.tweet.get("public_metrics") or {}
-    like_count = int(public.get("like_count") or 0)
-    reply_count = int(public.get("reply_count") or 0)
-    repost_count = int(public.get("retweet_count") or 0)
-    quote_count = int(public.get("quote_count") or 0)
-    bookmark_count = public.get("bookmark_count")
-    impression_count = public.get("impression_count")
-
-    # P9R-3: pull follower count from the includes.users expansion the
-    # verify call requests. NULL falls back to the §29.4 absolute
-    # floors — same conservative behavior as a Phase-5.6 manual paste
-    # whose author follower_count is unknown — only on X API responses
-    # that omit the expansion (no test cassette currently does so).
-    follower_count: int | None = None
-    canonical_handle: str | None = None
-    if result.author and isinstance(result.author, dict):
-        author_metrics = result.author.get("public_metrics") or {}
-        if isinstance(author_metrics, dict):
-            fc = author_metrics.get("followers_count")
-            if isinstance(fc, int):
-                follower_count = fc
-        # P9R-38: prefer the canonical handle from the X API over the
-        # one parsed from the Grok citation URL (handles change).
-        u = result.author.get("username")
-        if isinstance(u, str) and u.strip():
-            canonical_handle = u.strip()
-
-    medium_th, high_th = engagement_surface_thresholds(
-        follower_count, settings_dict
+    follower_count, canonical_handle = _extract_author_fields(result.author)
+    score_block = _build_score_block(
+        result.tweet,
+        follower_count=follower_count,
+        canonical_handle=canonical_handle,
+        settings_dict=settings_dict,
     )
-    eng = engagement_surface_score(like_count, medium_th, high_th)
-    sat = saturation_score(reply_count)
-
-    # Timing requires post age — derive from created_at if present.
-    age_minutes: int | None = None
-    created_at = result.tweet.get("created_at")
-    if created_at:
-        created_dt = parse_x_api_datetime(created_at)
-        if created_dt is not None:
-            age_minutes = int(
-                (datetime.now(timezone.utc) - created_dt).total_seconds() / 60.0
-            )
-    tim: int | None = None
-    if age_minutes is not None:
-        # P9R-16: feed the real follower count into timing_score too.
-        # None still falls back to the small-niche window (correct
-        # behavior when follower count truly is unknown).
-        tim = timing_score(age_minutes, follower_count)
-
-    score_block = {
-        "like_count": like_count,
-        "reply_count": reply_count,
-        "repost_count": repost_count,
-        "quote_count": quote_count,
-        "bookmark_count": bookmark_count,
-        "impression_count": impression_count,
-        "engagement_surface_score": eng,
-        "saturation_score": sat,
-        "timing_score": tim,
-        "post_age_minutes": age_minutes,
-        "target_text": result.tweet.get("text"),
-        "target_created_at_utc": created_at,
-        "target_author_follower_count": follower_count,  # P9R-3
-        "target_author_handle": canonical_handle,  # P9R-38 — None = keep URL-derived
-    }
     return (result, score_block)
 
 
@@ -645,6 +687,35 @@ def _log_verification_rejection(
         rate_snapshot=None,
         rejection_reason=rejection_reason,
         duration_ms=0,
+    )
+
+
+def format_sweep_summary_for_ui(summary: dict[str, Any]) -> tuple[str, str]:
+    """Format a sweep summary for the Settings 'Run sweep now' toast.
+
+    P9R-49: extracted from the Streamlit button's inline body so a
+    unit test can pin the formatting without driving a Streamlit
+    AppTest. Returns ``(severity, message)`` where severity is
+    ``'success'`` / ``'warning'`` / ``'error'`` and message is the
+    one-line summary Daniel sees.
+
+    The Settings page renders this via st.success / st.warning /
+    st.error based on the severity.
+    """
+    if summary.get("error"):
+        return (
+            "warning",
+            f"sweep finished with note: {summary['error']} "
+            f"(discovered={summary.get('candidates_discovered', 0)}, "
+            f"inserted={summary.get('candidates_inserted', 0)})",
+        )
+    return (
+        "success",
+        f"sweep OK · queries_run={summary.get('queries_run', 0)} · "
+        f"discovered={summary.get('candidates_discovered', 0)} · "
+        f"verified={summary.get('candidates_verified', 0)} · "
+        f"inserted={summary.get('candidates_inserted', 0)} · "
+        f"rejected_404={summary.get('candidates_rejected_404', 0)}",
     )
 
 

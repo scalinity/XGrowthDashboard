@@ -756,3 +756,73 @@ def test_render_grok_badge_html_returns_empty_for_other_provenance() -> None:
     for value in ("manual", "agent_score", "next_rep_seed", "v1.1_api_search",
                   None, "", "GROK_SEMANTIC"):
         assert render_grok_badge_html(value) == ""
+
+
+# ---------------------------------------------------------------------------
+# P9R-49: Settings "Run sweep now" summary formatter contract.
+# ---------------------------------------------------------------------------
+def test_format_sweep_summary_for_ui_success_path() -> None:
+    severity, message = grok_discovery_sweep.format_sweep_summary_for_ui({
+        "queries_run": 3,
+        "candidates_discovered": 12,
+        "candidates_verified": 10,
+        "candidates_inserted": 8,
+        "candidates_rejected_404": 2,
+        "error": None,
+    })
+    assert severity == "success"
+    assert "queries_run=3" in message
+    assert "inserted=8" in message
+    assert "rejected_404=2" in message
+
+
+def test_format_sweep_summary_for_ui_warning_path_on_error() -> None:
+    severity, message = grok_discovery_sweep.format_sweep_summary_for_ui({
+        "queries_run": 1,
+        "candidates_discovered": 5,
+        "candidates_inserted": 0,
+        "error": "wall-clock budget 240.0s exhausted after 1 queries",
+    })
+    assert severity == "warning"
+    assert "wall-clock" in message
+    assert "discovered=5" in message
+
+
+# ---------------------------------------------------------------------------
+# P9R-48: split-helper contracts.
+# ---------------------------------------------------------------------------
+def test_extract_public_metrics_extracts_known_fields() -> None:
+    tweet = {
+        "public_metrics": {
+            "like_count": 7, "reply_count": 2, "retweet_count": 1,
+            "quote_count": 0, "bookmark_count": 4, "impression_count": 100,
+        },
+    }
+    out = grok_discovery_sweep._extract_public_metrics(tweet)
+    assert out["like_count"] == 7
+    assert out["repost_count"] == 1  # retweet_count → repost_count rename
+    assert out["bookmark_count"] == 4
+    assert out["impression_count"] == 100
+
+
+def test_extract_author_fields_falls_back_when_expansion_missing() -> None:
+    fc, handle = grok_discovery_sweep._extract_author_fields(None)
+    assert fc is None and handle is None
+    fc, handle = grok_discovery_sweep._extract_author_fields({"public_metrics": {}})
+    assert fc is None and handle is None
+
+
+def test_extract_author_fields_pulls_followers_and_username() -> None:
+    fc, handle = grok_discovery_sweep._extract_author_fields({
+        "id": "1",
+        "username": "danielcoder",
+        "public_metrics": {"followers_count": 2500},
+    })
+    assert fc == 2500
+    assert handle == "danielcoder"
+
+
+def test_compute_age_minutes_handles_missing_and_invalid() -> None:
+    assert grok_discovery_sweep._compute_age_minutes(None) is None
+    assert grok_discovery_sweep._compute_age_minutes("") is None
+    # Validity isn't asserted here — parse_x_api_datetime decides.
