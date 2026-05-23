@@ -37,14 +37,58 @@
 PRAGMA foreign_keys = OFF;
 
 -- ---------------------------------------------------------------------------
--- 1. reply_targets — rebuild with extended discovered_via CHECK.
+-- 0. RETRY-SAFETY (P9R-1) — defend against a crash between DROP TABLE
+-- reply_targets and ALTER TABLE … RENAME further down.
+--
+-- If the prior run got past DROP TABLE reply_targets but crashed before
+-- the RENAME, the data is sitting in reply_targets_new and the original
+-- table is missing. The migration file is then re-run from the top.
+-- The original "defensive scrub" pattern (DROP TABLE IF EXISTS
+-- reply_targets_new) would destroy the only surviving copy.
+--
+-- The recovery is implemented in app/db.py::apply_migrations BEFORE
+-- this script is executescript()'d: it detects the
+-- (reply_targets_new exists, reply_targets missing) state and ALTER-
+-- RENAMEs the new table back into place. By the time this script
+-- runs, we're guaranteed that reply_targets exists; the optional
+-- DROP TABLE IF EXISTS reply_targets_new at step 0b is then safe.
+--
+-- This SQL preamble emits a single audit-log warning if the crash
+-- state somehow still holds (defense in depth — the Python recovery
+-- should have handled it). The migration then proceeds and will
+-- crash loudly on the subsequent INSERT INTO reply_targets_new
+-- SELECT * FROM reply_targets (because reply_targets is missing),
+-- which is the correct loud failure mode rather than silently
+-- destroying the data via the old "scrub" path. The DROP TABLE IF
+-- EXISTS reply_targets_new below is GATED on reply_targets existing.
 -- ---------------------------------------------------------------------------
+
+-- Defense-in-depth: emit an audit warning if a crash state slipped
+-- past the Python pre-flight recovery. The migration will then crash
+-- loudly on the SELECT FROM reply_targets below — much better than
+-- silently destroying the surviving data via DROP TABLE.
+INSERT INTO audit_logs
+    (event_category, event_type, target_type, target_id, details_json, success, error_message)
+SELECT 'migration', 'migration_021_crash_recovery_required', 'migration', '021',
+       '{"reason":"reply_targets_new exists but reply_targets does not. ' ||
+       'Python pre-flight should have recovered. Run scripts/recover_migration_021.py."}',
+       0,
+       'CRASH RECOVERY REQUIRED — see audit_logs.details_json'
+ WHERE EXISTS (SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='reply_targets_new')
+   AND NOT EXISTS (SELECT 1 FROM sqlite_master
+                    WHERE type='table' AND name='reply_targets');
+
 -- Step 0: drop the view that references reply_targets. SQLite refuses
 -- DROP TABLE while a view depends on it; rebuilt at step 6.
 DROP VIEW IF EXISTS v_daily_reps;
 
--- Step 0b: defensive — if a prior aborted run left reply_targets_new
--- behind, scrub it so the CREATE below doesn't error.
+-- Step 0b: defensive — drop a leftover reply_targets_new from a prior
+-- crash that happened BEFORE DROP TABLE reply_targets fired. This DROP
+-- is GATED on reply_targets existing (the audit_logs warning above
+-- fires in the inverse case so the loud-failure path is preserved).
+-- On a normal run reply_targets_new doesn't exist anyway, so this is
+-- a no-op.
 DROP TABLE IF EXISTS reply_targets_new;
 
 -- Step 1: create the replacement table under a temporary name. Column

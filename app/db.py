@@ -125,6 +125,78 @@ def _iter_migration_files(migrations_dir: Path) -> Iterable[Path]:
     return sorted(p for p in migrations_dir.glob("*.sql") if p.is_file())
 
 
+def _recover_half_rebuilt_tables(conn: sqlite3.Connection) -> list[str]:
+    """P9R-1 retry-safety: complete any half-finished ALTER-TABLE rebuilds.
+
+    Migrations that extend a CHECK constraint use the SQLite 12-step
+    drop-and-recreate recipe: CREATE <table>_new → INSERT SELECT →
+    DROP <table> → ALTER RENAME. If the process is interrupted between
+    DROP and ALTER, the original table is missing and the data sits in
+    <table>_new. On the next ``apply_migrations`` call the migration
+    file would re-run from the top; its defensive
+    ``DROP TABLE IF EXISTS <table>_new`` would then destroy the only
+    surviving copy.
+
+    This helper runs BEFORE any migration is executescript()'d. For each
+    known half-rebuild state it detects, it completes the prior run by
+    ALTER-RENAMing ``<table>_new`` back into place, then logs the
+    recovery to ``audit_logs``. The subsequent migration replays its
+    full rebuild against the (now-restored) original table; idempotent
+    CHECK constraints + IF NOT EXISTS guards make the redo a no-op or
+    a clean re-rebuild.
+
+    Returns the list of recovered table names (empty when nothing to do).
+    """
+    known_rebuilds = ("reply_targets",)
+    recovered: list[str] = []
+    for table in known_rebuilds:
+        new_name = f"{table}_new"
+        row_new = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (new_name,),
+        ).fetchone()
+        row_orig = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if row_new is not None and row_orig is None:
+            # Crash state. Recover by completing the rename. FKs must be
+            # OFF for the ALTER to succeed cleanly without re-validating
+            # incoming references; we restore the prior PRAGMA value.
+            prior_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+            try:
+                conn.execute("PRAGMA foreign_keys = OFF")
+                conn.execute(f"ALTER TABLE {new_name} RENAME TO {table}")
+            finally:
+                conn.execute(f"PRAGMA foreign_keys = {prior_fk}")
+            recovered.append(table)
+            # Audit row — best-effort; audit_logs may not yet exist on a
+            # pre-migration-015 DB. Don't let a missing table block recovery.
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO audit_logs
+                        (event_category, event_type, target_type, target_id,
+                         details_json, success, error_message)
+                    VALUES ('migration',
+                            'migration_crash_recovery_completed',
+                            'migration',
+                            ?,
+                            ?,
+                            1,
+                            NULL)
+                    """,
+                    (
+                        table,
+                        '{"table":"' + table + '","action":"renamed_'
+                        + new_name + '_to_' + table + '"}',
+                    ),
+                )
+            except sqlite3.OperationalError:
+                pass
+    return recovered
+
+
 def apply_migrations(
     conn: sqlite3.Connection,
     migrations_dir: Path | None = None,
@@ -134,9 +206,16 @@ def apply_migrations(
     Records applied filenames in ``schema_migrations``. Returns the list of
     filenames newly applied during this call (empty if everything was already
     applied).
+
+    P9R-1 retry-safety: before applying any migration, ``_recover_half_
+    rebuilt_tables`` detects and completes any prior crash mid-rebuild
+    (CHECK-constraint extension via DROP/CREATE/RENAME), preventing the
+    re-run's defensive ``DROP TABLE IF EXISTS …_new`` from destroying the
+    only surviving copy of the data.
     """
     directory = Path(migrations_dir) if migrations_dir is not None else MIGRATIONS_DIR
     _ensure_schema_migrations_table(conn)
+    _recover_half_rebuilt_tables(conn)
     already_applied = {
         row[0]
         for row in conn.execute("SELECT filename FROM schema_migrations").fetchall()
@@ -150,7 +229,8 @@ def apply_migrations(
         # wrapping in BEGIN/COMMIT here is incompatible. Migrations rely on
         # CREATE TABLE/VIEW IF NOT EXISTS for partial-failure recovery: if a
         # script aborts mid-stream, the schema_migrations row is NOT inserted
-        # and the next run re-applies the file idempotently.
+        # and the next run re-applies the file idempotently. P9R-1 adds a
+        # pre-flight recovery for known DROP/RENAME crash states.
         conn.executescript(sql)
         conn.execute(
             "INSERT INTO schema_migrations (filename) VALUES (?)", (path.name,)
