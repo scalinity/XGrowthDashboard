@@ -960,6 +960,28 @@ st.caption(
     "hedging_that_erases); OFF short-circuits to pass."
 )
 
+# Phase 10 S13 — explicit on_change callback per CLAUDE.md's Streamlit
+# side-effects discipline. The prior script-body conditional
+# `if _new != _current: ... st.rerun()` pattern fires on every rerun
+# cycle which is exactly the anti-pattern CLAUDE.md flags. on_change
+# isolates the side effect to the user's actual click event.
+def _save_reply_discipline_toggle(toggle_key: str) -> None:
+    """Persist a Reply discipline toggle on user click.
+
+    Reads the new value from st.session_state[f"{toggle_key}_toggle"]
+    (set by Streamlit BEFORE the on_change callback fires), writes to
+    settings, and toasts the result. No st.rerun() — Streamlit handles
+    the rerun automatically after on_change returns.
+    """
+    new_value = bool(st.session_state.get(f"{toggle_key}_toggle"))
+    conn.execute(
+        "UPDATE settings SET value_json = ? WHERE key = ?",
+        ("true" if new_value else "false", toggle_key),
+    )
+    conn.commit()
+    st.toast(f"{toggle_key} = " + ("ON" if new_value else "OFF"))
+
+
 for _toggle_key, _toggle_label, _toggle_help in (
     (
         "reply_intent_required",
@@ -991,20 +1013,14 @@ for _toggle_key, _toggle_label, _toggle_help in (
             _current = bool(json.loads(_row[0]))
         except (TypeError, json.JSONDecodeError):
             _current = True
-    _new = st.toggle(
+    st.toggle(
         _toggle_label,
         value=_current,
         help=_toggle_help,
         key=f"{_toggle_key}_toggle",
+        on_change=_save_reply_discipline_toggle,
+        args=(_toggle_key,),
     )
-    if _new != _current:
-        conn.execute(
-            "UPDATE settings SET value_json = ? WHERE key = ?",
-            ("true" if _new else "false", _toggle_key),
-        )
-        conn.commit()
-        st.toast(f"{_toggle_key} = " + ("ON" if _new else "OFF"))
-        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Niche definition (§28.16, Phase 5.9) — load-bearing identity anchor.
