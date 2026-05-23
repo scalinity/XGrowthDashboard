@@ -72,6 +72,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+import random
+
 from app.agent import cost
 
 _LOG = logging.getLogger(__name__)
@@ -310,6 +312,12 @@ def search(
     }
     url = endpoint or GROK_ENDPOINT
 
+    # P9R-31: clamp negative retry_attempts so the loop body always
+    # runs at least once. Pre-fix, a caller passing retry_attempts=-1
+    # got an immediate fallthrough to "Grok server error after retry
+    # budget exhausted" with no actual server error.
+    retry_attempts = max(0, retry_attempts)
+
     last_server_error: GrokError | None = None
     attempt = 0
     started_total = time.perf_counter()
@@ -355,24 +363,59 @@ def search(
             )
 
         if response_status is not None and 500 <= response_status < 600:
+            # P9R-4: log EVERY 5xx attempt (not just the final one) so
+            # an auditor can reconstruct the retry trail. Non-final
+            # attempts carry a notes field tagging the attempt index.
+            is_final = (attempt + 1) > retry_attempts
+            _log_grok_response(
+                conn,
+                query=query,
+                request_payload=payload,
+                response_status_code=response_status,
+                response_body=response_body,
+                rate_snapshot=None,
+                rejection_reason=_REJECTION_5XX,
+                duration_ms=duration_ms,
+                notes=(
+                    None if is_final
+                    else f"retry attempt {attempt + 1} of {retry_attempts + 1}"
+                ),
+            )
             attempt += 1
             last_server_error = GrokServerError(
                 f"xAI returned {response_status}: {_safe_truncate(response_body, 300)}",
                 status_code=response_status,
             )
             if attempt > retry_attempts:
+                break
+            # P9R-4: re-check the §28.6 combined ceiling between retries.
+            # Earlier 5xx attempts may have spent tokens (xAI prices at
+            # inference, not response serialization); without this gate
+            # the bounded retry can push past the cap.
+            if conn is not None and cost.is_combined_ceiling_breached(
+                conn, projected_call_cost_usd=PROJECTED_CALL_COST_GUESS_USD
+            ):
                 _log_grok_response(
                     conn,
                     query=query,
-                    request_payload=payload,
-                    response_status_code=response_status,
-                    response_body=response_body,
+                    request_payload={"phase": "5xx_retry_ceiling_recheck"},
+                    response_status_code=None,
+                    response_body=None,
                     rate_snapshot=None,
-                    rejection_reason=_REJECTION_5XX,
-                    duration_ms=duration_ms,
+                    rejection_reason=_REJECTION_COST_CEILING,
+                    duration_ms=0,
                 )
-                break
-            time.sleep(_DEFAULT_RETRY_SLEEP_SECONDS)
+                raise GrokCostCeilingError(
+                    "5xx retry refused — §28.6 combined ceiling reached "
+                    "between attempts."
+                )
+            # P9R-53: exponential backoff with jitter. Pre-fix retries
+            # fired at fixed 0.5s spacing — three clients hitting xAI
+            # during a partial outage would thunder in lockstep. Cap at
+            # ~5s so launchd's ExitTimeOut still has headroom.
+            backoff = _DEFAULT_RETRY_SLEEP_SECONDS * (2 ** (attempt - 1))
+            backoff = min(backoff, 5.0) + random.uniform(0, 0.5)
+            time.sleep(backoff)
             continue
 
         if response_status is None or response_status >= 400:

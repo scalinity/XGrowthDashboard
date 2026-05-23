@@ -327,12 +327,13 @@ def test_grok_client_5xx_retries_then_raises_server_error(
         grok_client.search("test query", conn=db_conn, retry_attempts=2)
     # 2 retries → 3 calls total.
     assert call_counter["n"] == 3
-    # Final state logged with rejection_reason='http_error_5xx'.
+    # P9R-4: EVERY 5xx attempt is logged with rejection_reason='http_error_5xx'
+    # so an auditor can reconstruct the retry trail. 3 calls → 3 audit rows.
     rows = db_conn.execute(
         "SELECT COUNT(*) AS n FROM grok_api_responses "
         "WHERE rejection_reason = 'http_error_5xx'"
     ).fetchone()
-    assert rows["n"] == 1
+    assert rows["n"] == 3
 
 
 def test_grok_client_success_logs_audit_row_with_rate_snapshot(
