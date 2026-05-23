@@ -611,6 +611,34 @@ def test_parse_response_recognizes_new_categories() -> None:
         assert result.failure_mode == mode, f"verdict={body!r} → {result.failure_mode}"
 
 
+# Phase 10 W4 — combined-verdict prefix matching. Prior code mis-routed
+# "yes, ragebait — selfishly framed" to selfishly_self_promoting because
+# "selfishly" appeared in the prose. Pin the correct prefix routing.
+@pytest.mark.parametrize(
+    ("body", "expected_mode"),
+    [
+        ("yes, ragebait — selfishly framed to provoke", "ragebait"),
+        ("yes, engagement_bait — also reads like ai-tasting filler", "engagement_bait"),
+        ("yes, manipulative_question — could be selfishly motivated too", "manipulative_question"),
+        ("yes, diving_preamble — sounds forced, but more diving than forced", "diving_preamble"),
+        # The legacy "forced" verdict still routes correctly.
+        ("yes, forced — hollow one-line affirmation", "forced"),
+        # Ensure legacy "self-promoting" verdict still works.
+        ("yes, selfishly self-promoting — closes with self-link", "selfishly_self_promoting"),
+        # AI-tasting verdict still works with hyphen variant.
+        ("yes, AI-tasting — explicit LLM phrasing", "ai_tasting"),
+    ],
+)
+def test_parse_response_prefix_routes_combined_verdicts(
+    body: str, expected_mode: str
+) -> None:
+    result = lint._parse_reply_quality_response(body)
+    assert result.passed is False
+    assert result.failure_mode == expected_mode, (
+        f"verdict={body!r}: expected {expected_mode}, got {result.failure_mode}"
+    )
+
+
 def test_save_draft_reply_persists_failure_mode_when_failed(
     db_conn: sqlite3.Connection,
 ) -> None:

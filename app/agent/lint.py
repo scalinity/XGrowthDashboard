@@ -562,52 +562,61 @@ def _parse_reply_quality_response(
             rationale=body.strip(),
             failure_mode=None,
         )
-    # Iterate the eleven enum values in order of specificity so a
-    # response that mentions multiple categories (rare but possible)
-    # resolves to the most-specific match. The order here matches
-    # REPLY_QUALITY_FAILURE_MODES with the legacy "forced" last so
-    # the broad legacy term doesn't shadow a more-specific Phase 10
-    # category. ai-tasting handled separately because the legacy
-    # response text uses "AI-tasting" (with hyphen).
-    if "ai-tasting" in text or "ai tasting" in text or "ai_tasting" in text:
-        return ReplyQualityResult(
-            passed=False, rationale=body.strip(), failure_mode="ai_tasting"
-        )
-    if (
-        "self-promoting" in text
-        or "selfishly" in text
-        or "selfishly_self_promoting" in text
-    ):
-        return ReplyQualityResult(
-            passed=False,
-            rationale=body.strip(),
-            failure_mode="selfishly_self_promoting",
-        )
-    # Phase 10 — eight new categories. Each scanned by its enum token
-    # (canonical) AND its space-separated variant (which Haiku sometimes
-    # emits when it's quoting the human-readable name).
-    for mode_token, alt_phrases in (
-        ("engagement_bait", ("engagement bait", "engagement-bait")),
-        # NOTE: ragebait must scan BEFORE other tokens that contain "bait"
-        # for prefix-matching robustness.
+    # Phase 10 W4 — verdict-prefix matching. Only consider tokens that
+    # appear immediately after the leading "yes" verdict prefix, NOT
+    # anywhere in the rationale prose. The prior substring-anywhere
+    # behavior misrouted "yes, ragebait — selfishly framed" to
+    # selfishly_self_promoting because "selfishly" appeared as a
+    # comparative remark in the rationale.
+    #
+    # We isolate the verdict region by trimming everything after the
+    # first em-dash / hyphen / colon — the prompt instructs the model
+    # to emit "yes, <category> — <one-line reasoning>". This still
+    # tolerates spaces/punctuation variants the model uses.
+    verdict_region = text
+    for separator in (" — ", " - ", " – ", ": ", "—"):
+        idx = verdict_region.find(separator)
+        if 0 <= idx <= 50:  # category should be in the first ~50 chars
+            verdict_region = verdict_region[:idx]
+            break
+
+    # Recognized verdict tokens, ordered most-specific first so a
+    # response mentioning multiple categories resolves to the most
+    # specific. Legacy "forced" appears LAST so it doesn't shadow
+    # any Phase 10 category (a verdict like "yes, performative_threading"
+    # shouldn't be misrouted to "forced" by a coincidental substring).
+    _VERDICT_TOKENS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("ai_tasting", ("ai-tasting", "ai tasting", "ai_tasting")),
+        ("selfishly_self_promoting", (
+            "selfishly_self_promoting", "selfishly self-promoting",
+            "selfishly self promoting", "selfishly", "self-promoting",
+        )),
+        # Phase 10 — eight new categories.
+        ("engagement_bait", ("engagement_bait", "engagement bait", "engagement-bait")),
+        # NOTE: ragebait scans BEFORE other tokens for prefix robustness.
         ("ragebait", ("ragebait", "rage bait", "rage-bait")),
-        ("manipulative_question", ("manipulative question", "manipulative-question")),
-        ("fake_authority", ("fake authority", "fake-authority")),
-        ("performative_threading", ("performative threading", "performative-threading")),
-        ("diving_preamble", ("diving preamble", "diving-preamble")),
-        ("emoji_as_personality", ("emoji as personality", "emoji-as-personality")),
-        ("hedging_that_erases", ("hedging that erases", "hedging-that-erases")),
-    ):
-        if mode_token in text or any(p in text for p in alt_phrases):
+        ("manipulative_question", (
+            "manipulative_question", "manipulative question", "manipulative-question",
+        )),
+        ("fake_authority", ("fake_authority", "fake authority", "fake-authority")),
+        ("performative_threading", (
+            "performative_threading", "performative threading", "performative-threading",
+        )),
+        ("diving_preamble", ("diving_preamble", "diving preamble", "diving-preamble")),
+        ("emoji_as_personality", (
+            "emoji_as_personality", "emoji as personality", "emoji-as-personality",
+        )),
+        ("hedging_that_erases", (
+            "hedging_that_erases", "hedging that erases", "hedging-that-erases",
+        )),
+        # Legacy "forced" — must come last (most generic word).
+        ("forced", ("forced",)),
+    )
+    for mode_token, variants in _VERDICT_TOKENS:
+        if any(v in verdict_region for v in variants):
             return ReplyQualityResult(
-                passed=False,
-                rationale=body.strip(),
-                failure_mode=mode_token,
+                passed=False, rationale=body.strip(), failure_mode=mode_token
             )
-    if "forced" in text and text.startswith("yes"):
-        return ReplyQualityResult(
-            passed=False, rationale=body.strip(), failure_mode="forced"
-        )
     # Unparseable — route through the offline matcher so the dark-pattern
     # and reply-quality lints have symmetric outage contracts. The
     # caller's reply_text is needed for the offline scan; if not
