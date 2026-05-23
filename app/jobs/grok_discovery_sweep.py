@@ -326,16 +326,26 @@ def run(
         summary["elapsed_seconds"] = round(time.perf_counter() - started, 3)
         return summary
 
+    deferred_queries = 0
     for query in queries:
-        # Wall-clock guard so launchd's ExitTimeOut never gets to SIGKILL
-        # us mid-INSERT. If we're near the limit, write the audit row
-        # for what we did and exit cleanly.
+        # P9R-6 + P9R-12: wall-clock guard so launchd's ExitTimeOut never
+        # gets to SIGKILL us mid-INSERT. If we're near the limit, write
+        # the audit row for what we did and exit cleanly. P9R-12 sets
+        # summary['error'] so main()'s success=… computation truthfully
+        # reflects "we ran out of time" rather than reporting success.
         if (time.perf_counter() - started) > _MAX_SWEEP_SECONDS:
+            deferred_queries = len(queries) - summary["queries_run"]
             _log.warning(
                 "grok_discovery_sweep: wall-clock budget exhausted after "
-                "%d queries; deferring remainder to next sweep",
-                summary["queries_run"],
+                "%d queries; deferring %d to next sweep",
+                summary["queries_run"], deferred_queries,
             )
+            summary["error"] = (
+                f"wall-clock budget {_MAX_SWEEP_SECONDS}s exhausted after "
+                f"{summary['queries_run']} queries; {deferred_queries} "
+                f"deferred to next sweep"
+            )
+            summary["deferred_queries"] = deferred_queries
             break
 
         try:
@@ -397,7 +407,29 @@ def run(
         summary["queries_run"] += 1
         summary["candidates_discovered"] += len(candidates)
 
-        for candidate in candidates:
+        for candidate_idx, candidate in enumerate(candidates):
+            # P9R-6: wall-clock guard inside the per-candidate loop too.
+            # _MAX_SWEEP_SECONDS=240 is only meaningful if checked
+            # between candidates — one query with 50 candidates × 30s
+            # xurl timeout can blow past launchd's 300s ExitTimeOut.
+            # Drop the remainder of this query's candidates and abort
+            # outer loop on the next iteration via the existing guard.
+            if (time.perf_counter() - started) > _MAX_SWEEP_SECONDS:
+                remaining = len(candidates) - candidate_idx
+                summary["candidates_dropped_wall_clock"] += remaining  # P9R-50
+                _log.warning(
+                    "grok_discovery_sweep: wall-clock budget exhausted "
+                    "mid-query; dropping %d candidates for query=%r",
+                    remaining, query[:80],
+                )
+                if summary["error"] is None:
+                    summary["error"] = (
+                        f"wall-clock budget {_MAX_SWEEP_SECONDS}s "
+                        f"exhausted mid-query; {remaining} candidates "
+                        f"deferred to next sweep"
+                    )
+                break
+
             # X-API verification + scoring. Rate-limit / 5xx errors
             # from the X API bubble up and pause the loop the same way
             # the Grok call paths do.
