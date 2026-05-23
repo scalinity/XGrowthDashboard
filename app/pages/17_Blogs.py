@@ -74,11 +74,10 @@ def _create_blog_cb() -> None:
             )
         st.session_state["blogs_create_error"] = None
         st.session_state["blogs_navigate_to_editor"] = blog.id
-        # Reset form.
-        for k in ("blogs_new_title", "blogs_new_pillar",
-                  "blogs_new_audience", "blogs_new_target_length"):
-            if k in st.session_state:
-                del st.session_state[k]
+        # P6R-14: the form below uses clear_on_submit=True, so Streamlit
+        # resets the widgets on submit. The previous `del` loop was
+        # redundant and risked the "deleted key tied to mounted widget"
+        # warning class. Form behavior now handles it cleanly.
     except _blogs.InvalidBlogFieldError as exc:
         st.session_state["blogs_create_error"] = str(exc)
 
@@ -279,7 +278,7 @@ def main() -> None:
     with st.expander("+ new blog", expanded=not all_rows):
         if st.session_state.get("blogs_create_error"):
             st.error(st.session_state["blogs_create_error"])
-        with st.form("blogs_new_form"):
+        with st.form("blogs_new_form", clear_on_submit=True):
             st.text_input("title (required)", key="blogs_new_title")
             cols2 = st.columns(3)
             with cols2[0]:
