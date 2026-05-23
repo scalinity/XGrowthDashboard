@@ -466,9 +466,30 @@ def run(
                 if result.status_code == 404:
                     summary["candidates_rejected_404"] += 1
                     _log_verification_404(conn, candidate=candidate)
+                else:
+                    # P9R-8: non-404 verification failures (body not a
+                    # dict, 2xx with no data object, X-API contract
+                    # drift) were silently dropped pre-fix with no
+                    # audit row and no counter. Track them and log to
+                    # grok_api_responses so the Settings "Recent Grok
+                    # failures" panel surfaces them.
+                    summary["candidates_rejected_other"] += 1
+                    _log_verification_rejection(
+                        conn,
+                        candidate=candidate,
+                        status_code=result.status_code,
+                        error=result.error,
+                    )
                 continue
 
             assert score_block is not None  # contract of _verify_and_score
+
+            # P9R-9: candidates_verified counts "passed §29.2 verification",
+            # NOT "got inserted". The old placement (inside `else: insert
+            # succeeded` branch) under-counted by skipping dedupe-dropped
+            # candidates that DID pass verification. Increment here so
+            # the audit row tells the truth.
+            summary["candidates_verified"] += 1
 
             new_id = _insert_candidate(
                 conn, candidate=candidate, score_block=score_block
@@ -477,7 +498,6 @@ def run(
                 summary["candidates_dedupe_dropped"] += 1
             else:
                 summary["candidates_inserted"] += 1
-                summary["candidates_verified"] += 1
 
     return _finalize_summary(summary, started)
 
@@ -492,13 +512,39 @@ def _log_verification_404(
     *,
     candidate: grok_client.GrokCandidate,
 ) -> None:
+    """§29.2 verification 404 audit row. Thin wrapper around
+    ``_log_verification_rejection`` to preserve the public name the
+    Phase 9 callsites expect."""
+    _log_verification_rejection(
+        conn, candidate=candidate, status_code=404,
+        error="X API /2/tweets/{id} returned 404",
+    )
+
+
+def _log_verification_rejection(
+    conn: sqlite3.Connection,
+    *,
+    candidate: grok_client.GrokCandidate,
+    status_code: int | None,
+    error: str | None,
+) -> None:
     """Write a ``grok_api_responses`` row marking the candidate as rejected.
 
-    Mirrors the ``grok_client._log_grok_response`` shape but anchored to
-    the verification step (not the original Grok call). This row is the
-    machine-readable record that §29.2 verification dropped this
-    candidate — the Settings "Recent Grok failures" panel surfaces it.
+    P9R-42 (DRY): centralizes the §29.2 verification-rejection audit
+    insert. Picks the right ``rejection_reason`` based on status_code —
+    404 → 'verification_404', anything else → 'http_error_other'.
+
+    P9R-37: ``duration_ms`` recorded as NULL (truer than hardcoded 0)
+    since the verification call's elapsed time isn't threaded through
+    to this logger today.
+
+    P9R-11: broaden the catch to ``sqlite3.DatabaseError`` so an
+    IntegrityError on a future CHECK refactor doesn't escape and break
+    the upstream call. Same pattern as ``grok_client._log_grok_response``.
     """
+    rejection_reason = (
+        "verification_404" if status_code == 404 else "http_error_other"
+    )
     try:
         conn.execute(
             """
@@ -518,17 +564,17 @@ def _log_verification_404(
                         "target_author_handle": candidate.target_author_handle,
                     }
                 ),
-                404,
-                json.dumps({"error": "X API /2/tweets/{id} returned 404"}),
+                status_code,
+                json.dumps({"error": error or "verification failed"}),
                 None,
-                "verification_404",
-                0,
+                rejection_reason,
+                None,  # P9R-37: NULL duration_ms instead of 0.
             ),
         )
-    except sqlite3.OperationalError as exc:
+    except sqlite3.DatabaseError as exc:
         _log.warning(
-            "grok_api_responses verification_404 insert failed (suppressed): %s",
-            exc,
+            "grok_api_responses verification-rejection insert failed "
+            "(suppressed): %s", exc,
         )
 
 
