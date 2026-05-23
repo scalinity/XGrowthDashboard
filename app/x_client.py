@@ -862,12 +862,25 @@ def _read_write_retry_attempts(conn: sqlite3.Connection | None) -> int:
 def _count_recent_publishes(
     conn: sqlite3.Connection, *, since: datetime
 ) -> int:
-    """Count ``posts`` rows with ``published_to_x_at >= since``."""
+    """Count ``posts`` rows with ``published_to_x_at >= since``.
+
+    RV2-6 (corroborated by both reviewers): filters by ``x_post_id IS NOT
+    NULL`` so the rate-limit counter only counts publishes that actually
+    landed on X. Two pre-fix overcounts:
+
+    * ``XApiTimeoutError`` sets ``published_to_x_at`` defensively (X may
+      have processed) but no ``x_post_id`` lands → phantom rate-limit slot.
+    * Manual-clipboard flow sets ``published_to_x_at`` at click-time
+      BEFORE Daniel pastes the URL; abandoned clicks held rate-limit slots.
+
+    The combined filter (NOT NULL on both columns) covers both paths.
+    """
     since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
     row = conn.execute(
         """
         SELECT COUNT(*) AS n FROM posts
         WHERE published_to_x_at IS NOT NULL
+          AND x_post_id IS NOT NULL
           AND published_to_x_at >= ?
         """,
         (since_iso,),
@@ -878,12 +891,18 @@ def _count_recent_publishes(
 def _oldest_publish_since(
     conn: sqlite3.Connection, *, since: datetime
 ) -> datetime | None:
-    """Return the oldest ``published_to_x_at`` inside the window, as a UTC datetime."""
+    """Return the oldest ``published_to_x_at`` inside the window, as a UTC datetime.
+
+    RV2-6: same ``x_post_id IS NOT NULL`` filter as ``_count_recent_publishes``
+    so the reset-time hint Daniel sees in the publish modal reflects only
+    publishes that actually landed on X.
+    """
     since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
     row = conn.execute(
         """
         SELECT MIN(published_to_x_at) AS oldest FROM posts
         WHERE published_to_x_at IS NOT NULL
+          AND x_post_id IS NOT NULL
           AND published_to_x_at >= ?
         """,
         (since_iso,),

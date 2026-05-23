@@ -45,6 +45,33 @@ def _make_draft_post(
     return int(cur.lastrowid)
 
 
+def _seed_published_row(
+    conn: sqlite3.Connection,
+    *,
+    text: str,
+    x_post_id: str | None,
+    published_at_utc: str,
+) -> int:
+    """Insert a row with the given (published_to_x_at, x_post_id) shape.
+
+    Used by RV2-6 tests to seed both 'actually landed on X' rows and
+    'timeout/abandoned' rows that should NOT count toward the rate-limit
+    sliding window.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO posts
+            (created_date, text, type, posted_via, manual_confirmation_status,
+             published_to_x_at, x_post_id, publish_method)
+        VALUES (date('now'), ?, 'standalone', 'agent_assisted',
+                CASE WHEN ? IS NULL THEN 'draft' ELSE 'confirmed' END,
+                ?, ?, 'agent_confirmed')
+        """,
+        (text, x_post_id, published_at_utc, x_post_id),
+    )
+    return int(cur.lastrowid)
+
+
 def _make_reply_draft_post(
     conn: sqlite3.Connection,
     text: str = "reply text",
@@ -405,19 +432,23 @@ def test_write_rate_capacity_refuses_at_15min_limit(db_conn):
         _set_setting(db_conn, "x_write_rate_limit_per_15min", "5")
         _set_setting(db_conn, "x_write_rate_limit_per_24h", "100")
 
-        # Seed 5 prior publishes inside the 15-minute window.
+        # Seed 5 prior publishes inside the 15-minute window. Per RV2-6
+        # the counter filters by x_post_id IS NOT NULL so these rows must
+        # carry distinct x_post_ids to count toward the rate-limit window
+        # (timeouts / abandoned manual clicks intentionally do not count).
         for i in range(5):
             db_conn.execute(
                 """
                 INSERT INTO posts
                     (created_date, text, type, posted_via,
-                     manual_confirmation_status, published_to_x_at)
+                     manual_confirmation_status, published_to_x_at, x_post_id)
                 VALUES (date('now'), ?, 'standalone', 'agent_assisted',
-                        'confirmed', ?)
+                        'confirmed', ?, ?)
                 """,
                 (
                     f"prior {i}",
                     initial.strftime("%Y-%m-%d %H:%M:%S"),
+                    f"99000{i}",
                 ),
             )
         db_conn.commit()
@@ -446,13 +477,15 @@ def test_publish_refuses_when_write_rate_exhausted_token_unconsumed(
     with freeze_time(initial):
         _set_setting(db_conn, "x_write_rate_limit_per_15min", "1")
         # Seed 1 prior publish to saturate the 1-per-15-minute limit.
+        # RV2-6: must include x_post_id so the counter sees this as an
+        # actually-landed publish (phantom timeouts no longer count).
         db_conn.execute(
             """
             INSERT INTO posts
                 (created_date, text, type, posted_via,
-                 manual_confirmation_status, published_to_x_at)
+                 manual_confirmation_status, published_to_x_at, x_post_id)
             VALUES (date('now'), 'saturator', 'standalone', 'agent_assisted',
-                    'confirmed', ?)
+                    'confirmed', ?, '888888')
             """,
             (initial.strftime("%Y-%m-%d %H:%M:%S"),),
         )
@@ -513,3 +546,76 @@ def test_migration_019_seeded_defaults_present(db_conn):
     ).fetchone()
     assert audit_row is not None
     assert "publish_via_api_enabled" in audit_row["details_json"]
+
+
+# ---------------------------------------------------------------------------
+# RV2-6: rate-limit counter must filter by x_post_id IS NOT NULL so
+# timeouts (which defensively set published_to_x_at) and abandoned
+# manual-clipboard intents (which set published_to_x_at at click-time)
+# don't consume rate-limit slots.
+# ---------------------------------------------------------------------------
+def test_rv2_6_rate_limit_counter_excludes_timeouts_and_abandoned_clicks(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Counter must filter by x_post_id IS NOT NULL. Pre-RV2-6 it
+    counted every row with published_to_x_at — phantom rate-limit slots
+    from timeouts and abandoned manual clicks."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import x_client
+
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 2 actually-landed rows (real publishes — should count).
+    _seed_published_row(
+        db_conn, text="real publish A", x_post_id="111111", published_at_utc=recent,
+    )
+    _seed_published_row(
+        db_conn, text="real publish B", x_post_id="222222", published_at_utc=recent,
+    )
+    # 1 timeout row (published_to_x_at set defensively, no x_post_id — must NOT count).
+    _seed_published_row(
+        db_conn, text="timeout phantom", x_post_id=None, published_at_utc=recent,
+    )
+    # 1 abandoned manual-clipboard click (same shape — must NOT count).
+    _seed_published_row(
+        db_conn, text="abandoned click", x_post_id=None, published_at_utc=recent,
+    )
+
+    since = now - timedelta(minutes=15)
+    count = x_client._count_recent_publishes(db_conn, since=since)
+    assert count == 2, (
+        f"RV2-6 regression: rate-limit counter saw {count} (should be 2). "
+        "Timeouts + abandoned clicks must not consume rate-limit slots."
+    )
+
+
+def test_rv2_6_oldest_publish_since_excludes_timeouts(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """_oldest_publish_since must apply the same filter so the
+    'rate-limited until {reset_time}' UX reflects only real publishes."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import x_client
+
+    now = datetime.now(timezone.utc)
+    earlier = (now - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    later = (now - timedelta(minutes=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Phantom (no x_post_id) lands earlier — pre-RV2-6 it would dominate MIN().
+    _seed_published_row(
+        db_conn, text="phantom", x_post_id=None, published_at_utc=earlier,
+    )
+    _seed_published_row(
+        db_conn, text="real", x_post_id="999999", published_at_utc=later,
+    )
+
+    since = now - timedelta(minutes=15)
+    oldest = x_client._oldest_publish_since(db_conn, since=since)
+    assert oldest is not None
+    assert oldest.strftime("%Y-%m-%d %H:%M:%S") == later, (
+        "RV2-6 regression: oldest-publish reflected the phantom timeout row "
+        "instead of the actual landed publish."
+    )

@@ -27,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass
+
+from app.db import transaction
 from datetime import datetime, timezone
 
 
@@ -249,8 +251,14 @@ def reconcile_orphans_via_x_api(
             continue
         # Auto-reconcile inside a short transaction per orphan so a
         # later mid-walk failure doesn't roll back already-matched rows.
+        # P8R-3: was `with conn:` which is a no-op on autocommit
+        # connections (app/db.py opens with isolation_level=None). Use
+        # the project's BEGIN-IMMEDIATE wrapper so mark_orphan_posted +
+        # the publish_method UPDATE commit atomically — otherwise a
+        # crash between them leaves x_post_id populated but
+        # publish_method='unknown', a half-reconciled state.
         try:
-            with conn:
+            with transaction(conn):
                 mark_orphan_posted(
                     conn,
                     post_id=orphan.post_id,
