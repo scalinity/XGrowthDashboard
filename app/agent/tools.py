@@ -43,13 +43,21 @@ from app.agent import repetition_guard as _repetition_guard
 from app.agent import replier_pool as _replier_pool
 from app.agent import velocity as _velocity
 from app.agent import voice_profile as _voice_profile
+from app.agent.lint import (
+    is_thread_classifier_lint_enabled,
+    thread_classifier_lint,
+)
 from app.agent.reply_targets import (
     ACTION_TO_SCORE,
     REPLY_INTENT_ENUM,
+    ReplyTargetSnapshot,
+    apply_velocity_timing_modifiers,
     engagement_surface_score,
     engagement_surface_thresholds,
     resolve_recommended_action,
     saturation_score as _saturation_score_helper,
+    timing_score,
+    velocity_score,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -456,14 +464,114 @@ def _compute_and_persist_scores_locked(
     eng = engagement_surface_score(int(row["like_count"] or 0), med, hi)
     sat = _saturation_score_helper(int(row["reply_count"] or 0))
 
+    # ----- §29.10 thread-classifier lint -----
+    # Phase 7: classify the target post's thread quality BEFORE Daniel
+    # starts drafting. Gated by reply_target_lint_enabled (default true).
+    # Distinct from §28.18 reply_quality_lint which fires at draft-save
+    # time on Daniel's reply text. The two lints don't see each other.
+    lint_setting_row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'reply_target_lint_enabled'"
+    ).fetchone()
+    lint_enabled = is_thread_classifier_lint_enabled(
+        lint_setting_row[0] if lint_setting_row else None
+    )
+    niche_row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'niche_problem'"
+    ).fetchone()
+    niche_problem = None
+    if niche_row and niche_row[0]:
+        try:
+            niche_problem = json.loads(niche_row[0])
+        except (TypeError, json.JSONDecodeError):
+            niche_problem = None
+    observed_metrics = {
+        "like_count": row["like_count"],
+        "reply_count": row["reply_count"],
+        "repost_count": row["repost_count"],
+    }
+    lint = thread_classifier_lint(
+        target_post_text=row["target_text"] or "",
+        target_author_handle=row["target_author_handle"] or "",
+        observed_metrics=observed_metrics,
+        niche_problem=niche_problem,
+        enabled=lint_enabled,
+    )
+    lint_blocked = 1 if lint.is_blocking else 0
+    lint_category = lint.primary_category
+    lint_json = lint.to_json()
+
+    # ----- §29.10 signal-only flags reduce reply_opportunity_score by 1 each -----
+    # meme_with_no_serious_reply_path and low_quality_reply_thread are
+    # NOT blocks but they degrade the reply opportunity. Each fires
+    # subtracts 1 from the persisted score, floored at 0. Only applies
+    # when the agent supplied a reply_opportunity_score on this call
+    # (we never mutate Daniel's stored value silently).
+    if reply_opportunity is not None:
+        opp_adjustment = 0
+        if lint.meme_with_no_serious_reply_path:
+            opp_adjustment += 1
+        if lint.low_quality_reply_thread:
+            opp_adjustment += 1
+        if opp_adjustment > 0:
+            reply_opportunity = max(0, int(reply_opportunity) - opp_adjustment)
+
+    # ----- Phase 7 velocity / timing dimensions -----
+    # velocity_score derives from reply_target_snapshots history (NULL
+    # until the metrics-refresh job has produced ≥2 snapshots).
+    # timing_score derives from post_age_minutes + author follower count.
+    snap_rows = conn.execute(
+        """
+        SELECT checked_at_utc, computed_likes_per_hour, computed_replies_per_hour
+          FROM reply_target_snapshots
+         WHERE reply_target_id = ?
+         ORDER BY checked_at_utc DESC
+         LIMIT 5
+        """,
+        (int(reply_target_id),),
+    ).fetchall()
+    snapshots = [
+        ReplyTargetSnapshot(
+            checked_at_utc=str(r["checked_at_utc"]),
+            computed_likes_per_hour=(
+                float(r["computed_likes_per_hour"])
+                if r["computed_likes_per_hour"] is not None
+                else None
+            ),
+            computed_replies_per_hour=(
+                float(r["computed_replies_per_hour"])
+                if r["computed_replies_per_hour"] is not None
+                else None
+            ),
+        )
+        for r in reversed(snap_rows)
+    ]
+    vel = velocity_score(snapshots)
+    tim = timing_score(
+        int(row["post_age_minutes"] or 0),
+        row["target_author_follower_count"],
+    )
+
     # Resolver only runs when all four MVP scores are present. Without
     # relevance + reply_opportunity from the agent, persist what we have
     # and leave recommended_action_* NULL.
     if relevance is not None and reply_opportunity is not None:
-        label = resolve_recommended_action(
+        base_label = resolve_recommended_action(
             int(relevance), eng, sat, int(reply_opportunity)
         )
+        # §29.3 trailing modifiers — apply velocity/timing AFTER the base
+        # ladder. The base resolver's engagement_surface input stays at
+        # `eng`; the modifier may bump the surfaced score up one tier
+        # AND/OR downgrade the action label.
+        adj_eng, label = apply_velocity_timing_modifiers(
+            base_engagement_surface=eng,
+            base_recommended_action=base_label,
+            velocity=vel,
+            timing=tim,
+        )
         action_score = ACTION_TO_SCORE[label]
+        # The persisted engagement_surface_score reflects the bumped tier
+        # so the Queue's ORDER BY ranks accelerating threads correctly.
+        eng = adj_eng
     else:
         label = None
         action_score = None
@@ -475,19 +583,26 @@ def _compute_and_persist_scores_locked(
             engagement_surface_score = ?,
             saturation_score         = ?,
             reply_opportunity_score  = COALESCE(?, reply_opportunity_score),
+            velocity_score           = ?,
+            timing_score             = ?,
             recommended_action_label = ?,
             recommended_action_score = ?,
             score_rationale          = COALESCE(?, score_rationale),
             reply_intent             = COALESCE(?, reply_intent),
             pillar                   = COALESCE(?, pillar),
             audience                 = COALESCE(?, audience),
+            lint_thread_classification_json = ?,
+            lint_category            = ?,
+            lint_blocked             = ?,
             last_checked_at_utc      = datetime('now')
         WHERE id = ?
         """,
         (
             relevance, eng, sat, reply_opportunity,
+            vel, tim,
             label, action_score, rationale,
             reply_intent, pillar, audience,
+            lint_json, lint_category, lint_blocked,
             int(reply_target_id),
         ),
     )
@@ -498,9 +613,14 @@ def _compute_and_persist_scores_locked(
         "engagement_surface_score": eng,
         "saturation_score": sat,
         "reply_opportunity_score": reply_opportunity if reply_opportunity is not None else row["reply_opportunity_score"],
+        "velocity_score": vel,
+        "timing_score": tim,
         "recommended_action_label": label,
         "recommended_action_score": action_score,
         "score_rationale": rationale or row["score_rationale"],
+        "lint_blocked": bool(lint_blocked),
+        "lint_category": lint_category,
+        "lint_rationale": lint.rationale,
     }
 
 

@@ -33,6 +33,7 @@ from app.agent.reply_targets import (
     SKIP_REASON_ENUM,
     engagement_footnote as _engagement_footnote,
 )
+from app.agent import audit_log
 from app.agent.tools import (
     _load_engagement_surface_settings,
     _parse_x_post_id,
@@ -480,16 +481,114 @@ for row in rows:
             unsafe_allow_html=True,
         )
 
+    # ----- §29.10 lint-blocked banner (Phase 7) -----
+    # When lint_blocked=1 (set by tool #6 score_reply_candidates after
+    # the thread-classifier lint fires), the row's "Draft reply" button
+    # is disabled and the lint rationale + category surface as a
+    # warning. Daniel can override via the "Force-draft" affordance.
+    lint_blocked = bool(row["lint_blocked"]) if "lint_blocked" in row.keys() else False
+    lint_category = row["lint_category"] if "lint_category" in row.keys() else None
+    if lint_blocked:
+        lint_classification_raw = (
+            row["lint_thread_classification_json"]
+            if "lint_thread_classification_json" in row.keys() else None
+        )
+        lint_rationale = ""
+        if lint_classification_raw:
+            try:
+                import json as _json
+                _classif = _json.loads(lint_classification_raw)
+                lint_rationale = str(_classif.get("rationale") or "")
+            except (_json.JSONDecodeError, TypeError, ValueError):
+                lint_rationale = ""
+        st.markdown(
+            f"<div style='border-left:3px solid {PALETTE['flag_amber']};"
+            f"padding:0.55rem 0.85rem;margin:0.4rem 0 0.5rem 0;"
+            f"background:{PALETTE.get('bg_soft', '#1b1a18')};color:{PALETTE['text']};"
+            f"font-family:\"IBM Plex Sans\", sans-serif;'>"
+            f"<strong style='color:{PALETTE['flag_amber']};'>Lint blocked — {lint_category or 'unknown'}</strong><br>"
+            f"<span style='color:{PALETTE.get('text_muted', PALETTE['text'])};'>{lint_rationale or '(no rationale recorded)'}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     # Per-row actions.
     a1, a2, a3, a4 = st.columns([1.1, 1.1, 1.1, 1.4])
     with a1:
         st.link_button("Open original", row["target_post_url"], width="stretch")
     with a2:
-        if st.button("Draft reply", key=f"rtq_draft_{rt_id}", width="stretch"):
-            st.session_state.agent_conversation_id = None
-            st.session_state.agent_context_seed = "reply_target_queue_draft"
-            st.session_state.agent_pre_armed_reply_target_id = rt_id
-            st.switch_page("pages/9_Agent_Chat.py")
+        if lint_blocked:
+            # Disabled-state Draft reply + dedicated Force-draft affordance.
+            st.button(
+                "Draft reply",
+                key=f"rtq_draft_{rt_id}",
+                width="stretch",
+                disabled=True,
+                help=f"Lint blocked: {lint_category}. Use Force-draft to override.",
+            )
+            force_key = f"rtq_force_draft_open_{rt_id}"
+            if st.button(
+                "Force-draft (overrides lint)",
+                key=f"rtq_force_btn_{rt_id}",
+                width="stretch",
+            ):
+                st.session_state[force_key] = True
+            if st.session_state.get(force_key):
+                with st.form(f"rtq_force_form_{rt_id}"):
+                    reason = st.text_input(
+                        "Why are you overriding the lint? (required)",
+                        key=f"rtq_force_reason_{rt_id}",
+                        placeholder="Briefly explain the rationale Daniel saw the lint missed",
+                    )
+                    col_x, col_y = st.columns(2)
+                    confirm = col_x.form_submit_button("Override and draft")
+                    cancel = col_y.form_submit_button("Cancel")
+                    if confirm:
+                        clean_reason = (reason or "").strip()
+                        if not clean_reason:
+                            st.error(
+                                "A non-empty reason is required to override the lint."
+                            )
+                        else:
+                            with transaction(conn):
+                                conn.execute(
+                                    """
+                                    UPDATE reply_targets
+                                       SET force_drafted = 1,
+                                           force_drafted_reason = ?
+                                     WHERE id = ?
+                                    """,
+                                    (clean_reason, rt_id),
+                                )
+                                audit_log.log(
+                                    conn,
+                                    event_category="data",
+                                    event_type="lint_force_drafted",
+                                    target_type="reply_target",
+                                    target_id=str(rt_id),
+                                    details={
+                                        "reply_target_id": rt_id,
+                                        "lint_category": lint_category,
+                                        "reason": clean_reason,
+                                    },
+                                    success=True,
+                                )
+                            st.session_state.pop(force_key, None)
+                            st.session_state.agent_conversation_id = None
+                            st.session_state.agent_context_seed = (
+                                "reply_target_queue_draft"
+                            )
+                            st.session_state.agent_pre_armed_reply_target_id = rt_id
+                            st.switch_page("pages/9_Agent_Chat.py")
+                    if cancel:
+                        st.session_state.pop(force_key, None)
+                        st.rerun()
+        else:
+            if st.button("Draft reply", key=f"rtq_draft_{rt_id}", width="stretch"):
+                st.session_state.agent_conversation_id = None
+                st.session_state.agent_context_seed = "reply_target_queue_draft"
+                st.session_state.agent_pre_armed_reply_target_id = rt_id
+                st.switch_page("pages/9_Agent_Chat.py")
     with a3:
         skip_key = f"rtq_skip_open_{rt_id}"
         if st.button("Skip", key=f"rtq_skip_btn_{rt_id}", width="stretch"):
