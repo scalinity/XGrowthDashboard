@@ -631,13 +631,16 @@ def _parse_retry_after(
     payload sometimes includes a numeric ``reset`` field. Best-effort
     only — caller has a sane fallback (60s).
     """
+    # RV2-22: outer isinstance(body, dict) already gates everything below,
+    # so the inner `if isinstance(body, dict) else None` ternaries were
+    # redundant.
     if isinstance(body, dict):
         # Top-level "reset" or nested under "errors".
-        reset = body.get("reset") if isinstance(body, dict) else None
+        reset = body.get("reset")
         if isinstance(reset, (int, float)):
             now = time.time()
             return max(1.0, float(reset) - now)
-        errs = body.get("errors") if isinstance(body, dict) else None
+        errs = body.get("errors")
         if isinstance(errs, list) and errs and isinstance(errs[0], dict):
             err_reset = errs[0].get("reset")
             if isinstance(err_reset, (int, float)):
