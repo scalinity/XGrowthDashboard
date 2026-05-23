@@ -279,8 +279,15 @@ def _repurpose_cb(*, blog_id: int, mode: str, override: bool = False) -> None:
             "blocked_outputs": exc.blocked_outputs,
         }
         st.session_state["editor_repurpose_error"] = None
+        st.session_state["editor_repurpose_result"] = None
     except _br.BlogRepurposingError as exc:
         st.session_state["editor_repurpose_error"] = str(exc)
+        # P6R-13: clear the blocked-by-plagiarism banner when a
+        # non-plagiarism failure happens on a re-run (e.g. niche became
+        # undefined between blocks). Pre-fix the stale blocked banner
+        # stayed visible alongside the new error and confused Daniel.
+        st.session_state["editor_repurpose_blocked"] = None
+        st.session_state["editor_repurpose_result"] = None
 
 
 def _revert_cb(*, blog_id: int, version_id: int) -> None:
