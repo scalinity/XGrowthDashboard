@@ -401,6 +401,37 @@ def test_velocity_flat_below_epsilon():
     assert velocity_score(snaps) == 1
 
 
+def test_velocity_rv2_5_low_rate_decline_is_decaying_not_flat():
+    """RV2-5: prev=1.5, cur=0.8 is a ~47% drop → decaying, not flat.
+
+    Pre-RV2-5, the absolute 1.0-epsilon dominated the boundary: the
+    strict ≤50% decay gate failed (0.8 > 0.75) and |0.8-1.5|=0.7 < 1.0
+    mis-classified the case as flat. The fix widens decay to ≤60% for
+    prev_rate < 2.0; 0.8 ≤ 1.5×0.6=0.9 → decay → 0.
+    """
+    snaps = [
+        _snap("2026-05-22T09:00:00", 1.5),
+        _snap("2026-05-22T10:00:00", 0.8),  # 53% of prev, 47% drop → decay
+    ]
+    assert velocity_score(snaps) == 0
+
+
+def test_velocity_high_rate_50pct_decay_boundary_unchanged():
+    """At high rates, the 50% decay boundary still applies."""
+    snaps = [
+        _snap("2026-05-22T09:00:00", 10.0),
+        _snap("2026-05-22T10:00:00", 5.0),  # exactly 50% → decay
+    ]
+    assert velocity_score(snaps) == 0
+    snaps2 = [
+        _snap("2026-05-22T09:00:00", 10.0),
+        _snap("2026-05-22T10:00:00", 5.5),  # 55% — not decay at high rate
+    ]
+    # 5.5 > 5.0 (decay threshold) AND |5.5-10|=4.5 > flat_epsilon (1.0) →
+    # modest decline = falls through to default 'modest' band = 2.
+    assert velocity_score(snaps2) == 2
+
+
 def test_velocity_modest_gain():
     snaps = [
         _snap("2026-05-22T09:00:00", 5.0),

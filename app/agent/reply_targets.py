@@ -297,17 +297,29 @@ def velocity_score(snapshots: Iterable[ReplyTargetSnapshot]) -> int | None:
     prev_rate = float(sorted_snaps[-2].computed_likes_per_hour or 0.0)
     cur_rate = float(sorted_snaps[-1].computed_likes_per_hour or 0.0)
 
-    # Decay band — latest rate is ≤ 50% of previous, or both rates are
-    # zero (a thread that's gone cold).
-    if prev_rate > 0.0 and cur_rate <= prev_rate * 0.5:
-        return 0
+    # Decay band — latest rate dropped meaningfully. Per RV2-5, the
+    # original 50%-or-less rule misses mid-band declines on low-rate
+    # threads: prev=1.5, cur=0.8 is a ~47% drop that's clearly
+    # decaying, but cur > 0.5×prev so the strict ≤50% gate missed it
+    # and the 1.0-epsilon flat band mis-classified it as flat. The fix
+    # widens the decay band to 60% for prev_rate < 2.0 (where small
+    # absolute changes correspond to large relative changes) and
+    # preserves the 50% boundary for higher rates where the §13 noise-
+    # floor discipline still applies.
+    if prev_rate > 0.0:
+        decay_ratio = 0.6 if prev_rate < 2.0 else 0.5
+        if cur_rate <= prev_rate * decay_ratio:
+            return 0
     if prev_rate == 0.0 and cur_rate == 0.0:
         return 0
 
     # Flat band — small absolute delta on likes/hour. The 1.0 threshold
-    # matches the §13 noise-floor discipline (rates are integers when
-    # the underlying counts are small).
-    if abs(cur_rate - prev_rate) < _VELOCITY_FLAT_EPSILON:
+    # matches the §13 noise-floor discipline; at high rates we also
+    # consider a fractional epsilon (0.1 × prev_rate) so a 10-like/hour
+    # thread with a 1.5-like/hour delta isn't classified as a sharp
+    # acceleration.
+    flat_epsilon = max(_VELOCITY_FLAT_EPSILON, 0.1 * prev_rate)
+    if abs(cur_rate - prev_rate) < flat_epsilon:
         return 1
 
     # Accelerating — latest rate is ≥ 2.0× previous AND previous > 0.
