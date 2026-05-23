@@ -59,7 +59,12 @@ from app.agent.untrusted_wrap import wrap_untrusted as _wrap_untrusted
 
 _LOG = logging.getLogger(__name__)
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+# P6R-30: PROJECT_ROOT is centralized in app.db. Pre-fix every agent
+# module recomputed it independently; importing once keeps the
+# canonical definition in one place and lets a future move of the
+# project root surface as a single edit rather than a sweep.
+from app.db import PROJECT_ROOT  # noqa: E402
+
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 
 PROMPT_PATHS: dict[str, Path] = {

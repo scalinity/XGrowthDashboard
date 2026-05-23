@@ -62,7 +62,9 @@ from app.db import transaction
 
 _LOG = logging.getLogger(__name__)
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+# P6R-30: PROJECT_ROOT centralized in app.db.
+from app.db import PROJECT_ROOT  # noqa: E402
+
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 
 PROMPT_PATHS: dict[str, Path] = {
