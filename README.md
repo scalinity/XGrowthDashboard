@@ -149,3 +149,41 @@ Settings worth knowing:
 - `combined_ai_monthly_cost_ceiling_usd` (default `30.0`) — supersedes the historical $25 Anthropic-only ceiling. Phase 9 Grok spend accumulates into the same row.
 - `x_api_rate_limit_window_minutes` (default `15`) / `x_api_recent_failures_visible_days` (default `7`) — Settings panel lookback bounds.
 - `reply_target_lint_enabled` (default `true`) — flip to `false` to skip the §29.10 thread-classifier lint (cost-saving toggle; not recommended for normal use).
+
+## X API writes (Phase 8)
+
+Phase 8 wires the *write* path — `POST /2/tweets` direct from the Growth Agent's publish flow (`spec.md` §25 Phase 8, §28.10 Phase 5.5 → Phase 8 transition, §29.1 Phase 8 block). Replaces the Phase-5.5-stubbed manual-clipboard-only branch with a real X API branch alongside the existing manual branch. `publish_via_api_enabled` (default `true`) gates the per-publish choice. The same six-check + atomic-transaction wrapper from §28.10 runs in both branches — only the X API call inside it differs. Manual fallback remains a Settings-selectable path forever (§29.1).
+
+**What ships:**
+
+- **`publish_post_to_x_via_api(text, in_reply_to_x_post_id)` in `app/x_client.py`** — shells out to `xurl --request POST /2/tweets` with bounded retry on 5xx per `x_posting_publish_retry_attempts_per_token`. Typed exception hierarchy: `XApiColdReplyError` (403; X considered it a real attempt → token consumed), `XApiServerError` (5xx after retries → token consumed per rule #10(f)), `XApiTimeoutError` (token consumed; never retried because X may have already processed the request and a retry would double-post). 429 is re-raised so the publish wrapper leaves the confirmation token UN-consumed.
+- **`check_write_rate_capacity(conn)` sliding-window enforcement** — counts `posts.published_to_x_at` rows in the last 15min + 24h windows against `x_write_rate_limit_per_15min` / `_per_24h`. Refusal happens BEFORE the X API call so a saturated window doesn't burn the token. Manual-clipboard publishes count too — Daniel is rate-limited per X account, not per branch.
+- **`publish.publish_post_atomic` branches on `publish_via_api_enabled`** — TRUE: capacity check → API call → on 200 sets `posts.publish_method='agent_confirmed'` + `x_post_id` from response + `publish_confirmation_tokens.consumed_by_x_post_id`. FALSE: unchanged Phase 5.5 manual-clipboard branch. Six new except branches map the §22 + §29.11 token-consumed matrix verbatim. The §28.10 six-check chain, raw-token redaction, IWH check, dark-pattern lint preflight, and audit logging are **untouched**.
+- **§28.10 step 8 crash recovery via `recovery.reconcile_orphans_via_x_api()`** — when an orphan exists (e.g. timeout mid-transaction), the boot scan calls `GET /2/users/me/tweets?since_id=MAX(posts.x_post_id)` and matches by `sha256(text)` against the X timeline. Matches auto-reconcile via the existing `mark_orphan_posted` helper + set `publish_method='agent_confirmed'`; unmatched orphans fall back to the existing manual-reconcile UI exactly as Phase 5.5.
+- **vcr.py-shaped YAML cassettes under `tests/fixtures/x_api/`** — seven cassettes (success post + success reply + 429 + 403 cold-reply + 500 + timeout sentinel + recent-tweets-match) loaded by a subprocess-aware patcher at `tests/_xurl_fixture.py`. Custom loader because xurl is a CLI binary and vcr.py only sees Python HTTP — the YAML shape is vcr.py-compatible so a future transport migration plays back the same files.
+- **`scripts/rerecord_x_api_fixtures.py` + `docs/X_API_FIXTURES.md`** — interactive procedure that posts real tweets via xurl and **auto-deletes them via `DELETE /2/tweets/{id}` before exit**; failed delete is a script-level failure that surfaces the orphan ID. Only success-path cassettes re-record automatically; error-path cassettes are hand-maintained because X doesn't surface 403 / 429 / 500 on demand.
+- **Settings UI Publishing subsection** — `publish_via_api_enabled` toggle (default ON) in Settings → Growth Agent → Publishing with a flag-amber "MANUAL-CLIPBOARD MODE · X API WRITES DISABLED" keyline banner when OFF. `x_write_rate_limit_per_15min` + `x_write_rate_limit_per_24h` editable inline.
+
+### One-time setup (Phase 8)
+
+1. Re-run `xurl auth login` and paste `tweet.read tweet.write users.read offline.access` when prompted (note the added `tweet.write`). xurl updates `~/.xurl/` in place. See `docs/X_API_SETUP.md` §8.
+2. `uv run python -m scripts.init_db` — applies migration 019; the three Phase 8 settings rows seed via `INSERT OR IGNORE`.
+3. **Verify the augmented scope:** `xurl /2/users/me` then a low-risk write smoke (`xurl --request POST /2/tweets --data '{"text":"phase 8 smoke"}'`) — delete the result via `xurl --request DELETE /2/tweets/<id>`. If the POST returns 403 with "subset of X API V2 endpoints", your X developer app project is on the wrong tier.
+
+Settings worth knowing:
+
+- `publish_via_api_enabled` (default `true`) — TRUE: §28.10 publish flow takes the real `POST /2/tweets` branch. FALSE: takes the manual-clipboard fallback branch. Toggle live in Settings → Growth Agent → Publishing; manual fallback never goes away.
+- `x_write_rate_limit_per_15min` (default `50`) / `x_write_rate_limit_per_24h` (default `1000`) — sliding-window caps on X API writes. Defaults match §25 Phase 8 verbatim; tune as your X API tier allows.
+- The cold-reply 403 UX message ("X API refused this reply. Engage with this author's posts first, or use the manual fallback.") is automatic — no setting controls it. The token consumes on a 403 because X considered it a real attempt; the manual fallback is always available as the next step.
+
+### Fixture re-record (testing)
+
+The Phase 8 test suite uses canned cassettes; CI never makes a real X API call. To re-record (when X API contracts change):
+
+```bash
+uv run python -m scripts.rerecord_x_api_fixtures           # interactive
+uv run python -m scripts.rerecord_x_api_fixtures --no-prompt  # scripted
+uv run python -m scripts.rerecord_x_api_fixtures --dry-run   # print plan only
+```
+
+See `docs/X_API_FIXTURES.md` for the cassette format, the timeout sentinel pattern, and the sandbox-cleanup safety rules.
