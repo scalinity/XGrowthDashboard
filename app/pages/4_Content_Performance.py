@@ -308,6 +308,10 @@ hairline()
 # lets Daniel see whether "strong" labels actually outperformed "weak"
 # over time. Empty rendering when no shipped agent drafts exist yet —
 # Calibration view earns its place once Daniel has ≥10 shipped drafts.
+# Phase 10 S12 — result set is bounded by `GROUP BY composite_label`
+# (CHECK constraint restricts to weak/viable/strong, so at most 3
+# rows), and `LIMIT 10` is a defense-in-depth cap if a future schema
+# change adds composite_label values. No pagination needed.
 _calibration_rows = conn.execute(
     """
     SELECT ps.composite_label,
@@ -325,6 +329,7 @@ _calibration_rows = conn.execute(
     GROUP BY ps.composite_label
     ORDER BY CASE ps.composite_label
       WHEN 'strong' THEN 0 WHEN 'viable' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END
+    LIMIT 10
     """
 ).fetchall()
 st.markdown("## Pre-publish scorer calibration")
