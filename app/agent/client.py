@@ -44,6 +44,71 @@ SAVE_DRAFT_TOOLS: frozenset[str] = frozenset(
 )
 
 
+# Phase 10 / §29.5 reply_intent promotion. Cached defaults match the
+# migration 023 INSERT OR IGNORE seed. Settings-row lookups happen on
+# every dispatch — the lookup is sub-millisecond and the value is
+# Daniel's calibration knob, so caching across requests would be
+# stale-by-design.
+_REPLY_INTENT_REQUIRED_DEFAULT: bool = True
+
+
+def _read_reply_intent_required(conn: sqlite3.Connection) -> bool:
+    """Pull the §29.5 Phase 10 toggle from settings.
+
+    Falls back to True (enforce) when the row is missing or malformed —
+    fail-safe direction is to enforce the new gate rather than silently
+    accept NULL intents in a fresh DB that hasn't been re-seeded.
+    """
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?",
+        ("reply_intent_required",),
+    ).fetchone()
+    if row is None or row["value_json"] is None:
+        return _REPLY_INTENT_REQUIRED_DEFAULT
+    try:
+        return bool(json.loads(row["value_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _REPLY_INTENT_REQUIRED_DEFAULT
+
+
+def _validate_reply_intent_or_error(
+    conn: sqlite3.Connection, tool_input: dict[str, Any]
+) -> str | None:
+    """Phase 10 / §29.5 — gate save_draft_reply on reply_intent.
+
+    Returns ``None`` when the input is acceptable (either intent is
+    present + valid, or the toggle is OFF and intent is absent/NULL).
+    Returns a non-empty error string when the gate refuses; the caller
+    surfaces it as a status='error' tool result with the canonical
+    refuse-reason audit notes.
+
+    The single source of truth for the enum is
+    ``app.agent.reply_targets.REPLY_INTENT_ENUM`` (also used by the
+    tools.py schema and the spec drift check) — importing it lazily
+    here keeps the client module's import graph minimal.
+    """
+    from app.agent.reply_targets import REPLY_INTENT_ENUM
+
+    required = _read_reply_intent_required(conn)
+    intent = tool_input.get("reply_intent")
+
+    if intent is None or (isinstance(intent, str) and not intent.strip()):
+        if not required:
+            return None  # escape hatch — NULL passes when toggle is off
+        return (
+            "reply_intent is required (§29.5 Phase 10). Pick one of "
+            f"{list(REPLY_INTENT_ENUM)} or skip the reply. Disable via "
+            "Settings → Growth Agent → Reply discipline → "
+            "reply_intent_required if this is creating calibration friction."
+        )
+    if intent not in REPLY_INTENT_ENUM:
+        return (
+            f"reply_intent={intent!r} not in §29.5 enum. Valid values: "
+            f"{list(REPLY_INTENT_ENUM)}."
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap conversation rows.
 # ---------------------------------------------------------------------------
@@ -145,6 +210,35 @@ def dispatch_tool_call(
     start = datetime.now(timezone.utc)
 
     if tool_name in SAVE_DRAFT_TOOLS:
+        # Phase 10 / §29.5 — reply_intent promotion gate. Runs BEFORE
+        # niche/IWH/lint so the agent can't propose-and-then-skip the
+        # other gates by burning a turn on a reply that will get
+        # rejected later. Only fires for save_draft_reply (the §29.5
+        # axis is reply-only). The reply_intent_required setting
+        # (default ON) is the calibration escape hatch — when OFF
+        # the dispatcher accepts NULL and writes through.
+        if tool_name == "save_draft_reply":
+            intent_gate_error = _validate_reply_intent_or_error(
+                conn, tool_input
+            )
+            if intent_gate_error is not None:
+                audit.log_tool_call(
+                    conn,
+                    message_id=message_id,
+                    tool_name=tool_name,
+                    arguments=tool_input,
+                    status="error",
+                    error_message=f"reply-intent gate refuse: {intent_gate_error}",
+                    duration_ms=int(
+                        (datetime.now(timezone.utc) - start).total_seconds() * 1000
+                    ),
+                    notes="reply-intent gate refused",
+                )
+                return {
+                    "tool_name": tool_name,
+                    "status": "error",
+                    "error": f"refused by reply-intent gate: {intent_gate_error}",
+                }
         # §28.2 rule #15 — niche must be defined. This runs BEFORE the
         # IWH/lint gate; a prompt-injected request to "skip the niche
         # check" cannot bypass this because niche_gate consults only the

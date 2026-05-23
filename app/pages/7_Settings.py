@@ -940,6 +940,73 @@ for key, editable, helptext in [
     _render_setting(conn, key, editable, helptext)
 
 # ---------------------------------------------------------------------------
+# Reply discipline (§28.18 + §29.5, Phase 10) — two toggles that gate
+# reply behavior. reply_intent_required is the §29.5 promotion;
+# reply_quality_lint_enabled has been live since Phase 5.9 but was never
+# surfaced in Settings until Phase 10 needed a calibration knob next
+# door. Both default ON; OFF is a calibration escape hatch.
+# ---------------------------------------------------------------------------
+st.markdown("### Reply discipline")
+st.caption(
+    "Two gates that fire at draft-save time on save_draft_reply. "
+    "**reply_intent_required** (§29.5 Phase 10): when ON (default), the "
+    "agent must declare a §29.5 reply_intent on every reply or the "
+    "dispatcher refuses; OFF accepts NULL as a calibration escape "
+    "hatch. **reply_quality_lint_enabled** (§28.18): when ON (default), "
+    "Haiku scores Daniel's reply text against the eleven failure modes "
+    "(forced / ai_tasting / selfishly_self_promoting / engagement_bait "
+    "/ ragebait / manipulative_question / fake_authority / "
+    "performative_threading / diving_preamble / emoji_as_personality / "
+    "hedging_that_erases); OFF short-circuits to pass."
+)
+
+for _toggle_key, _toggle_label, _toggle_help in (
+    (
+        "reply_intent_required",
+        "reply_intent_required — refuse save_draft_reply without §29.5 intent",
+        (
+            "ON (default): the dispatcher refuses save_draft_reply when "
+            "reply_intent is missing or not in the §29.5 enum. OFF: NULL "
+            "passes through (Phase 10 calibration escape hatch — disable "
+            "if the gate creates friction during the first week)."
+        ),
+    ),
+    (
+        "reply_quality_lint_enabled",
+        "reply_quality_lint_enabled — run §28.18 reply-quality lint on every reply",
+        (
+            "ON (default): Haiku scores every reply against eleven "
+            "failure modes; a failure bounces back as an IWH revision. "
+            "OFF: the lint short-circuits to pass (saves Haiku spend in "
+            "high-volume seasons; the IWH + dark-pattern gates still fire)."
+        ),
+    ),
+):
+    _row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?", (_toggle_key,)
+    ).fetchone()
+    _current = True
+    if _row and _row[0]:
+        try:
+            _current = bool(json.loads(_row[0]))
+        except (TypeError, json.JSONDecodeError):
+            _current = True
+    _new = st.toggle(
+        _toggle_label,
+        value=_current,
+        help=_toggle_help,
+        key=f"{_toggle_key}_toggle",
+    )
+    if _new != _current:
+        conn.execute(
+            "UPDATE settings SET value_json = ? WHERE key = ?",
+            ("true" if _new else "false", _toggle_key),
+        )
+        conn.commit()
+        st.toast(f"{_toggle_key} = " + ("ON" if _new else "OFF"))
+        st.rerun()
+
+# ---------------------------------------------------------------------------
 # Niche definition (§28.16, Phase 5.9) — load-bearing identity anchor.
 # Two settings rows spliced into Section 1 of the system prompt; empty
 # values BLOCK drafting via §28.2 rule #15 (orchestrator-enforced).

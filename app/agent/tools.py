@@ -2274,7 +2274,14 @@ AGENT_TOOLS: list[ToolDef] = [
         name="save_draft_reply",
         description=(
             "Persist a final draft reply. Target URL is preserved. Same "
-            "IWH + lint preflight as save_draft_post."
+            "IWH + lint preflight as save_draft_post. "
+            "You MUST declare reply_intent before drafting per §29.5 — "
+            "this is the orthogonal fourth axis (alongside pillar / "
+            "audience / cta) that names your strategic goal for THIS "
+            "specific reply. If you don't know which intent applies, "
+            "SKIP the reply — that's a valid choice. The "
+            "reply_intent_required setting (§29.5 Phase 10) toggles "
+            "this enforcement off only as a calibration escape hatch."
         ),
         input_schema={
             "type": "object",
@@ -2291,10 +2298,28 @@ AGENT_TOOLS: list[ToolDef] = [
                         "refuses 'unspecified'."
                     ),
                 },
+                # Phase 10 / §29.5 — reply_intent promoted to a required
+                # tool argument. Dispatcher validates the value against
+                # REPLY_INTENT_ENUM before the handler runs. The
+                # reply_intent_required setting (default ON) gates the
+                # enforcement; when OFF, the dispatcher accepts NULL
+                # and writes it through.
+                "reply_intent": {
+                    "type": "string",
+                    "enum": list(REPLY_INTENT_ENUM),
+                    "description": (
+                        "§29.5 strategic goal for THIS reply. One of: "
+                        + ", ".join(REPLY_INTENT_ENUM) + ". Required when "
+                        "reply_intent_required setting is true (default). "
+                        "Skip the reply if you genuinely cannot pick an "
+                        "intent — drafting without one indicates the "
+                        "reply isn't worth posting."
+                    ),
+                },
                 "hypothesis": {"type": "string"},
                 "agent_reasoning": {"type": "string"},
             },
-            "required": ["text", "target_post_url", "content_type"],
+            "required": ["text", "target_post_url", "content_type", "reply_intent"],
         },
         handler=_save_draft_reply,
     ),
