@@ -152,6 +152,37 @@ def test_save_blog_updates_actual_length_words(db_conn: sqlite3.Connection) -> N
     assert blog.actual_length_words == 5
 
 
+def test_count_words_strips_markdown_syntax(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-25: heading markers, bold/italic delimiters, list bullets,
+    blockquote markers, and code fences should NOT count as words."""
+    b = bm.create_blog(db_conn, title="md count")
+    body = (
+        "# Heading One\n"
+        "\n"
+        "First **bold** paragraph with *italic* and `code` words.\n"
+        "\n"
+        "## Heading Two\n"
+        "\n"
+        "- list item one\n"
+        "- list item two\n"
+        "\n"
+        "> quoted text here\n"
+        "\n"
+        "```python\n"
+        "def ignored(): pass\n"
+        "```\n"
+    )
+    bm.save_blog(db_conn, b.id, body_markdown=body, created_by="daniel")
+    blog = bm.get_blog(db_conn, b.id)
+    # Words: "Heading One" (2) + "First bold paragraph with italic and code words." (8)
+    # + "Heading Two" (2) + "list item one" (3) + "list item two" (3)
+    # + "quoted text here" (3) = 21.
+    # Code fence contents skipped entirely.
+    assert blog.actual_length_words == 21
+
+
 def test_save_blog_records_agent_action_and_confidence(
     db_conn: sqlite3.Connection,
 ) -> None:

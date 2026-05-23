@@ -274,15 +274,36 @@ def _hash_body(body_markdown: str) -> str:
     return hashlib.sha256(body_markdown.encode("utf-8")).hexdigest()
 
 
-def _count_words(body_markdown: str) -> int:
-    """Token-style word count for ``actual_length_words``.
+_MD_CODE_FENCE_RE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+_MD_HEADING_MARK_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+_MD_BLOCKQUOTE_RE = re.compile(r"^>\s?", re.MULTILINE)
+_MD_LIST_MARKER_RE = re.compile(r"^[\*\-\+]\s+|^\d+\.\s+", re.MULTILINE)
+_MD_INLINE_MARK_RE = re.compile(r"[*_`]")
 
-    Splits on whitespace after stripping Markdown headers/fences would
-    be more accurate; the spec uses ``actual_length_words`` as an
-    *informational* gauge against ``target_length_words``, so a
-    cheap-and-fast split is plenty. Re-implement later if needed.
+
+def _count_words(body_markdown: str) -> int:
+    """Word count for ``actual_length_words``.
+
+    P6R-25: strip Markdown syntax before splitting so structural markers
+    (``#``, ``**``, ``[link]``, ``>`` quote, list bullets) don't inflate
+    the count. Pre-fix, a body like ``# Heading\n\n**bold**`` reported
+    3 words from a 2-word document. The count is still informational
+    (per the spec; it's a target-vs-actual gauge, not a hard gate), but
+    the new count matches Daniel's intuition.
     """
-    return len(body_markdown.split()) if body_markdown else 0
+    if not body_markdown:
+        return 0
+    # Strip code fences entirely — their contents shouldn't count toward
+    # the body's prose word count.
+    s = _MD_CODE_FENCE_RE.sub("", body_markdown)
+    # Strip line-level markers.
+    s = _MD_HEADING_MARK_RE.sub("", s)
+    s = _MD_BLOCKQUOTE_RE.sub("", s)
+    s = _MD_LIST_MARKER_RE.sub("", s)
+    # Strip inline emphasis / code markers — leaves the wrapped words
+    # countable.
+    s = _MD_INLINE_MARK_RE.sub("", s)
+    return len(s.split())
 
 
 # ---------------------------------------------------------------------------
