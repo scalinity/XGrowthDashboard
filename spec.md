@@ -3766,46 +3766,70 @@ Actual path configurable.
 
 ## 17. Scheduling requirements
 
-### MVP: nothing is scheduled
+### MVP through Phase 6: nothing is scheduled
 
 Manual entry is the default. There is no cron job, no `launchd` plist, no API to poll. The daily ritual is opening the dashboard at 9 AM, entering the snapshot in the pinned form, and reviewing the day's plan.
 
-The original spec mandated scheduled jobs from day one. That assumed API-first collection. With manual-first collection, scheduling is a V1.1 concern.
+The original spec mandated scheduled jobs from day one. That assumed API-first collection. With manual-first collection, scheduling stays out of MVP and the consolidation phases. It lands as a single coherent unit in Phase 7 (X API reads).
 
-### V1.1: account snapshot via xurl
+### Phase 7: scheduled jobs (X API reads)
 
-When the manual loop has run for 2-4 weeks and the value is proven:
-
-```text
-Default: every day at 9:00 AM America/New_York
-Behavior:
-  1. Fetch account metrics via xurl.
-  2. Store raw response.
-  3. Insert immutable account snapshot.
-  4. Log success/failure.
-  5. If failure, the manual form remains the fallback (already the MVP default).
-```
-
-### V1.2: recent post collection
+Once xurl OAuth is wired (`xurl auth login` with scopes `tweet.read users.read offline.access`) and migration 018 has flipped `data_collection_mode` default to `'api'`, the following jobs run on schedule. **All four share the same xurl wrapper, same OAuth scopes, and same rate-limit infrastructure** — they exist as separate jobs only because they hit different X API endpoints on different cadences.
 
 ```text
-Default: every day after account snapshot
-Behavior:
-  1. Fetch recent posts from Daniel.
-  2. Insert new posts if not already known.
-  3. Do not overwrite manually added metadata (pillar, audience, hypothesis).
-  4. Preserve raw response.
+1. scripts/collect_account_snapshot.py — daily, 9:00 AM America/New_York
+   • xurl /2/users/me?user.fields=public_metrics
+   • Insert account_snapshots row with attribution_method='api'.
+   • Log raw response to raw_api_responses.
+   • Duplicate-day handling per the manual-form rule: no overwrite.
+   • On failure: manual form remains the always-available fallback.
+
+2. scripts/import_recent_posts.py — daily, immediately after job #1
+   • xurl /2/users/me/tweets?max_results=100
+   • Skip existing x_post_id rows; new rows land with attribution_method='api'
+     and manual_confirmation_status='pending' (surfaces in "Needs tagging" queue).
+   • Never overwrite manually-added metadata (pillar, audience, hypothesis).
+   • One-shot backfill at Phase 7 install for the existing post history.
+
+3. app/jobs/post_metrics_refresh.py — hourly
+   • xurl /2/tweets?ids=<batch of 100>&tweet.fields=public_metrics,non_public_metrics
+   • Insert post_metric_snapshots rows; update posts.last_metrics_refresh_at_utc.
+   • Cadence in spirit: Daily refresh for posts <14 days old; weekly for
+     14–90 days; monthly for older. Hourly job picks the right batch.
+   • Respect 429 + Retry-After.
+
+4. app/jobs/reply_target_metrics_refresh.py — hourly (configurable via
+   reply_target_metrics_refresh_interval_minutes)
+   • Pull live metrics for status='candidate' AND last_checked_at_utc stale.
+   • Insert reply_target_snapshots; recompute velocity_score, timing_score,
+     engagement_surface_score.
+   • On 404: transition status='target_deleted' (§29.7 / §29.11).
+   • On 429: respect Retry-After; last_checked_at_utc stays stable (no score drift).
 ```
 
-### V1.2: post metric refresh
+### Phase 9: Grok discovery sweep
 
 ```text
-Daily: refresh metrics for posts from last 14 days.
-Weekly: refresh metrics for posts from last 90 days.
-Monthly: refresh old milestone posts only.
+5. app/jobs/grok_discovery_sweep.py — every grok_discovery_sweep_interval_minutes
+   (default 120)
+   • Walk grok_query_list_json; call Grok per query (XAI_API_KEY auth).
+   • For each candidate: §29.2 verification via Phase 7's xurl /2/tweets/{id}.
+   • On verification fail (X API 404): reject candidate, log to grok_api_responses.
+   • On success: §29.3 scoring → reply_targets insert with
+     discovered_via='grok_semantic'.
+   • Combined Anthropic + xAI cost ceiling (§28.6) enforced; 100% pauses sweep.
+   • Gated by grok_api_enabled (default TRUE).
 ```
 
-Reason: avoid unnecessary API usage and cost.
+### launchd plists — ship documented, do NOT auto-load
+
+Each Phase 7 / Phase 9 job has a corresponding `.plist` shipped in the repo under `launchd/` and documented in `docs/SCHEDULED_JOBS.md`. **The plists are NOT auto-loaded on first install** — making API calls Daniel didn't explicitly authorize would violate user consent. Daniel runs:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.<job>.plist
+```
+
+per job, after confirming each one. `docs/SCHEDULED_JOBS.md` lists the exact invocations + per-job environment requirements (xurl auth state, `XAI_API_KEY` for the Grok job). Unloading is symmetric: `launchctl unload ...`.
 
 ### Weekly report reminder
 
