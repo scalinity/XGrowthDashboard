@@ -389,7 +389,11 @@ def get_blog(conn: sqlite3.Connection, blog_id: int) -> Blog:
 
 
 def list_blogs(
-    conn: sqlite3.Connection, statuses: Optional[list[str]] = None
+    conn: sqlite3.Connection,
+    statuses: Optional[list[str]] = None,
+    *,
+    limit: int = 200,
+    offset: int = 0,
 ) -> list[dict]:
     """List rows from ``v_blog_pipeline`` (newest-edited first by default).
 
@@ -397,7 +401,16 @@ def list_blogs(
     returned as a list of dicts so the caller (UI) can render without
     converting to dataclasses — the view's column set is wider than
     :class:`Blog`.
+
+    P6R-27: ``limit`` and ``offset`` keyword-only params bound the
+    result set. Defaults are generous (200) because the §14.14 index
+    paginates client-side, but in unattended scripts (e.g. backups,
+    audit-log dumps) an explicit bound keeps memory predictable.
     """
+    if limit < 1:
+        raise InvalidBlogFieldError(f"limit must be >= 1; got {limit}")
+    if offset < 0:
+        raise InvalidBlogFieldError(f"offset must be >= 0; got {offset}")
     if statuses:
         bad = {s for s in statuses if s not in VALID_STATUSES}
         if bad:
@@ -406,15 +419,17 @@ def list_blogs(
         sql = (
             f"SELECT * FROM v_blog_pipeline "
             f"WHERE status IN ({placeholders}) "
-            "ORDER BY last_edited_at_utc DESC NULLS LAST, blog_id DESC"
+            "ORDER BY last_edited_at_utc DESC NULLS LAST, blog_id DESC "
+            "LIMIT ? OFFSET ?"
         )
-        params: tuple = tuple(statuses)
+        params: tuple = (*statuses, int(limit), int(offset))
     else:
         sql = (
             "SELECT * FROM v_blog_pipeline "
-            "ORDER BY last_edited_at_utc DESC NULLS LAST, blog_id DESC"
+            "ORDER BY last_edited_at_utc DESC NULLS LAST, blog_id DESC "
+            "LIMIT ? OFFSET ?"
         )
-        params = ()
+        params = (int(limit), int(offset))
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
@@ -914,16 +929,32 @@ def revert_to_version(
     return _row_to_version(row)
 
 
-def list_versions(conn: sqlite3.Connection, blog_id: int) -> list[BlogVersion]:
-    """Return all versions for ``blog_id``, newest first."""
+def list_versions(
+    conn: sqlite3.Connection,
+    blog_id: int,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[BlogVersion]:
+    """Return versions for ``blog_id``, newest first.
+
+    P6R-27: ``limit``/``offset`` paginate. The §14.15 editor renders
+    the first 10 only; scripts that walk the full version history
+    must page through explicitly.
+    """
+    if limit < 1:
+        raise InvalidBlogFieldError(f"limit must be >= 1; got {limit}")
+    if offset < 0:
+        raise InvalidBlogFieldError(f"offset must be >= 0; got {offset}")
     rows = conn.execute(
         """
         SELECT *
         FROM blog_versions
         WHERE blog_id = ?
         ORDER BY version_number DESC
+        LIMIT ? OFFSET ?
         """,
-        (blog_id,),
+        (blog_id, int(limit), int(offset)),
     ).fetchall()
     return [_row_to_version(r) for r in rows]
 
