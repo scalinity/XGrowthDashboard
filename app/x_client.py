@@ -275,7 +275,12 @@ def request(
             body_json=body_json,
             response_text=f"<timeout after {timeout_seconds}s>",
             status_code=None,
-            notes=f"subprocess timeout; {log_notes or ''}".strip(),
+            # RV2-19: drop the trailing semicolon when log_notes is empty.
+            notes=(
+                f"subprocess timeout; {log_notes}"
+                if log_notes
+                else "subprocess timeout"
+            ),
         )
         # Distinct typed exception for Phase 8 write timeouts — the
         # publish wrapper has a dedicated branch (ROLLBACK + crash-
