@@ -5577,15 +5577,15 @@ Seed strategy: at first Phase 5.5 build, Daniel marks 3-5 of his strongest exist
 
 ### 28.6 Cost management
 
-- Per-call cost estimated from token counts and per-model rate snapshot at call time. The rate snapshot is stored on each message (`agent_messages.rate_snapshot_json`) so retroactive auditing isn't broken if Anthropic pricing changes.
+- Per-call cost estimated from token counts and per-provider rate snapshot at call time. The rate snapshot is stored on each message (`agent_messages.rate_snapshot_json` for Anthropic; `grok_api_responses.rate_snapshot_json` for xAI Grok) so retroactive auditing isn't broken if pricing changes.
 - Per-conversation total in chat header.
 - Per-month running total in chat header banner with cap progress bar.
-- Monthly cap default $25; configurable in Settings → Growth Agent.
-- At 80% of cap: yellow banner across all agent surfaces.
-- At 100%: red banner; agent calls disabled until next month or cap raised.
-- Cap is enforced at the API client layer (`app/agent/client.py`) — refuses to make a call if next call would breach cap.
+- **Combined Anthropic + xAI ceiling** — one number, one cap, one cutoff. Setting key: `combined_ai_monthly_cost_ceiling_usd` (default **$30** once Phase 7 lands; pre-Phase-7 the historical `monthly_anthropic_cost_ceiling_usd = $25` applied). Phase 9 Grok spend accumulates into the same ceiling alongside Anthropic spend. Daniel cares about total monthly AI burn, not per-provider attribution; splitting later if attribution becomes a real need is a one-config-key change.
+- At 80% of cap: yellow banner across all agent + Settings surfaces.
+- At 100%: red banner; Anthropic agent calls disabled AND Phase 9 Grok sweep paused until next month or cap raised.
+- Cap is enforced at the API client layer (`app/agent/client.py` for Anthropic; `app/grok_client.py` for xAI) — both providers refuse to make a call if next call would breach the combined cap.
 
-**Verify current Anthropic pricing** when implementing the cost estimator; pricing changes and the cost calculation should pull from a versioned rate table, not hardcoded numbers.
+**Verify current Anthropic + xAI pricing** when implementing the cost estimator; pricing changes and the cost calculation should pull from a versioned rate table per provider, not hardcoded numbers.
 
 ### 28.7 Integration points summary
 
