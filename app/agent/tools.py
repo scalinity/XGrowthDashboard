@@ -713,6 +713,11 @@ def _score_reply_candidates(
         # /review-2 🟡 #2 — error dicts go to `errors`, not `scored`,
         # so callers reading scored[i]["recommended_action_label"] don't
         # KeyError.
+        # RV2-31: track which phase fails so the error string distinguishes
+        # INSERT vs UPDATE vs SCORE failures. Pre-RV2-31 the catch-all
+        # appended just str(exc); Daniel had no signal for which step
+        # broke in a multi-candidate paste.
+        phase = "insert"
         try:
             with transaction(conn):
                 existing = conn.execute(
@@ -751,6 +756,7 @@ def _score_reply_candidates(
                     )
                     rt_id = int(new_cur.lastrowid)
                 else:
+                    phase = "update"
                     rt_id = int(existing["id"])
                     # Refresh metrics inside the same transaction so the
                     # downstream score UPDATE sees the refreshed values.
@@ -772,6 +778,7 @@ def _score_reply_candidates(
                             [v for _, v in updates] + [rt_id],
                         )
 
+                phase = "score"
                 result = _compute_and_persist_scores_locked(
                     conn,
                     reply_target_id=rt_id,
@@ -787,11 +794,12 @@ def _score_reply_candidates(
             # RV2-10: log the full stack for operator diagnosis; the tool
             # result gets just the message. Matches the discipline in
             # _audit_profile_to_dict / _analyze_account_to_dict.
+            # RV2-31: phase tag tells Daniel which step failed.
             _LOG.warning(
-                "score_reply_candidates per-candidate failure for url=%r: %s",
-                url, exc, exc_info=True,
+                "score_reply_candidates %s phase failure for url=%r: %s",
+                phase, url, exc, exc_info=True,
             )
-            errors.append(f"candidate {url!r}: {exc}")
+            errors.append(f"candidate {url!r}: {phase} failed: {exc}")
             continue
         if "error" in result:
             errors.append(result["error"])
