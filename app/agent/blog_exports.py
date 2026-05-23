@@ -264,6 +264,37 @@ _ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
 _LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\n]+)\)")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 
+# P6R-6: allow-list of URL schemes that may appear in <a href="...">.
+# Anything else (javascript:, data:, file:, vbscript:) collapses to "#"
+# so an attacker-prompt-injected blog body or a model-emitted
+# repurposed link cannot smuggle a script-execution sink into the
+# exported HTML. Mirrors the http(s)-only discipline of P511R-19.
+def _safe_href(url: str) -> str:
+    """Return ``url`` if its scheme is in the allow-list; ``'#'`` otherwise.
+
+    Bare relative URLs (``./foo``, ``foo/bar``, ``#anchor``, ``?q=1``)
+    pass; absolute http(s) + mailto pass; everything else (javascript:,
+    data:, file:, ...) is replaced with ``#``. The check is done on the
+    raw URL BEFORE the caller's HTML-escape pass so the regex doesn't
+    have to think about ``&amp;`` etc.
+    """
+    if not url:
+        return "#"
+    s = url.strip()
+    # Cheap structural checks first.
+    if s.startswith("#") or s.startswith("/") or s.startswith("?"):
+        return url
+    if s.startswith("./") or s.startswith("../"):
+        return url
+    lower = s.lower()
+    if lower.startswith("http://") or lower.startswith("https://") or lower.startswith("mailto:"):
+        return url
+    # If it has NO ":" at all, treat as relative path → pass.
+    if ":" not in s:
+        return url
+    # Anything else — javascript:, data:, file:, vbscript:, etc.
+    return "#"
+
 
 def _escape_html(text: str) -> str:
     return (
@@ -290,7 +321,11 @@ def _render_inline(text: str) -> str:
     out = _BOLD_RE.sub(lambda m: f"<strong>{m.group(1)}</strong>", out)
     out = _ITALIC_RE.sub(lambda m: f"<em>{m.group(1)}</em>", out)
     out = _LINK_RE.sub(
-        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', out
+        # P6R-6: refuse non-http(s)/mailto/relative URLs in the exported
+        # HTML. javascript:/data:/file: schemes are collapsed to "#" so
+        # an attacker-influenced blog body cannot smuggle a script-sink
+        # into the rendered HTML.
+        lambda m: f'<a href="{_safe_href(m.group(2))}">{m.group(1)}</a>', out
     )
     return out
 

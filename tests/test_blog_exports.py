@@ -418,6 +418,61 @@ def test_html_export_does_not_double_escape_link_url(
     assert "&amp;amp;" not in html
 
 
+def test_html_export_strips_javascript_link_scheme(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """P6R-6: javascript:/data:/file: URLs in markdown links must be
+    collapsed to # in the exported HTML."""
+    b = bm.create_blog(db_conn, title="js-link")
+    bm.save_blog(
+        db_conn, b.id,
+        body_markdown=(
+            "Bad [click here](javascript:alert(1)) and "
+            "[data link](data:text/html,<h1>x</h1>) and "
+            "[file](file:///etc/passwd) — all should be neutralized.\n\n"
+            "Good [docs](https://example.com) survives.\n\n"
+            "Relative [anchor](#section) and [mailto](mailto:a@b.com) also survive."
+        ),
+        created_by="daniel",
+    )
+    for s in ("outlining", "drafting", "editing", "ready"):
+        bm.transition_status(db_conn, b.id, s)
+    target = tmp_path / "js.html"
+    be.export(db_conn, blog_id=b.id, format="html", target_path=target)
+    html = target.read_text(encoding="utf-8")
+    # Bad schemes: replaced with "#".
+    assert 'href="javascript:' not in html
+    assert 'href="data:' not in html
+    assert 'href="file:' not in html
+    # Good schemes survive.
+    assert 'href="https://example.com"' in html
+    assert 'href="#section"' in html
+    assert 'href="mailto:a@b.com"' in html
+
+
+def test_safe_href_helper_unit() -> None:
+    """Pin _safe_href's allow-list behavior independent of the export
+    pipeline."""
+    from app.agent.blog_exports import _safe_href
+    # Allowed.
+    assert _safe_href("https://example.com") == "https://example.com"
+    assert _safe_href("HTTPS://EXAMPLE.COM") == "HTTPS://EXAMPLE.COM"
+    assert _safe_href("mailto:a@b.com") == "mailto:a@b.com"
+    assert _safe_href("/local/path") == "/local/path"
+    assert _safe_href("#anchor") == "#anchor"
+    assert _safe_href("?q=1") == "?q=1"
+    assert _safe_href("./relative") == "./relative"
+    assert _safe_href("../up") == "../up"
+    assert _safe_href("plain-path") == "plain-path"
+    # Refused — collapse to "#".
+    assert _safe_href("javascript:alert(1)") == "#"
+    assert _safe_href("JaVaScRiPt:x") == "#"
+    assert _safe_href("data:text/html,<h1>x</h1>") == "#"
+    assert _safe_href("file:///etc/passwd") == "#"
+    assert _safe_href("vbscript:msgbox") == "#"
+    assert _safe_href("") == "#"
+
+
 def test_html_export_does_not_double_escape_inline_code(
     db_conn: sqlite3.Connection, tmp_path: Path,
 ) -> None:
