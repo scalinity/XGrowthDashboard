@@ -5977,9 +5977,9 @@ The most novel tactical insight from the source video: niche-relevant audiences 
 - §28.3 Section 7 (Tool catalog) gains the new tool.
 - Pre-commit drift check extended to verify `reply_targets.source` enum matches across spec / `tools.py` / system prompt.
 
-**V1.1+ deferred path:**
+**Phase 7 programmatic path:**
 
-Programmatic scan of top-N replies under a target post via X API. Drops the paste step; otherwise identical. Spec'd here so the MVP paste flow isn't a dead end. When V1.1+ lands, the same tool signature gains an optional `auto_scan: bool = false` parameter that triggers the programmatic path.
+Programmatic scan of top-N replies under a target post via X API ships with Phase 7 (X API reads, migration 018) via the same xurl wrapper used by the read-side jobs. Drops the paste step; otherwise identical. The Phase 5.9 paste flow is preserved as the always-available manual fallback. The tool signature gains an optional `auto_scan: bool = false` parameter; when TRUE, the implementation calls `xurl /2/tweets/search/recent?query=conversation_id:<id>` and ingests replier handles + excerpts directly. Phase 5.9 spec'd the paste flow so it isn't a dead end; Phase 7 honors the spec by sharing the tool signature.
 
 **Anti-feature (carried from §5 + §29):**
 
@@ -6155,9 +6155,9 @@ Deep strategic read on a target X account: posting patterns, positioning, reply-
 
 Account Researcher prompt sees: pasted `target_bio_snapshot`, `target_recent_posts_text` (wrapped as untrusted), Daniel's active niche definition (for the `niche_alignment_with_daniel` field). It does NOT see any of Daniel's posts or analytics — the analysis is *about the target*, not a comparison; alignment is computed from niche definition alone.
 
-**V1.1+ deferred:**
+**Phase 7 programmatic path:**
 
-Programmatic X API pull of bio + recent posts via xurl / direct API. Drops the paste step. Same tool signature gains optional `auto_pull: bool = false`.
+Programmatic X API pull of bio + recent posts via xurl ships with Phase 7 (X API reads, migration 018). Drops the paste step. Endpoint: `xurl /2/users/by/username/<handle>?user.fields=description,public_metrics` for bio + metrics, `xurl /2/users/<id>/tweets?max_results=20` for recent posts. The tool signature gains optional `auto_pull: bool = false`; when TRUE, the implementation pulls both endpoints and skips the paste prompts. Manual paste flow remains the always-available fallback.
 
 **Anti-feature:**
 
@@ -6173,7 +6173,7 @@ Periodic comprehensive AI review of Daniel's X profile as a *unified surface*: b
 
 The audit consumes a snapshot of Daniel's surface as it appears to a new follower:
 
-1. `bio_snapshot` — Daniel pastes (the X bio isn't auto-pulled at MVP; future V1.1+ direct API auto-pull).
+1. `bio_snapshot` — Daniel pastes (the X bio isn't auto-pulled pre-Phase-7; Phase 7 adds programmatic auto-pull via `xurl /2/users/by/username/<handle>?user.fields=description`, keeping the paste flow as fallback).
 2. `pinned_post_text` — Daniel pastes (or `pinned_post_id` references a tracked post).
 3. `recent_post_ids_json` — last `profile_audit_recent_posts_window_days` (default 30) of posts from `posts` where `x_post_id IS NOT NULL`.
 4. `active_voice_profile_id` — the current `voice_profiles.is_active = true` row.
