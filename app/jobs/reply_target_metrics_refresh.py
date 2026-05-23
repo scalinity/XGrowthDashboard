@@ -172,18 +172,16 @@ def _compute_rates(
 
 
 def _minutes_between_iso(earlier: str | None, later: str | None) -> float | None:
-    """Return ``later - earlier`` in minutes, or None if either is unparseable."""
-    if not earlier or not later:
-        return None
-    from datetime import datetime
-    fmt = "%Y-%m-%d %H:%M:%S"
-    try:
-        # SQLite datetime('now') format: YYYY-MM-DD HH:MM:SS
-        dt_e = datetime.strptime(earlier[:19], fmt)
-        dt_l = datetime.strptime(later[:19], fmt)
-    except ValueError:
-        return None
-    return (dt_l - dt_e).total_seconds() / 60.0
+    """Return ``later - earlier`` in minutes, or None if either is unparseable.
+
+    RV2-14: delegates to the named ``minutes_between_sqlite`` helper so
+    the SQLite-shape assumption is explicit at the call site. The X API
+    shape (RFC 3339 with T separator) has its own ``parse_x_api_datetime``
+    helper in app/agent/timeparse.py — never mix the two.
+    """
+    from app.agent.timeparse import minutes_between_sqlite
+
+    return minutes_between_sqlite(earlier, later)
 
 
 def _process_one_candidate(
@@ -270,17 +268,17 @@ def _process_one_candidate(
     age_minutes = candidate_row["post_age_minutes"]
     if age_minutes is None:
         # Fall back to computing from target_created_at_utc if present.
-        from datetime import datetime
-        created = candidate_row["target_created_at_utc"]
-        if created:
-            try:
-                created_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
-                from datetime import timezone
-                age_minutes = int(
-                    (datetime.now(timezone.utc) - created_dt).total_seconds() / 60.0
-                )
-            except ValueError:
-                age_minutes = 0
+        # RV2-14: use the named X API parser — target_created_at_utc is
+        # stored in RFC 3339 shape (T separator, Z suffix) per the
+        # /2/tweets created_at field shape.
+        from datetime import datetime, timezone
+
+        from app.agent.timeparse import parse_x_api_datetime
+        created_dt = parse_x_api_datetime(candidate_row["target_created_at_utc"])
+        if created_dt is not None:
+            age_minutes = int(
+                (datetime.now(timezone.utc) - created_dt).total_seconds() / 60.0
+            )
         else:
             age_minutes = 0
     tim = timing_score(int(age_minutes), candidate_row["target_author_follower_count"])
