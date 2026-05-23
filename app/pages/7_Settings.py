@@ -846,7 +846,13 @@ _cost_meter(_mtd, _cap)
 
 for key, editable, helptext in [
     ("agent_default_model", True, "Default Anthropic model (§28.4)."),
-    ("agent_monthly_cost_cap_usd", True, "Monthly USD cap (§28.6). Raise carefully."),
+    # RV2-3: the Phase 7 combined Anthropic + xAI ceiling is the canonical
+    # cost cap going forward ($30 default per §28.6 + migration 018). The
+    # legacy ``agent_monthly_cost_cap_usd`` key still works as a fallback
+    # for pre-migration-018 DBs but is no longer surfaced here — the
+    # cost.get_monthly_ceiling_usd() reader prefers the new key.
+    ("combined_ai_monthly_cost_ceiling_usd", True,
+     "Combined Anthropic + xAI monthly USD ceiling (§28.6). Raise carefully."),
 ]:
     _render_setting(conn, key, editable, helptext)
 

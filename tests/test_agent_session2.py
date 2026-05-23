@@ -106,22 +106,67 @@ class TestMonthlyCostCeiling:
         )
 
     def test_over_ceiling_raises(self, db_conn):
-        # Pre-load per-message spend totaling ~$26 in the current month.
+        # Pre-load per-message spend totaling ~$31 (past Phase-7 $30 default).
         # Source of truth is agent_messages.input_tokens × rate_snapshot.
-        self._preload_msg_spend_about(db_conn, 26.0)
+        self._preload_msg_spend_about(db_conn, 31.0)
         with pytest.raises(cost.MonthlyCostCeilingExceeded):
             cost.check_ceiling_or_raise(db_conn, projected_call_cost_usd=0.01)
 
     def test_settings_override_lifts_ceiling(self, db_conn):
-        # Same ~$26 spend, but the settings override raises the cap to $50.
-        self._preload_msg_spend_about(db_conn, 26.0)
+        # Same ~$31 spend, but the settings override raises the cap to $50.
+        # RV2-3: writes to the Phase-7 ``combined_ai_monthly_cost_ceiling_usd``
+        # key (the new canonical setting); the legacy
+        # ``agent_monthly_cost_cap_usd`` key still works as a fallback.
+        self._preload_msg_spend_about(db_conn, 31.0)
         db_conn.execute(
             """
             INSERT OR REPLACE INTO settings (key, value_json, note, updated_at)
-            VALUES ('agent_monthly_cost_cap_usd', '50.0', 'test override', datetime('now'))
+            VALUES ('combined_ai_monthly_cost_ceiling_usd', '50.0',
+                    'test override', datetime('now'))
             """
         )
         cost.check_ceiling_or_raise(db_conn, projected_call_cost_usd=0.01)
+
+    def test_combined_ceiling_supersedes_legacy_key(self, db_conn):
+        """RV2-3: when both keys are present, the new combined key wins.
+
+        Pre-Phase-7 DBs had only ``agent_monthly_cost_cap_usd``. After
+        migration 018 both rows can coexist. The ceiling reader must
+        prefer the new combined key so the §28.6 raise to $30 actually
+        takes effect; otherwise the spec promise of the migration's
+        seeded $30 row is silently broken.
+        """
+        # Insert both: legacy $25, new combined $30 (Phase 7 install state).
+        db_conn.execute(
+            """INSERT OR REPLACE INTO settings (key, value_json, note, updated_at)
+               VALUES ('agent_monthly_cost_cap_usd', '25.0', 'legacy', datetime('now'))"""
+        )
+        db_conn.execute(
+            """INSERT OR REPLACE INTO settings (key, value_json, note, updated_at)
+               VALUES ('combined_ai_monthly_cost_ceiling_usd', '30.0',
+                       'phase 7', datetime('now'))"""
+        )
+        assert cost.get_monthly_ceiling_usd(db_conn) == 30.0
+
+    def test_legacy_ceiling_key_is_fallback_when_combined_absent(self, db_conn):
+        """RV2-3: pre-migration-018 DB with only the legacy key still works."""
+        db_conn.execute(
+            "DELETE FROM settings WHERE key = 'combined_ai_monthly_cost_ceiling_usd'"
+        )
+        db_conn.execute(
+            """INSERT OR REPLACE INTO settings (key, value_json, note, updated_at)
+               VALUES ('agent_monthly_cost_cap_usd', '22.5', 'legacy', datetime('now'))"""
+        )
+        assert cost.get_monthly_ceiling_usd(db_conn) == 22.5
+
+    def test_default_ceiling_when_no_settings_row(self, db_conn):
+        """RV2-3: default is the Phase 7 $30 ceiling when no rows exist."""
+        db_conn.execute(
+            "DELETE FROM settings WHERE key IN "
+            "('combined_ai_monthly_cost_ceiling_usd', 'agent_monthly_cost_cap_usd')"
+        )
+        assert cost.get_monthly_ceiling_usd(db_conn) == cost.DEFAULT_MONTHLY_CEILING_USD
+        assert cost.DEFAULT_MONTHLY_CEILING_USD == 30.0
 
     def test_tool_call_cost_usd_NOT_counted_in_mtd(self, db_conn):
         """W3 regression: agent_tool_calls.cost_usd is intentionally NOT

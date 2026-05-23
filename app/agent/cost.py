@@ -1,11 +1,14 @@
 """Cost tracking and monthly ceiling enforcement (§28.6).
 
-Per §28.6:
+Per §28.6 + Phase 7 install (RV2-3):
 
 * Per-call cost is estimated from token counts and a per-model rate snapshot
   taken at call time (so retroactive auditing isn't broken if Anthropic
   pricing changes).
-* Monthly cap default $25 (configurable via settings ``agent_monthly_cost_cap_usd``).
+* Monthly cap is the COMBINED Anthropic + xAI ceiling — read from
+  ``combined_ai_monthly_cost_ceiling_usd`` (Phase 7 default $30) with a
+  fallback to the legacy ``agent_monthly_cost_cap_usd`` key (default $25)
+  for pre-migration-018 databases.
 * At 80% → yellow banner. At 100% → red banner; agent disabled.
 * Enforcement at the client layer — ``check_ceiling_or_raise`` is called
   before any ``messages.create`` round trip in ``app.agent.client``.
@@ -38,7 +41,13 @@ _MODEL_RATES: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.0, 5.0),
 }
 
-DEFAULT_MONTHLY_CEILING_USD: float = 25.0
+# RV2-3: Phase 7 raised the historical Anthropic-only ceiling ($25) to a
+# combined Anthropic + xAI ceiling ($30). Code reads
+# ``combined_ai_monthly_cost_ceiling_usd`` first, falling back to the
+# legacy ``agent_monthly_cost_cap_usd`` for pre-migration-018 databases.
+COMBINED_CEILING_SETTING_KEY: str = "combined_ai_monthly_cost_ceiling_usd"
+LEGACY_CEILING_SETTING_KEY: str = "agent_monthly_cost_cap_usd"
+DEFAULT_MONTHLY_CEILING_USD: float = 30.0  # Phase 7 default
 DEFAULT_CEILING_WARN_FRACTION: float = 0.80
 
 # S3: coarse projected per-call cost used by the cost-ceiling preflight.
@@ -151,17 +160,30 @@ def month_to_date_spend_usd(
 
 
 def get_monthly_ceiling_usd(conn: sqlite3.Connection) -> float:
-    """Read the ceiling from settings, fall back to ``DEFAULT_MONTHLY_CEILING_USD``."""
-    row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = 'agent_monthly_cost_cap_usd'"
-    ).fetchone()
-    if row is None:
-        return DEFAULT_MONTHLY_CEILING_USD
-    try:
-        val = json.loads(row["value_json"])
-        return float(val)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return DEFAULT_MONTHLY_CEILING_USD
+    """Read the §28.6 combined Anthropic + xAI ceiling.
+
+    RV2-3: prefers the Phase 7 ``combined_ai_monthly_cost_ceiling_usd``
+    key. Falls back to the legacy ``agent_monthly_cost_cap_usd`` key so
+    a fresh DB initialized before migration 018 ran still works. If
+    neither row exists OR both rows have unparseable JSON, the default
+    ($30 Phase-7 ceiling) is returned.
+
+    The two-key fallback also handles the upgrade scenario: an existing
+    DB with the legacy $25 row continues to apply the legacy value
+    until migration 018 inserts the new $30 row. Phase 7 install seeds
+    the new row, after which it dominates.
+    """
+    for key in (COMBINED_CEILING_SETTING_KEY, LEGACY_CEILING_SETTING_KEY):
+        row = conn.execute(
+            "SELECT value_json FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None or row["value_json"] is None:
+            continue
+        try:
+            return float(json.loads(row["value_json"]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return DEFAULT_MONTHLY_CEILING_USD
 
 
 def check_ceiling_or_raise(
