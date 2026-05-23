@@ -1379,9 +1379,27 @@ def _save_draft_reply(
     # only when passed=False; NULL on pass. The dispatcher omits the
     # injection when passed=True so the default None argument keeps
     # the column NULL via the schema CHECK contract.
+    #
+    # Phase 10 W2 — defense in depth: validate against the canonical
+    # eleven-value enum before the INSERT. If the value isn't recognized
+    # we LOG and coerce to NULL rather than letting an IntegrityError
+    # roll back the entire draft + post + scorer + repetition-guard
+    # transaction. Mirrors the validate_for_save(content_type) pattern
+    # above; matches how reply_intent is validated by the dispatcher.
+    from app.agent import lint as _lint  # local — avoid circular import at module load
     rq_failure_mode_persist: str | None = (
         reply_quality_lint_failure_mode if rq_persist == 0 else None
     )
+    if (
+        rq_failure_mode_persist is not None
+        and rq_failure_mode_persist not in _lint.REPLY_QUALITY_FAILURE_MODES
+    ):
+        _LOG.warning(
+            "_save_draft_reply: rejecting unknown reply_quality_lint_failure_mode=%r "
+            "(valid values: %s); coercing to NULL to preserve the draft.",
+            rq_failure_mode_persist, list(_lint.REPLY_QUALITY_FAILURE_MODES),
+        )
+        rq_failure_mode_persist = None
     with transaction(conn):
         draft_cur = conn.execute(
             """

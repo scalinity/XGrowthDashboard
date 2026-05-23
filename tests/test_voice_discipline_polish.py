@@ -616,6 +616,34 @@ def test_save_draft_reply_persists_failure_mode_when_failed(
     assert row["reply_quality_lint_failure_mode"] == "selfishly_self_promoting"
 
 
+def test_save_draft_reply_coerces_unknown_failure_mode_to_null(
+    db_conn: sqlite3.Connection, caplog
+) -> None:
+    """Phase 10 W2 — handler-level defense in depth. An unknown
+    failure_mode (mistyped enum, future-Phase token from a stale
+    dispatcher) must NOT crash the entire save transaction. The
+    handler coerces to NULL and logs."""
+    from app.agent.tools import _save_draft_reply
+    _niche.set_niche(db_conn, problem="x", person="y")
+    out = _save_draft_reply(
+        db_conn,
+        text="A substantive reply text.",
+        target_post_url="https://x.com/foo/status/800",
+        content_type="value",
+        reply_quality_lint_passed=False,
+        reply_quality_lint_failure_mode="NOT_A_VALID_ENUM_VALUE",
+    )
+    row = db_conn.execute(
+        "SELECT reply_quality_lint_passed, reply_quality_lint_failure_mode "
+        "FROM agent_drafts WHERE id = ?",
+        (out["draft_id"],),
+    ).fetchone()
+    # Draft landed — transaction did NOT roll back on the bad enum.
+    assert row["reply_quality_lint_passed"] == 0
+    # Bad enum was coerced to NULL rather than blowing up the row.
+    assert row["reply_quality_lint_failure_mode"] is None
+
+
 def test_revise_draft_propagates_reply_quality_lint_failure_mode(
     db_conn: sqlite3.Connection,
 ) -> None:
