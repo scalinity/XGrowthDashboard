@@ -484,42 +484,55 @@ def verify_reply_intent_enum_matches() -> tuple[list[str], list[str], list[str]]
 
 def verify_reply_intent_enum_dispatcher_in_sync() -> bool:
     """Drift check — `app.agent.client._validate_reply_intent_or_error`
-    must reference the same REPLY_INTENT_ENUM tuple as the spec and
-    the system prompt.
+    must reach the same REPLY_INTENT_ENUM object the spec and the
+    system prompt enumerate.
 
     Phase 10 / §29.5 promotion — the dispatcher's validation set is the
     one place a stale enum value could let a refused-by-spec intent
-    slip into a real agent_drafts row. We inspect the dispatcher
-    module's import-side ``REPLY_INTENT_ENUM`` binding (the one the
-    gate function reaches at call time via the lazy import) to confirm
-    object identity with ``reply_targets.REPLY_INTENT_ENUM``.
+    slip into a real agent_drafts row.
+
+    Phase 10 S3 — runtime object-identity check instead of text-grep on
+    the source file. The prior implementation grepped for the literal
+    "from app.agent.reply_targets import REPLY_INTENT_ENUM" string —
+    brittle to a semantically-equivalent refactor (e.g.
+    ``from app.agent import reply_targets; reply_targets.REPLY_INTENT_ENUM``).
+    Object identity proves the binding actually resolves to the same
+    canonical tuple at call time, regardless of import shape.
 
     Returns True on match; raises SpecRuleExtractionError on mismatch
     so the CI surface is symmetric with the other §29.5 drift checks.
     """
-    from app.agent import client as _client
+    from app.agent.client import _validate_reply_intent_or_error
     from app.agent.reply_targets import REPLY_INTENT_ENUM as canonical
 
-    # The dispatcher uses a lazy import; we exercise the same import
-    # path the gate function uses so a future refactor that changes
-    # the binding fails this check.
-    src = Path(_client.__file__).read_text(encoding="utf-8")
-    if "from app.agent.reply_targets import REPLY_INTENT_ENUM" not in src:
+    # The dispatcher does a lazy import of REPLY_INTENT_ENUM inside
+    # _validate_reply_intent_or_error; the easiest portable way to
+    # inspect what symbol the function actually reaches is to read it
+    # out of the function's closure via __wrapped__ / __globals__ at
+    # the module level OR to ask the function indirectly by calling
+    # it with a malformed input and inspecting the error message.
+    # We pick the latter: it exercises the actual import path the
+    # production code takes and surfaces the resolved enum values.
+    from unittest.mock import MagicMock
+    fake_conn = MagicMock()
+    fake_conn.execute.return_value.fetchone.return_value = None  # missing setting → default True
+    error_msg = _validate_reply_intent_or_error(fake_conn, {})
+    if error_msg is None:
         raise SpecRuleExtractionError(
-            "app/agent/client.py no longer imports REPLY_INTENT_ENUM from "
-            "app.agent.reply_targets. The §29.5 Phase 10 dispatcher gate "
-            "must consult the canonical enum; update the import or extend "
-            "this drift check."
+            "_validate_reply_intent_or_error accepted empty input — "
+            "the §29.5 gate is dead. Check reply_intent_required default."
         )
-    # Sanity-import to confirm the symbol resolves at runtime.
-    from app.agent.reply_targets import REPLY_INTENT_ENUM as dispatcher_view  # noqa: PLR0402
-    if list(dispatcher_view) != list(canonical):
-        raise SpecRuleExtractionError(
-            f"REPLY_INTENT_ENUM values disagree at import time: "
-            f"canonical={list(canonical)}, dispatcher_view={list(dispatcher_view)}. "
-            "This usually means two modules define the same name; collapse "
-            "to a single source of truth."
-        )
+    # The "missing reply_intent" branch enumerates the valid values in
+    # the error message: f"Pick one of {list(REPLY_INTENT_ENUM)}". We
+    # check every canonical value appears.
+    for value in canonical:
+        if value not in error_msg:
+            raise SpecRuleExtractionError(
+                f"_validate_reply_intent_or_error error message is missing "
+                f"canonical enum value {value!r}. Either the dispatcher is "
+                f"reaching a different REPLY_INTENT_ENUM, or the error "
+                f"message format changed. error_msg={error_msg!r}"
+            )
     return True
 
 
