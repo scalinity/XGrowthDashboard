@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 7 / §17 Phase 7 job #4 — hourly reply-target metrics refresh.
+
+  Cadence: every hour. The job's SQL ORDER BY picks oldest-stale
+  candidates first; the per-sweep batch is capped at 100 IDs per the
+  X API /2/tweets?ids endpoint limit.
+
+  Configurable via reply_target_metrics_refresh_interval_minutes
+  setting (default 60). To change cadence: edit StartInterval AND the
+  setting in parallel, then `launchctl unload`/`launchctl load`.
+
+  Notable side effects (per app/jobs/reply_target_metrics_refresh.py
+  + §29.11):
+
+  - 404 from /2/tweets → reply_targets.status='target_deleted' +
+    audit_logs row.
+  - 429 → respects Retry-After; per-candidate last_checked_at_utc
+    stays at its previous value (no silent score drift).
+  - Each sweep recomputes velocity_score (from snapshot history) +
+    timing_score (from post age + author tier) AND applies the §29.3
+    trailing modifiers (high velocity bumps engagement_surface +1;
+    low timing downgrades the action).
+
+  This plist is NOT auto-loaded.
+
+      cp launchd/com.scalinity.xgrowth.reply-target-metrics-refresh.plist \
+         ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.reply-target-metrics-refresh.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scalinity.xgrowth.reply-target-metrics-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>app.jobs.reply_target_metrics_refresh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard</string>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/reply_target_metrics_refresh.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/reply_target_metrics_refresh.err.log</string>
+
+    <key>ExitTimeOut</key>
+    <integer>900</integer>
+</dict>
+</plist>

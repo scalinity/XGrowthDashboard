@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 7 / §17 Phase 7 job #2 — daily import of recent X posts.
+
+  Cadence: every day at 09:05 America/New_York (5 min after the
+  account-snapshot job so the two complete sequentially without
+  contending for the X API rate-limit window).
+
+  This plist is NOT auto-loaded. To enable:
+
+      cp launchd/com.scalinity.xgrowth.import-recent-posts.plist \
+         ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.import-recent-posts.plist
+
+  See docs/SCHEDULED_JOBS.md for the full per-job runbook + the
+  one-shot --backfill invocation that runs once at Phase 7 install.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scalinity.xgrowth.import-recent-posts</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>scripts.import_recent_posts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard</string>
+
+    <!-- Daily at 09:05 — 5 minutes after the snapshot job. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>5</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/import_recent_posts.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/import_recent_posts.err.log</string>
+
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
+</dict>
+</plist>

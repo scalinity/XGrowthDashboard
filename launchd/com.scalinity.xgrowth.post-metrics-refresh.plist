@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 7 / §17 Phase 7 job #3 — hourly metrics refresh for Daniel's posts.
+
+  Cadence: every hour, on the hour. The priority queue inside the job
+  picks the right batch per the 14d/90d/older tiers (see the docstring
+  in app/jobs/post_metrics_refresh.py).
+
+  Configurable via the post_metrics_refresh_interval_minutes setting
+  (default 60). The plist defaults to 3600 seconds (60 min); to change
+  the cadence on the running plist, edit StartInterval AND the setting
+  in parallel, then `launchctl unload`/`launchctl load` to apply.
+
+  This plist is NOT auto-loaded. To enable:
+
+      cp launchd/com.scalinity.xgrowth.post-metrics-refresh.plist \
+         ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.post-metrics-refresh.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scalinity.xgrowth.post-metrics-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>app.jobs.post_metrics_refresh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard</string>
+
+    <!-- Hourly. -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/post_metrics_refresh.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/post_metrics_refresh.err.log</string>
+
+    <key>ExitTimeOut</key>
+    <integer>900</integer>
+</dict>
+</plist>

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 7 / §17 Phase 7 job #1 — daily account snapshot via X API.
+
+  Cadence: every day at 09:00 America/New_York (Daniel's local).
+  launchd's StartCalendarInterval is matched against the system local
+  time, which is the same as America/New_York on Daniel's machine.
+
+  This plist is NOT auto-loaded. To enable:
+
+      cp launchd/com.scalinity.xgrowth.collect-account-snapshot.plist \
+         ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.collect-account-snapshot.plist
+
+  To disable:
+
+      launchctl unload ~/Library/LaunchAgents/com.scalinity.xgrowth.collect-account-snapshot.plist
+
+  See docs/SCHEDULED_JOBS.md for the full per-job runbook.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scalinity.xgrowth.collect-account-snapshot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>scripts.collect_account_snapshot</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard</string>
+
+    <!-- Daily at 09:00. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Do NOT run on first load — that would publish API calls Daniel
+         didn't explicitly schedule. The first run happens at the next
+         9:00 wall-clock after launchctl load. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- Job-level overrides (e.g., XURL_BIN, ANTHROPIC_API_KEY)
+             belong here. By default xurl reads its OAuth state from
+             ~/.xurl/ which the launchd user-context inherits. -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/collect_account_snapshot.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/collect_account_snapshot.err.log</string>
+
+    <!-- Per-job 5-minute hard timeout — the script should finish in ~2s
+         when X API is responsive. Hung subprocess = audit trail in
+         err.log + launchd kills the process. -->
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
+</dict>
+</plist>
