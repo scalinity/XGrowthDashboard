@@ -43,6 +43,17 @@ ACTION_TO_SCORE: dict[RecommendedAction, int] = {
     "skip": 0,
 }
 
+# RV2-28: spec-display ordering (high → low). Used in user-facing error
+# messages so the tier presentation matches §29.3's prose. Lexical
+# sort would produce ['consider', 'reply_if_time', 'reply_now', 'skip'],
+# which doesn't match the spec's downgrade ladder.
+RECOMMENDED_ACTIONS: tuple[RecommendedAction, ...] = (
+    "reply_now",
+    "reply_if_time",
+    "consider",
+    "skip",
+)
+
 
 # §29.3: the base resolver consumes only the four MVP dimensions. velocity,
 # timing, and audience_quality are accepted in the signature so the call
@@ -436,8 +447,9 @@ def apply_velocity_timing_modifiers(
         )
     if base_recommended_action not in _DOWNGRADE_ONE_TIER:
         raise ValueError(
+            # RV2-28: spec-tiered order, not lexical.
             f"base_recommended_action must be one of "
-            f"{sorted(_DOWNGRADE_ONE_TIER)}; got {base_recommended_action!r}"
+            f"{list(RECOMMENDED_ACTIONS)}; got {base_recommended_action!r}"
         )
 
     adjusted_engagement = base_engagement_surface
