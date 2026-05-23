@@ -136,6 +136,28 @@ def test_prescriptive_voice_file_present_and_nonempty() -> None:
     assert n_bytes > 0
 
 
+def test_prescriptive_voice_loader_mtime_cache_invalidates_on_edit(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Phase 10 W10 — the mtime-keyed cache must pick up an in-place
+    edit on the next read without a process restart."""
+    fake_file = tmp_path / "voice_profile_prescriptive.md"
+    fake_file.write_text("initial content", encoding="utf-8")
+    monkeypatch.setattr(
+        prompt_builder, "VOICE_PROFILE_PRESCRIPTIVE_PATH", fake_file
+    )
+    first = prompt_builder.load_voice_profile_prescriptive()
+    assert first == "initial content"
+    # Edit in place — bump the mtime via a write.
+    import time as _time
+    _time.sleep(0.01)  # ensure st_mtime_ns shifts
+    fake_file.write_text("edited content", encoding="utf-8")
+    second = prompt_builder.load_voice_profile_prescriptive()
+    assert second == "edited content", (
+        "W10 regression: cache held stale content after in-place edit"
+    )
+
+
 def test_prescriptive_voice_drift_check_raises_on_missing(tmp_path: Path) -> None:
     fake_path = tmp_path / "missing.md"
     with pytest.raises(prompt_builder.VoiceProfilePrescriptiveMissingError):

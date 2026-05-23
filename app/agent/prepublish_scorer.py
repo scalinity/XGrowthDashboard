@@ -26,6 +26,7 @@ constants here; do not move the contract.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -470,15 +471,23 @@ def voice_fit_score(text: str, profile: _voice_profile.VoiceProfile | None) -> i
 # ---------------------------------------------------------------------------
 # Phase 10 / §28.11 — screenshot test (10th dimension).
 # ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=8)
+def _read_screenshot_prompt_cached(mtime_ns: int) -> str:  # noqa: ARG001 — mtime keys the cache
+    return SCREENSHOT_TEST_PROMPT_PATH.read_text(encoding="utf-8")
+
+
 def _read_screenshot_prompt() -> str:
     """Read the static screenshot-test prompt template.
 
     Lazy: caller invokes only when score_screenshot_test actually fires.
-    Not @lru_cache'd because the file is small and the lazy path
-    keeps test isolation simple (tmp dir tests can override the
-    PROJECT_ROOT path without needing a cache flush).
+    Phase 10 W10 — mtime-keyed cache so iterative edits to the file
+    invalidate on the next read without a Streamlit restart. The
+    underlying _read_screenshot_prompt_cached takes the mtime as its
+    cache key; an in-place edit changes the mtime and forces a
+    re-read.
     """
-    return SCREENSHOT_TEST_PROMPT_PATH.read_text(encoding="utf-8")
+    mtime = SCREENSHOT_TEST_PROMPT_PATH.stat().st_mtime_ns
+    return _read_screenshot_prompt_cached(mtime)
 
 
 def _render_voice_profile_snapshot(

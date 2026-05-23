@@ -235,7 +235,17 @@ def render_voice_profile_structural(
     return "\n".join(lines)
 
 
-@functools.lru_cache(maxsize=1)
+# Phase 10 W10 — mtime-keyed cache. The prior `lru_cache(maxsize=1)`
+# variant cached the file content for the Python process lifetime;
+# editing config/voice_profile_prescriptive.md and reloading the
+# Streamlit page produced stale output until restart. Keying on
+# st_mtime_ns invalidates on each in-place edit and keeps the cache
+# benefits for unchanged files.
+@functools.lru_cache(maxsize=8)
+def _load_voice_profile_prescriptive_cached(mtime_ns: int) -> str:  # noqa: ARG001 — mtime keys the cache
+    return VOICE_PROFILE_PRESCRIPTIVE_PATH.read_text(encoding="utf-8")
+
+
 def load_voice_profile_prescriptive() -> str:
     """Read the static §28.12 prescriptive voice anchor from disk.
 
@@ -245,9 +255,12 @@ def load_voice_profile_prescriptive() -> str:
     version-controlled. Returns the raw markdown — caller splices it
     verbatim into Section 5 of the system prompt.
 
-    Cached at process scope to match the template + spec caches.
+    Phase 10 W10 — mtime-keyed cache so Daniel can iterate on the file
+    without restarting Streamlit; the next read after an in-place edit
+    picks up the new content.
     """
-    return VOICE_PROFILE_PRESCRIPTIVE_PATH.read_text(encoding="utf-8")
+    mtime = VOICE_PROFILE_PRESCRIPTIVE_PATH.stat().st_mtime_ns
+    return _load_voice_profile_prescriptive_cached(mtime)
 
 
 class VoiceProfilePrescriptiveMissingError(RuntimeError):
