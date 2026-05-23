@@ -354,7 +354,13 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str, str], ...] = (
         "performative_threading",
     ),
     (
-        r"(?:^|\s)1/\s+",
+        # Phase 10 W7 — anchor at start-of-string + require a non-
+        # numeric token after "1/" + reject "1/ of N" (= "step 1 of 3"
+        # natural phrasing). Avoids false positives on "v1/ schema
+        # reviewed", "step 1/ done", "finished 1/ of 3 milestones".
+        # The thread-shaped opener is "1/ <word>" at the literal start
+        # of the reply, NOT mid-sentence.
+        r"^\s*1/\s+\S+(?!\s+of\s+\d+)",
         "performative_threading: bare '1/ ' opener without a thread payload",
         "performative_threading",
     ),

@@ -505,6 +505,49 @@ def test_reply_quality_failure_mode_enum_matches_schema(
 
 
 @pytest.mark.parametrize(
+    "false_positive_text",
+    [
+        # Phase 10 W7 — these must NOT trigger performative_threading.
+        "finished 1/ of 3 milestones today",
+        "shipped v1/ schema reviewed by team",
+        "Almost there — step 1/ done, two more to go",
+        "We're at 1/ of 5 demo days complete",
+    ],
+)
+def test_performative_threading_bare_one_slash_no_false_positives(
+    false_positive_text: str,
+) -> None:
+    """W7 regression — '1/' mid-sentence in legitimate context must not
+    trigger performative_threading. Only "^ 1/ <word>" (literal opener)
+    should fire."""
+    result = lint._offline_reply_quality(false_positive_text)
+    # Either it passes entirely, OR it matches some OTHER category —
+    # but not performative_threading via the bare 1/ rule.
+    if not result.passed:
+        assert result.failure_mode != "performative_threading", (
+            f"W7 regression: {false_positive_text!r} false-positives as "
+            f"performative_threading"
+        )
+
+
+@pytest.mark.parametrize(
+    "true_positive_text",
+    [
+        # Phase 10 W7 — true opener cases must still fire.
+        "1/ Here's what I learned about LLM evals this week",
+        "1/ A thread on cohort-specific funnels",
+    ],
+)
+def test_performative_threading_bare_one_slash_true_positives(
+    true_positive_text: str,
+) -> None:
+    """W7 — opener-at-start-of-string still triggers performative_threading."""
+    result = lint._offline_reply_quality(true_positive_text)
+    assert result.passed is False
+    assert result.failure_mode == "performative_threading"
+
+
+@pytest.mark.parametrize(
     ("text", "expected_mode"),
     [
         # Phase 10 W6 — these MUST resolve to emoji_as_personality,
