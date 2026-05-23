@@ -134,8 +134,21 @@ def _xurl(method: str, endpoint: str, body: dict[str, object] | None) -> tuple[i
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
-def _record(plan: list[tuple[str, dict[str, object]]]) -> list[str]:
-    posted_ids: list[str] = []
+def _record(
+    plan: list[tuple[str, dict[str, object]]],
+    posted_ids: list[str] | None = None,
+) -> list[str]:
+    """Record cassettes; append posted X IDs to ``posted_ids`` as we go.
+
+    P8R-18: ``posted_ids`` can be supplied by the caller as a
+    pre-allocated list so the main() can run cleanup in a try/finally
+    even if _record raises partway through. The caller's list is
+    populated INCREMENTALLY (per-cassette) — a crash after cassette
+    N posts but before cassette N+1 still leaves the caller with the
+    N IDs to clean up.
+    """
+    if posted_ids is None:
+        posted_ids = []
     last_post_id: str | None = None
     for name, shape in plan:
         method = str(shape["method"])
@@ -228,18 +241,27 @@ def main(argv: list[str] | None = None) -> int:
     _confirm_or_exit(no_prompt=args.no_prompt)
 
     print("Recording cassettes...")
-    posted = _record(_RECORDABLE_CASSETTES)
-    if not posted:
-        print("No real posts created; nothing to clean up.")
-        return 0
-    print(f"\nCleaning up {len(posted)} posted tweets...")
-    failures = _delete_posted(posted)
-    if failures:
-        print(
-            f"\nERROR: {failures} of {len(posted)} delete calls failed. "
-            "Manually remove the orphaned tweets from your X timeline."
-        )
-        return 1
+    # P8R-18: pre-allocate the posted-ids list so cleanup runs even if
+    # _record() raises partway through. Without this, a crash after
+    # cassette N posted (and before N+1) would leak the N already-
+    # posted tweets on Daniel's timeline.
+    posted: list[str] = []
+    try:
+        _record(_RECORDABLE_CASSETTES, posted_ids=posted)
+    finally:
+        if posted:
+            print(f"\nCleaning up {len(posted)} posted tweets...")
+            failures = _delete_posted(posted)
+            if failures:
+                print(
+                    f"\nERROR: {failures} of {len(posted)} delete calls failed. "
+                    "Manually remove the orphaned tweets from your X timeline."
+                )
+                # Re-raise via non-zero exit even if _record succeeded —
+                # orphaned tweets are a script-level failure regardless.
+                return 1
+        else:
+            print("No real posts created; nothing to clean up.")
     print("\nDone. Verify `git diff tests/fixtures/x_api/` before committing.")
     return 0
 
