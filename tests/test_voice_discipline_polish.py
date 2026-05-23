@@ -616,6 +616,43 @@ def test_save_draft_reply_persists_failure_mode_when_failed(
     assert row["reply_quality_lint_failure_mode"] == "selfishly_self_promoting"
 
 
+def test_revise_draft_propagates_reply_quality_lint_failure_mode(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Phase 10 W1 — revise_draft must propagate the new column from
+    source to revision row. Without this fix, every IWH revision loses
+    the parent's §28.18 lint audit trail."""
+    from app.agent.tools import _revise_draft, _save_draft_reply
+
+    _niche.set_niche(db_conn, problem="x", person="y")
+    # Seed a parent draft with non-NULL failure_mode (direct handler
+    # path — the dispatcher gate wouldn't normally let this through,
+    # but it's a valid persisted state per Phase 10 W2).
+    parent = _save_draft_reply(
+        db_conn,
+        text="Forced parent reply text.",
+        target_post_url="https://x.com/foo/status/700",
+        content_type="value",
+        reply_quality_lint_passed=False,
+        reply_quality_lint_failure_mode="engagement_bait",
+    )
+    # Find the parent's posts row (the published-from id) so revise can
+    # locate the agent_drafts row by its final_post_id == parent post_id.
+    revision = _revise_draft(
+        db_conn,
+        draft_post_id=parent["draft_id"],
+        feedback="Engagement bait flagged — rewrite without the gap.",
+        new_text="A substantive rewrite addressing the OP directly.",
+    )
+    rev_row = db_conn.execute(
+        "SELECT reply_quality_lint_passed, reply_quality_lint_failure_mode "
+        "FROM agent_drafts WHERE id = ?",
+        (revision["new_draft_id"],),
+    ).fetchone()
+    assert rev_row["reply_quality_lint_passed"] == 0
+    assert rev_row["reply_quality_lint_failure_mode"] == "engagement_bait"
+
+
 def test_save_draft_reply_leaves_failure_mode_null_on_pass(
     db_conn: sqlite3.Connection,
 ) -> None:

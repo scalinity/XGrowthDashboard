@@ -1522,7 +1522,7 @@ def _revise_draft(
         SELECT id, session_id, conversation_id, draft_kind, pillar,
                audience, cta, target_post_url, target_post_text,
                iwh_attempt_index, content_type, confidence_label,
-               reply_quality_lint_passed
+               reply_quality_lint_passed, reply_quality_lint_failure_mode
         FROM agent_drafts WHERE id = ?
         """,
         (int(draft_post_id),),
@@ -1546,8 +1546,9 @@ def _revise_draft(
                  audience, cta, target_post_url, target_post_text,
                  voice_self_score, iwh_attempt_index, status,
                  revision_of, user_feedback,
-                 content_type, confidence_label, reply_quality_lint_passed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)
+                 content_type, confidence_label, reply_quality_lint_passed,
+                 reply_quality_lint_failure_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)
             """,
             (
                 src["session_id"],
@@ -1566,6 +1567,12 @@ def _revise_draft(
                 src_content_type,
                 src["confidence_label"],
                 src["reply_quality_lint_passed"],
+                # Phase 10 W1 — propagate the §28.18 failure_mode so a
+                # revised draft preserves the parent's lint audit trail.
+                # The dispatcher only saves drafts when lint passed, so
+                # parent rows usually carry NULL here, but _save_draft_reply
+                # is callable directly (Phase 10 tests do this).
+                src["reply_quality_lint_failure_mode"],
             ),
         )
         new_id = int(rev_cur.lastrowid)
