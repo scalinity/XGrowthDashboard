@@ -544,3 +544,51 @@ def test_x_client_log_raw_inserts_audit_row(
     ).fetchone()
     assert row["source"] == "xurl"
     assert row["status_code"] == 200
+
+
+# ---------------------------------------------------------------------------
+# RV2-2: import_recent_posts ↔ publish resolver contract — the X post ID
+# stored in posts.in_reply_to_post_id by import_recent_posts.py must be the
+# same string publish._resolve_reply_target_x_post_id reads back as the
+# in_reply_to_x_post_id for the X API call. Earlier Phase 8 code did a
+# local-id PK lookup that silently turned replies into standalone tweets.
+# ---------------------------------------------------------------------------
+def test_import_recent_posts_in_reply_to_round_trips_through_publish_resolver(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: import a reply via the daily incremental job, then
+    confirm publish._resolve_reply_target_x_post_id returns the original
+    X post ID string (not None, not a local-id miss)."""
+    from app.agent import publish as _publish
+
+    fake_body = {
+        "data": [
+            {
+                "id": "555",
+                "text": "my reply text",
+                "created_at": "2026-05-22T10:00:00.000Z",
+                "conversation_id": "100",
+                "referenced_tweets": [{"type": "replied_to", "id": "100"}],
+                "in_reply_to_user_id": "999",
+            },
+        ]
+    }
+    monkeypatch.setattr(
+        x_client, "request",
+        lambda *a, **kw: _fake_response(fake_body),
+    )
+    summary = import_recent_posts.run(db_conn)
+    assert summary["posts_inserted"] == 1
+    # Resolve the imported reply row.
+    row = db_conn.execute(
+        "SELECT id, type, in_reply_to_post_id FROM posts WHERE x_post_id = '555'"
+    ).fetchone()
+    assert row is not None
+    assert row["type"] == "reply"
+    # The publish resolver must see the original X post ID '100' verbatim.
+    resolved = _publish._resolve_reply_target_x_post_id(db_conn, row)
+    assert resolved == "100", (
+        "publish._resolve_reply_target_x_post_id must round-trip the X post "
+        "ID string written by import_recent_posts.py (RV2-2 regression). "
+        f"got {resolved!r}"
+    )
