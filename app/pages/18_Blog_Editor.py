@@ -739,7 +739,11 @@ def _render_export_dialog(blog_id: int) -> None:
         key=f"editor_export_seo_{blog_id}",
     )
     st.checkbox(
-        "include repurposing notes footer",
+        # P6R-32: label clarified — this checkbox drives BOTH the
+        # Markdown "Repurposing notes" footer AND the JSON
+        # repurposing_links payload; the prior label only mentioned the
+        # footer and surprised users picking JSON or MDX export.
+        "include repurposing notes / linked-posts metadata",
         value=False,
         key=f"editor_export_links_{blog_id}",
     )
