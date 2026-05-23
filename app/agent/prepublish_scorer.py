@@ -130,7 +130,10 @@ class ScoreRow:
 
     def as_db_tuple(self, draft_id: int) -> tuple:
         """Return the positional tuple matching the INSERT column order in
-        `_insert_score_row`."""
+        `insert_score_row`. Kept for backward compatibility with any
+        external caller; the canonical INSERT now uses ``as_db_params``
+        (named SQL bindings) so column-order coupling is decoupled.
+        """
         return (
             draft_id,
             self.clarity_score,
@@ -147,6 +150,33 @@ class ScoreRow:
             self.scorer_version,
             self.screenshot_test_score,
         )
+
+    def as_db_params(self, draft_id: int) -> dict[str, object]:
+        """Phase 10 W12 — named-parameter binding for the INSERT in
+        ``insert_score_row``. Decouples Python tuple positions from
+        SQL column positions: a future Phase 11+ column addition
+        requires editing only the column-list constant + this dict,
+        not also re-counting positional ``?`` placeholders.
+        """
+        return {
+            "agent_draft_id": draft_id,
+            "clarity_score": self.clarity_score,
+            "hook_strength_score": self.hook_strength_score,
+            "specificity_score": self.specificity_score,
+            "length_fit_score": self.length_fit_score,
+            "format_fit_score": self.format_fit_score,
+            "topic_fit_score": self.topic_fit_score,
+            "reply_substance_score": self.reply_substance_score,
+            "cta_strength_score": self.cta_strength_score,
+            "voice_fit_score": self.voice_fit_score,
+            "composite_label": self.composite_label,
+            "warnings_json": (
+                None if not self.warnings_json
+                else _json_dump(self.warnings_json)
+            ),
+            "scorer_version": self.scorer_version,
+            "screenshot_test_score": self.screenshot_test_score,
+        }
 
 
 def _json_dump(items: list[str]) -> str:
@@ -922,6 +952,10 @@ def insert_score_row(
     (agent_drafts ↔ prepublish_scores) is set up here in two writes
     inside the caller's transaction.
     """
+    # Phase 10 W12 — named-parameter binding via ``as_db_params`` so the
+    # column-list and the value-list aren't positionally coupled.
+    # Adding a new column in Phase 11+ requires editing one column-list
+    # constant + one dict-builder, not also re-counting placeholders.
     cur = conn.execute(
         """
         INSERT INTO prepublish_scores
@@ -930,9 +964,13 @@ def insert_score_row(
            topic_fit_score, reply_substance_score, cta_strength_score,
            voice_fit_score, composite_label, warnings_json, scorer_version,
            screenshot_test_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (:agent_draft_id, :clarity_score, :hook_strength_score,
+                :specificity_score, :length_fit_score, :format_fit_score,
+                :topic_fit_score, :reply_substance_score,
+                :cta_strength_score, :voice_fit_score, :composite_label,
+                :warnings_json, :scorer_version, :screenshot_test_score)
         """,
-        row.as_db_tuple(agent_draft_id),
+        row.as_db_params(agent_draft_id),
     )
     score_id = int(cur.lastrowid)
     conn.execute(
