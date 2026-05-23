@@ -385,3 +385,149 @@ def test_audit_profile_explicit_bio_text_wins_over_auto_pull(
     )
     assert result["status"] == "saved"
     assert pulled["bio"] == "paste-supplied bio with annotations"
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher-path regression tests — RV2-1.
+# ---------------------------------------------------------------------------
+# Direct Python calls to score_replier_pool / _analyze_account_to_dict /
+# _audit_profile_to_dict aren't enough — the agent reaches these surfaces
+# via the AGENT_TOOLS registry's handler lambdas. Pre-RV2-1, the auto-pull
+# flags were silently stripped at that boundary because they weren't in
+# input_schema and the lambdas didn't accept them. These tests exercise
+# the AGENT_TOOLS dispatch path so a future schema/lambda regression fails
+# loudly instead of producing dead-code auto-pulls.
+
+
+def _get_tool_handler(tool_name: str):
+    """Look up a tool's handler from the AGENT_TOOLS registry by name."""
+    from app.agent.tools import AGENT_TOOLS
+
+    for tool in AGENT_TOOLS:
+        if tool.name == tool_name:
+            return tool
+
+    raise AssertionError(f"tool {tool_name!r} not registered in AGENT_TOOLS")
+
+
+def test_score_replier_pool_dispatcher_forwards_auto_scan(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RV2-1: AGENT_TOOLS handler must declare + forward auto_scan."""
+    tool = _get_tool_handler("score_replier_pool")
+    assert "auto_scan" in tool.input_schema["properties"], (
+        "auto_scan must be declared in score_replier_pool input_schema "
+        "(RV2-1 regression — pre-fix it was silently dropped)"
+    )
+    fake_body = {
+        "data": [{"id": "1", "author_id": "10",
+                  "text": "weeknight dinner planning is rough"}],
+        "includes": {"users": [{"id": "10", "username": "p"}]},
+    }
+    monkeypatch.setattr(x_client, "request", lambda *a, **kw: _fake_response(fake_body))
+    result = tool.handler(
+        db_conn,
+        thread_url="https://x.com/big/status/1",
+        auto_scan=True,
+    )
+    assert result.get("error") is None, result
+    # The auto-scan path must have ingested the synthesized paste-shape.
+    assert result["created_count"] >= 1
+
+
+def test_analyze_account_dispatcher_forwards_auto_pull(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RV2-1: AGENT_TOOLS handler must declare + forward auto_pull."""
+    tool = _get_tool_handler("analyze_account")
+    assert "auto_pull" in tool.input_schema["properties"], (
+        "auto_pull must be declared in analyze_account input_schema "
+        "(RV2-1 regression)"
+    )
+
+    def fake_request(endpoint, **kw):
+        if "users/by/username" in endpoint:
+            return _fake_response({
+                "data": {
+                    "id": "777", "username": "t", "name": "T",
+                    "description": "kitchen tools",
+                    "public_metrics": {"followers_count": 100},
+                }
+            })
+        if "/2/users/777/tweets" in endpoint:
+            return _fake_response({
+                "data": [{"id": "1", "text": "sample"}]
+            })
+        pytest.fail(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(x_client, "request", fake_request)
+    from app.agent import account_research as _ar
+    monkeypatch.setattr(
+        _ar, "analyze",
+        lambda **kw: _ar.AccountResearchAnalysis(
+            posting_patterns=_ar.PostingPatterns(
+                cadence="daily", topics=[], common_hooks=[]
+            ),
+            positioning=_ar.Positioning(
+                primary_audience="x", value_proposition="x", voice_markers=[]
+            ),
+            reply_strategy=_ar.ReplyStrategy(
+                best_entry_topics=[], tone_to_match="x", what_to_avoid=[]
+            ),
+            niche_alignment_with_daniel=_ar.NicheAlignment(
+                overlap_score=1, rationale="x"
+            ),
+            model_used="claude", tokens_used=10,
+            target_handle="@t",
+        ),
+    )
+    monkeypatch.setattr(_ar, "save", lambda conn, **kw: 42)
+
+    result = tool.handler(db_conn, target_handle="@t", auto_pull=True)
+    assert result["status"] == "saved"
+
+
+def test_audit_profile_dispatcher_forwards_auto_pull_bio(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RV2-1: AGENT_TOOLS handler must declare + forward auto_pull_bio."""
+    tool = _get_tool_handler("audit_profile")
+    assert "auto_pull_bio" in tool.input_schema["properties"], (
+        "auto_pull_bio must be declared in audit_profile input_schema "
+        "(RV2-1 regression)"
+    )
+    pulled: dict[str, str] = {"bio": ""}
+    monkeypatch.setattr(
+        x_client, "request",
+        lambda *a, **kw: _fake_response({
+            "data": {
+                "id": "1", "username": "d",
+                "description": "meal planning for parents",
+            }
+        }),
+    )
+    from app.agent import profile_audit as _pa
+
+    class _StubAnalysis:
+        overall_consistency_score = 3
+        top_three_actions = ["a"]
+        tokens_used = 10
+
+        def to_dict(self):
+            return {}
+
+    def fake_audit(conn, *, bio_text, **kw):
+        pulled["bio"] = bio_text
+        return _StubAnalysis(), {}
+
+    monkeypatch.setattr(_pa, "audit", fake_audit)
+    monkeypatch.setattr(_pa, "save", lambda conn, **kw: 7)
+
+    result = tool.handler(
+        db_conn,
+        bio_text="",
+        pinned_post_text="pinned",
+        auto_pull_bio=True,
+    )
+    assert result["status"] == "saved"
+    assert "meal planning" in pulled["bio"]

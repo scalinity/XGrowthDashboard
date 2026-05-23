@@ -257,6 +257,14 @@ def test_tool_wrapper_invokes_orchestrator(db_conn: sqlite3.Connection) -> None:
 
 
 def test_tool_in_registry_has_required_thread_url_and_payload() -> None:
+    """Post-RV2-1: thread_url remains required, but the paste payload is
+    NOT required because auto_scan=True (Phase 7 X API path) makes it
+    optional. The function defaults it to empty string and falls back to
+    the xurl /2/tweets/search/recent path."""
     tool = get_tool("score_replier_pool")
     assert "thread_url" in tool.input_schema["required"]
-    assert "replier_handles_or_excerpts_json" in tool.input_schema["required"]
+    # The paste payload is still a declared input — just no longer required.
+    assert "replier_handles_or_excerpts_json" in tool.input_schema["properties"]
+    # RV2-1: auto_scan flag must be declared so the agent can trigger it.
+    assert "auto_scan" in tool.input_schema["properties"]
+    assert tool.input_schema["properties"]["auto_scan"]["type"] == "boolean"

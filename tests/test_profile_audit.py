@@ -439,8 +439,17 @@ def test_update_notes_persists(seeded_posts: sqlite3.Connection) -> None:
 # Tool registry contract.
 # ---------------------------------------------------------------------------
 def test_audit_profile_tool_registered() -> None:
+    """Post-RV2-1: pinned_post_text remains required, but bio_text is NOT
+    required because auto_pull_bio=True (Phase 7 X API path) makes it
+    optional. The function falls back to the xurl
+    /2/users/by/username/<daniel_handle> path when bio_text is empty."""
     tool = _tools.get_tool("audit_profile")
-    assert tool.input_schema["required"] == ["bio_text", "pinned_post_text"]
+    assert tool.input_schema["required"] == ["pinned_post_text"]
+    # bio_text is still a declared input — just no longer required.
+    assert "bio_text" in tool.input_schema["properties"]
+    # RV2-1: auto_pull_bio flag must be declared so the agent can trigger it.
+    assert "auto_pull_bio" in tool.input_schema["properties"]
+    assert tool.input_schema["properties"]["auto_pull_bio"]["type"] == "boolean"
 
 
 def test_audit_profile_tool_handler_returns_dict_on_failure(

@@ -51,7 +51,15 @@ def _make_reply_draft_post(
     *,
     target_x_post_id: str = "1234567890",
 ) -> tuple[int, int]:
-    """Create a target posts row (with x_post_id) + a reply draft pointing at it."""
+    """Create a target posts row (with x_post_id) + a reply draft pointing at it.
+
+    Per publish.py::_resolve_reply_target_x_post_id docstring, posts.in_reply_to_post_id
+    is a TEXT column storing the target's X post ID directly (matches migration
+    001 line 111 + the app/forms/post_log.py populator). Earlier test helper
+    versions wrote the local posts.id integer here — that worked only because
+    an earlier (buggy) resolver did a PK→x_post_id lookup. The fixed resolver
+    treats the column verbatim, so this helper now matches the established
+    semantics."""
     cur = conn.execute(
         """
         INSERT INTO posts
@@ -67,7 +75,7 @@ def _make_reply_draft_post(
             (created_date, text, type, in_reply_to_post_id, posted_via, manual_confirmation_status)
         VALUES (date('now'), ?, 'reply', ?, 'agent_assisted', 'draft')
         """,
-        (text, target_id),
+        (text, target_x_post_id),
     )
     return int(cur.lastrowid), target_id
 

@@ -9,59 +9,84 @@ Daniel confirms in the modal. The click-handler does:
 
 The raw UUID lives only on the click-handler's local stack frame; once
 ``publish_post_atomic`` returns, the raw value is dropped. Audit logging
-in this module redacts the token via ``app.agent.audit.log_tool_call``,
-which substitutes the ``publish_confirmation_tokens.id`` for the raw
-value before insert.
+redacts the token via ``app.agent.audit.log_tool_call`` (substitutes
+``publish_confirmation_tokens.id`` for the raw value before insert).
 
 Phase 5.5 shipped the manual-clipboard branch only. Phase 8 (migration
-019) adds the API branch alongside it, gated by the
-``publish_via_api_enabled`` settings row (default TRUE):
+019) adds the API branch alongside it, gated by ``publish_via_api_enabled``
+(default TRUE).
 
-* ``publish_via_api_enabled = TRUE`` (default) — call
-  ``app.x_client.publish_post_to_x_via_api()`` inside the same atomic
-  transaction. On success, set ``posts.publish_method='agent_confirmed'``
-  and ``posts.x_post_id`` from the X API response. On the four typed
-  failure modes (429 / 403 / 5xx / timeout) each maps to a specific
-  token-consumed-or-not outcome per §22 + §29.11.
-* ``publish_via_api_enabled = FALSE`` — take the manual-clipboard
-  branch end-to-end. No X API call fires. ``posts.publish_method``
-  stays ``'manual_clipboard'`` and the click-handler opens the intent
-  URL for Daniel to complete the post manually.
+**Phase 8 R-1 architecture (split-txn pattern):** the X API subprocess
+call (``publish_post_to_x_via_api``) now happens OUTSIDE any open
+SQLite transaction so the writer-lock is never held across network
+I/O. The flow is:
 
-Both branches share the same six-check + atomic-transaction wrapper.
-Only the X API call inside it differs. §29.1 "Manual workflows remain
-inviolable as Settings-selectable fallbacks forever" — the manual
-branch is not deprecated and is exercised by a dedicated test.
+1. Read-only preflight (no txn): length cap, rate capacity, reply
+   target resolution.
+2. X API call OUTSIDE any txn. ``_log_raw`` audit rows from
+   ``app.x_client.request()`` commit in autocommit and SURVIVE if the
+   downstream commit fails.
+3. Commit txn (BEGIN IMMEDIATE held for milliseconds only): validate
+   + consume token + UPDATE posts + UPDATE consumed_by_x_post_id +
+   audit-log writes.
 
-Token-consumed matrix (§22 + §29.11):
+The four typed-exception failure modes from the X API call are
+handled BEFORE entering the commit txn:
 
-* 429 (X API rate limit, no X-side state change): token UN-consumed.
-* 403 (X cold-reply, X considers it a real attempt): token CONSUMED,
-  no posts row created.
-* 5xx after retry exhaustion: token CONSUMED, ROLLBACK, crash-recovery
-  reconciles via api_get_recent_tweets on next boot.
-* Timeout mid-call (X may have processed it): token CONSUMED, ROLLBACK,
-  crash-recovery reconciles. Never retried — risk of duplicate post.
+* ``XApiRateLimited`` (429): token UN-consumed (no txn ever opened).
+* ``XApiColdReplyError`` (403): token CONSUMED via an explicit narrow
+  txn (X considered it a real attempt — §22 + §29.11). No posts row
+  created.
+* ``XApiServerError`` (5xx after retry): token CONSUMED per rule
+  #10(f). No posts row.
+* ``XApiTimeoutError``: token CONSUMED to prevent retry-double-post.
+  ``publish_method='unknown'`` + ``published_to_x_at`` set so the
+  §28.10 step 8 crash-recovery scan picks it up via the existing
+  ``detect_orphans`` predicate.
+
+The manual-clipboard branch (``publish_via_api_enabled = FALSE``)
+takes the same shape minus the API call: read-only preflight →
+commit txn (validate-and-consume + UPDATE posts to
+``manual_clipboard``). §29.1 invariant preserved.
+
+The validate-and-consume + posts UPDATE remain atomic with each other
+(single BEGIN IMMEDIATE txn). The X API call is no longer atomic with
+the DB writes — a successful POST followed by a commit-txn failure
+(e.g. ConfirmationTokenError because Daniel edited the draft text
+mid-flight, or a runtime error during the commit) leaves an orphan
+that the crash-recovery scan reconciles via
+``recovery.reconcile_orphans_via_x_api``.
 
 Length cap (§28.10): drafts > 280 chars (``x_post_max_chars``) are
-refused inside the publish transaction with ``DraftTooLongError``. The
-modal also disables the confirm button when char_count > 280; this is
-the server-side belt to the modal's suspenders.
+refused before the API call. The modal also disables the confirm
+button when char_count > 280 — server-side belt to that suspenders.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 
 from app import x_client
 from app.agent import audit, audit_log, confirmation
 from app.db import transaction
 
 X_POST_MAX_CHARS: int = 280
+
+ErrorKind = Literal[
+    "rate_limited",
+    "cold_reply",
+    "server_error",
+    "timeout",
+    "confirmation",
+    "length",
+    "runtime",
+]
 
 
 class DraftTooLongError(RuntimeError):
@@ -71,8 +96,8 @@ class DraftTooLongError(RuntimeError):
 class RateLimitRefusalError(RuntimeError):
     """Phase 8: write-rate sliding window refused this publish attempt.
 
-    Raised INSIDE the atomic transaction by the API branch before any
-    state writes. ROLLBACK leaves the confirmation token UN-consumed
+    Surfaced when ``check_write_rate_capacity()`` returns ``ok=False``
+    BEFORE the X API call. The confirmation token stays UN-consumed
     (no X-side state change occurred); Daniel retries after the window
     rolls over.
     """
@@ -92,7 +117,7 @@ class PublishResult:
     intent_url: str | None = None  # X compose-tweet URL for manual variant
     x_post_id: str | None = None
     error: str | None = None
-    error_kind: str | None = None  # 'rate_limited' | 'cold_reply' | 'server_error' | 'timeout' | 'confirmation' | 'length' | 'runtime'
+    error_kind: ErrorKind | None = None
 
 
 def _utcnow_iso() -> str:
@@ -114,9 +139,7 @@ def _read_publish_via_api_enabled(conn: sqlite3.Connection) -> bool:
     """Phase 8 gate: read the ``publish_via_api_enabled`` settings row.
 
     Defaults to TRUE on parse failure / missing row — matches migration
-    019's seeded default and §28.10 Phase 5.5 → Phase 8 transition. The
-    manual-clipboard branch is the FALSE path; tests that exercise it
-    set the row to FALSE explicitly.
+    019's seeded default and §28.10 Phase 5.5 → Phase 8 transition.
     """
     try:
         row = conn.execute(
@@ -137,35 +160,47 @@ def _read_publish_via_api_enabled(conn: sqlite3.Connection) -> bool:
 def _resolve_reply_target_x_post_id(
     conn: sqlite3.Connection, post_row: sqlite3.Row
 ) -> str | None:
-    """For reply-type posts, look up the target's X post id.
+    """For reply-type posts, return the target's X post id (snowflake string).
 
-    The X API v2 reply shape needs the *target's x_post_id*, not the
-    in-DB `posts.id` of the local row representing the target. We look
-    it up via the in_reply_to_post_id FK. NULL → standalone post.
+    ``posts.in_reply_to_post_id`` is a TEXT column storing the target's
+    X post ID directly (per migration 001 line 111 + the existing
+    ``app/forms/post_log.py`` populator). Earlier Phase 8 code wrongly
+    treated it as an internal posts.id integer and did a PK lookup —
+    that lookup never matched, so the API branch silently posted
+    replies as standalone tweets.
+
+    For agent-drafted replies whose ``in_reply_to_post_id`` hasn't been
+    populated yet, fall back to parsing the X status id out of
+    ``agent_drafts.target_post_url`` via the standard
+    ``/status/<id>`` URL shape.
     """
     if post_row["type"] != "reply":
         return None
-    in_reply_to_post_id = post_row["in_reply_to_post_id"]
-    if in_reply_to_post_id is None:
-        return None
-    target = conn.execute(
-        "SELECT x_post_id FROM posts WHERE id = ?", (in_reply_to_post_id,)
+    target_x_id = post_row["in_reply_to_post_id"]
+    if target_x_id:
+        return str(target_x_id)
+    # Fallback: agent-drafted reply with empty in_reply_to_post_id.
+    row = conn.execute(
+        """
+        SELECT ad.target_post_url
+          FROM posts p
+          JOIN agent_drafts ad ON ad.id = p.agent_draft_id
+         WHERE p.id = ?
+        """,
+        (post_row["id"],),
     ).fetchone()
-    if target is None:
+    if row is None or not row["target_post_url"]:
         return None
-    target_x_id = target["x_post_id"]
-    return str(target_x_id) if target_x_id is not None else None
+    m = re.search(r"/status(?:es)?/(\d+)", row["target_post_url"])
+    return m.group(1) if m else None
 
 
 def _ensure_audit_anchor_message(conn: sqlite3.Connection) -> int:
     """Return a message_id to anchor a publish audit row to.
 
-    When the click-handler invokes publish without a live conversation
-    (e.g. orphan reconciliation or click from a non-chat surface), we
+    When the click-handler invokes publish without a live conversation,
     anchor to the single dedicated ``[publish-flow audit anchor]``
-    conversation. Only ONE such conversation is ever created; subsequent
-    anchor-less publishes append messages to it. This prevents the
-    accumulation of synthetic conversations across retries (W9).
+    archived conversation (created on demand, then reused).
     """
     anchor_row = conn.execute(
         """
@@ -194,6 +229,365 @@ def _ensure_audit_anchor_message(conn: sqlite3.Connection) -> int:
     return int(cur.lastrowid)
 
 
+# ---------------------------------------------------------------------------
+# Failure-path emitters (each runs a narrow recovery txn — no network I/O).
+# ---------------------------------------------------------------------------
+def _emit_length_failure(
+    conn: sqlite3.Connection,
+    post_id: int,
+    exc: BaseException,
+    *,
+    message_id: int,
+    arguments: dict,
+    tool_name: str,
+) -> PublishResult:
+    """Length-cap or missing-row failure. Token never validated."""
+    with transaction(conn):
+        conn.execute(
+            """
+            UPDATE posts
+            SET publish_attempt_count = publish_attempt_count + 1,
+                publish_last_error = ?
+            WHERE id = ?
+            """,
+            (f"DraftTooLongError: {exc}", post_id),
+        )
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            status="error",
+            error_message=f"DraftTooLongError: {exc}",
+            confirmation_token_id=None,
+        )
+        audit_log.log(
+            conn,
+            event_category="publish",
+            event_type="publish_failed_length_cap",
+            target_type="post",
+            target_id=post_id,
+            success=False,
+            error_message=f"DraftTooLongError: {exc}",
+            details={"tool_name": tool_name},
+        )
+    return PublishResult(
+        success=False,
+        post_id=post_id,
+        method="failed",
+        error=f"DraftTooLongError: {exc}",
+        error_kind="length",
+    )
+
+
+def _emit_rate_limit_refusal(
+    conn: sqlite3.Connection,
+    post_id: int,
+    capacity: x_client.WriteRateCapacity,
+    *,
+    message_id: int,
+    arguments: dict,
+    tool_name: str,
+) -> PublishResult:
+    """Local rate-capacity refusal BEFORE the X API call. Token UN-consumed."""
+    reason = capacity.reason or "rate-limited"
+    reset_iso = capacity.reset_at_utc.isoformat() if capacity.reset_at_utc else None
+    with transaction(conn):
+        conn.execute(
+            """
+            UPDATE posts
+            SET publish_attempt_count = publish_attempt_count + 1,
+                publish_last_error = ?
+            WHERE id = ?
+            """,
+            (f"RateLimitRefusal: {reason}", post_id),
+        )
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            status="error",
+            error_message=f"RateLimitRefusal: {reason}",
+            confirmation_token_id=None,
+        )
+        audit_log.log(
+            conn,
+            event_category="publish",
+            event_type="publish_failed_rate_limited",
+            target_type="post",
+            target_id=post_id,
+            success=False,
+            error_message=reason,
+            details={"tool_name": tool_name, "reset_at_iso": reset_iso},
+        )
+    return PublishResult(
+        success=False,
+        post_id=post_id,
+        method="failed",
+        error=reason,
+        error_kind="rate_limited",
+    )
+
+
+def _emit_api_failure(
+    conn: sqlite3.Connection,
+    post_id: int,
+    exc: BaseException,
+    *,
+    kind: ErrorKind,
+    consume_token: bool,
+    raw_token: str,
+    message_id: int,
+    arguments: dict,
+    tool_name: str,
+    mark_unknown_for_orphan: bool = False,
+    extra_audit_details: dict | None = None,
+) -> PublishResult:
+    """Map an X API failure to its §22 + §29.11 token-consumed outcome.
+
+    ``consume_token=True`` runs validate-and-consume in a narrow txn so
+    the token is marked consumed even though no posts row gets created.
+    Failures of the consume step are tolerated (token might already be
+    expired) — the audit row records the API failure regardless.
+
+    ``mark_unknown_for_orphan=True`` (timeout path) sets
+    ``publish_method='unknown'`` + ``published_to_x_at`` so the
+    §28.10 step 8 crash-recovery scan picks the row up.
+    """
+    error_message = f"{type(exc).__name__}: {exc}"
+    publish_method_value = "unknown" if mark_unknown_for_orphan else "failed"
+    consumed_id: int | None = None
+
+    with transaction(conn):
+        if consume_token:
+            try:
+                consumed = confirmation.validate_and_consume_token(
+                    conn, post_id=post_id, raw_token=raw_token
+                )
+                consumed_id = consumed.token_id
+            except confirmation.ConfirmationTokenError:
+                # Token already expired / consumed / drift — proceed with
+                # failure logging anyway; audit trail still captures the API
+                # failure even when the token side-effect can't land.
+                consumed_id = None
+
+        if mark_unknown_for_orphan:
+            conn.execute(
+                """
+                UPDATE posts
+                SET publish_method = ?,
+                    published_to_x_at = ?,
+                    publish_last_error = ?,
+                    publish_attempt_count = publish_attempt_count + 1
+                WHERE id = ?
+                """,
+                (publish_method_value, _utcnow_iso(), error_message, post_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE posts
+                SET publish_method = ?,
+                    publish_last_error = ?,
+                    publish_attempt_count = publish_attempt_count + 1
+                WHERE id = ?
+                """,
+                (publish_method_value, error_message, post_id),
+            )
+
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            status="error",
+            error_message=error_message,
+            confirmation_token_id=consumed_id,
+        )
+        details: dict = {
+            "tool_name": tool_name,
+            "confirmation_token_id": consumed_id,
+        }
+        if extra_audit_details:
+            details.update(extra_audit_details)
+        if mark_unknown_for_orphan:
+            details["crash_recovery_required"] = True
+        audit_log.log(
+            conn,
+            event_category="publish",
+            event_type=f"publish_failed_{kind}",
+            target_type="post",
+            target_id=post_id,
+            success=False,
+            error_message=str(exc),
+            details=details,
+        )
+    return PublishResult(
+        success=False,
+        post_id=post_id,
+        method="failed",
+        error=error_message,
+        error_kind=kind,
+    )
+
+
+def _emit_confirmation_failure(
+    conn: sqlite3.Connection,
+    post_id: int,
+    exc: BaseException,
+    *,
+    message_id: int,
+    arguments: dict,
+    tool_name: str,
+    api_orphan: bool = False,
+) -> PublishResult:
+    """Token validation failed during the commit txn.
+
+    Token stays UN-consumed (the consume UPDATE was inside the
+    rolled-back txn). If ``api_orphan=True`` the X post already exists
+    — the orphan-detection scan reconciles next boot via text-hash
+    match.
+    """
+    error_message = f"{type(exc).__name__}: {exc}"
+    with transaction(conn):
+        if api_orphan:
+            conn.execute(
+                """
+                UPDATE posts
+                SET publish_method = 'unknown',
+                    published_to_x_at = ?,
+                    publish_last_error = ?,
+                    publish_attempt_count = publish_attempt_count + 1
+                WHERE id = ?
+                """,
+                (_utcnow_iso(), error_message, post_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE posts
+                SET publish_attempt_count = publish_attempt_count + 1,
+                    publish_last_error = ?
+                WHERE id = ?
+                """,
+                (error_message, post_id),
+            )
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            status="error",
+            error_message=error_message,
+            confirmation_token_id=None,
+        )
+        audit_log.log(
+            conn,
+            event_category="publish",
+            event_type="publish_failed_confirmation",
+            target_type="post",
+            target_id=post_id,
+            success=False,
+            error_message=error_message,
+            details={"tool_name": tool_name, "api_orphan": api_orphan},
+        )
+    return PublishResult(
+        success=False,
+        post_id=post_id,
+        method="failed",
+        error=error_message,
+        error_kind="confirmation",
+    )
+
+
+def _emit_runtime_failure(
+    conn: sqlite3.Connection,
+    post_id: int,
+    exc: BaseException,
+    *,
+    raw_token: str,
+    message_id: int,
+    arguments: dict,
+    tool_name: str,
+    api_orphan: bool = False,
+) -> PublishResult:
+    """Unexpected runtime failure during the commit txn.
+
+    Re-mark token consumed (rule #10(f) — prevent retry abuse on a
+    partially-applied publish). If ``api_orphan=True``, set
+    ``publish_method='unknown'`` for crash-recovery.
+    """
+    error_message = f"{type(exc).__name__}: {exc}"
+    consumed_id: int | None = None
+    with transaction(conn):
+        try:
+            consumed = confirmation.validate_and_consume_token(
+                conn, post_id=post_id, raw_token=raw_token
+            )
+            consumed_id = consumed.token_id
+        except confirmation.ConfirmationTokenError:
+            consumed_id = None
+
+        if api_orphan:
+            conn.execute(
+                """
+                UPDATE posts
+                SET publish_method = 'unknown',
+                    published_to_x_at = ?,
+                    publish_last_error = ?,
+                    publish_attempt_count = publish_attempt_count + 1
+                WHERE id = ?
+                """,
+                (_utcnow_iso(), error_message, post_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE posts
+                SET publish_method = 'failed',
+                    publish_last_error = ?,
+                    publish_attempt_count = publish_attempt_count + 1
+                WHERE id = ?
+                """,
+                (error_message, post_id),
+            )
+
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            status="error",
+            error_message=error_message,
+            confirmation_token_id=consumed_id,
+        )
+        audit_log.log(
+            conn,
+            event_category="publish",
+            event_type="publish_failed_runtime",
+            target_type="post",
+            target_id=post_id,
+            success=False,
+            error_message=error_message,
+            details={
+                "tool_name": tool_name,
+                "confirmation_token_id": consumed_id,
+                "api_orphan": api_orphan,
+            },
+        )
+    return PublishResult(
+        success=False,
+        post_id=post_id,
+        method="failed",
+        error=error_message,
+        error_kind="runtime",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main entry point.
+# ---------------------------------------------------------------------------
 def publish_post_atomic(
     conn: sqlite3.Connection,
     *,
@@ -202,77 +596,181 @@ def publish_post_atomic(
     message_id: int | None = None,
     tool_name: str = "publish_post_to_x",
 ) -> PublishResult:
-    """Validate token, consume it, write publish state — all in one transaction.
+    """Phase 8 R-1 split-txn publish flow.
 
-    Phase 8 branches inside the transaction:
+    1. Read-only preflight (no txn): length cap, rate-capacity, reply
+       target resolution.
+    2. X API call OUTSIDE any txn (writer-lock NOT held; ``_log_raw``
+       audit rows commit in autocommit and survive a downstream
+       commit failure).
+    3. Commit txn (BEGIN IMMEDIATE held for milliseconds only):
+       validate-and-consume token + UPDATE posts + UPDATE
+       consumed_by_x_post_id + audit writes.
 
-    * ``publish_via_api_enabled = TRUE``: call ``check_write_rate_capacity``
-      → call ``publish_post_to_x_via_api`` → on 200 set
-      ``publish_method='agent_confirmed'`` and ``posts.x_post_id`` from
-      the response. Specific exceptions handled with the §22 + §29.11
-      token-consumed matrix.
-    * ``publish_via_api_enabled = FALSE``: take the Phase 5.5 manual-
-      clipboard branch unchanged.
+    Token-consumed matrix preserved via ``_emit_api_failure(consume_token=...)``:
+    429 stays UN-consumed; 403 / 5xx-after-retry / timeout all CONSUME
+    via a narrow txn before the failure return.
     """
     if message_id is None:
         message_id = _ensure_audit_anchor_message(conn)
 
     arguments = {"post_id": post_id, "confirmation_token": raw_token}
-    consumed: confirmation.ConsumedToken | None = None
     use_api_branch = _read_publish_via_api_enabled(conn)
 
+    # ----- 1. Read-only preflight -----
+    row = conn.execute(
+        "SELECT id, text, type, in_reply_to_post_id FROM posts WHERE id = ?",
+        (post_id,),
+    ).fetchone()
+    if row is None:
+        return _emit_length_failure(
+            conn,
+            post_id,
+            DraftTooLongError(f"post_id={post_id} not found"),
+            message_id=message_id,
+            arguments=arguments,
+            tool_name=tool_name,
+        )
+    if len(row["text"]) > X_POST_MAX_CHARS:
+        return _emit_length_failure(
+            conn,
+            post_id,
+            DraftTooLongError(
+                f"draft is {len(row['text'])} chars; X cap is {X_POST_MAX_CHARS}"
+            ),
+            message_id=message_id,
+            arguments=arguments,
+            tool_name=tool_name,
+        )
+
+    if use_api_branch:
+        capacity = x_client.check_write_rate_capacity(conn)
+        if not capacity.ok:
+            return _emit_rate_limit_refusal(
+                conn,
+                post_id,
+                capacity,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+            )
+
+    # ----- 1b. Six-check token validation BEFORE the X API call -----
+    # RV2-34: per §28.10 rule #10, the six-check chain MUST run BEFORE
+    # the X API call so a stale/edited/already-consumed/wrong-state draft
+    # never burns an API request. validate_token_only is the read-only
+    # twin of validate_and_consume_token — it raises the same typed
+    # ConfirmationTokenError subclasses (DraftTextChangedError check (d),
+    # DraftNotInDraftStateError check (f), etc.) without mutating the
+    # token row. Consumption happens later in the post-API commit txn
+    # via validate_and_consume_token which re-runs the same six checks
+    # atomically (covers the race where the draft state mutates between
+    # preflight and commit).
+    try:
+        confirmation.validate_token_only(
+            conn, post_id=post_id, raw_token=raw_token
+        )
+    except confirmation.ConfirmationTokenError as exc:
+        return _emit_confirmation_failure(
+            conn,
+            post_id,
+            exc,
+            message_id=message_id,
+            arguments=arguments,
+            tool_name=tool_name,
+            api_orphan=False,
+        )
+
+    # ----- 2. X API call OUTSIDE any txn (writer-lock NOT held) -----
+    api_data: dict | None = None
+    if use_api_branch:
+        in_reply_to_x_id = _resolve_reply_target_x_post_id(conn, row)
+        try:
+            api_data = x_client.publish_post_to_x_via_api(
+                row["text"],
+                in_reply_to_x_post_id=in_reply_to_x_id,
+                conn=conn,
+            )
+        except x_client.XApiRateLimited as exc:
+            # 429 → token UN-consumed (no txn opened).
+            return _emit_api_failure(
+                conn,
+                post_id,
+                exc,
+                kind="rate_limited",
+                consume_token=False,
+                raw_token=raw_token,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+                extra_audit_details={"retry_after_seconds": exc.retry_after_seconds},
+            )
+        except x_client.XApiColdReplyError as exc:
+            # 403 → token CONSUMED (X considered it a real attempt).
+            return _emit_api_failure(
+                conn,
+                post_id,
+                exc,
+                kind="cold_reply",
+                consume_token=True,
+                raw_token=raw_token,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+            )
+        except x_client.XApiTimeoutError as exc:
+            # Timeout → token CONSUMED + publish_method='unknown' for
+            # the §28.10 step 8 crash-recovery scan.
+            return _emit_api_failure(
+                conn,
+                post_id,
+                exc,
+                kind="timeout",
+                consume_token=True,
+                raw_token=raw_token,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+                mark_unknown_for_orphan=True,
+            )
+        except x_client.XApiServerError as exc:
+            # 5xx after retry exhaustion → token CONSUMED per rule #10(f).
+            return _emit_api_failure(
+                conn,
+                post_id,
+                exc,
+                kind="server_error",
+                consume_token=True,
+                raw_token=raw_token,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+            )
+        except x_client.XApiUnavailable as exc:
+            # xurl missing / 401 / non-JSON output. Treat as runtime
+            # failure — token stays UN-consumed (no X-side state change).
+            return _emit_api_failure(
+                conn,
+                post_id,
+                exc,
+                kind="runtime",
+                consume_token=False,
+                raw_token=raw_token,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+            )
+
+    # ----- 3. Commit txn — token-consume + posts UPDATE -----
     try:
         with transaction(conn):
-            # Length cap — server-side belt to the modal's suspenders.
-            row = conn.execute(
-                "SELECT text, type, in_reply_to_post_id FROM posts WHERE id = ?",
-                (post_id,),
-            ).fetchone()
-            if row is None:
-                raise DraftTooLongError(
-                    f"post_id={post_id} not found (cannot validate length)"
-                )
-            post_text = row["text"]
-            if len(post_text) > X_POST_MAX_CHARS:
-                raise DraftTooLongError(
-                    f"draft is {len(post_text)} chars; X cap is {X_POST_MAX_CHARS}"
-                )
-
-            # Phase 8 API branch: rate-limit gate runs BEFORE the six-check
-            # so a rate-limited window doesn't burn the token.
-            if use_api_branch:
-                capacity = x_client.check_write_rate_capacity(conn)
-                if not capacity.ok:
-                    reset_iso = (
-                        capacity.reset_at_utc.isoformat()
-                        if capacity.reset_at_utc
-                        else None
-                    )
-                    raise RateLimitRefusalError(
-                        capacity.reason or "rate-limited",
-                        reset_at_iso=reset_iso,
-                    )
-
             consumed = confirmation.validate_and_consume_token(
                 conn, post_id=post_id, raw_token=raw_token
             )
 
-            post_type = row["type"]
-            in_reply_to = row["in_reply_to_post_id"]
-            intent_url = _build_intent_url(
-                post_text,
-                in_reply_to_post_id=in_reply_to if post_type == "reply" else None,
-            )
-
             if use_api_branch:
-                in_reply_to_x_id = _resolve_reply_target_x_post_id(conn, row)
-                api_data = x_client.publish_post_to_x_via_api(
-                    post_text,
-                    in_reply_to_x_post_id=in_reply_to_x_id,
-                    conn=conn,
-                )
+                assert api_data is not None
                 api_x_post_id = str(api_data["id"])
-
                 conn.execute(
                     """
                     UPDATE posts
@@ -295,17 +793,13 @@ def publish_post_atomic(
                     """,
                     (api_x_post_id, consumed.token_id),
                 )
-
                 audit.log_tool_call(
                     conn,
                     message_id=message_id,
                     tool_name=tool_name,
                     arguments=arguments,
                     status="success",
-                    result={
-                        "method": "agent_confirmed",
-                        "x_post_id": api_x_post_id,
-                    },
+                    result={"method": "agent_confirmed", "x_post_id": api_x_post_id},
                     confirmation_token_id=consumed.token_id,
                 )
                 audit_log.log(
@@ -321,7 +815,6 @@ def publish_post_atomic(
                         "confirmation_token_id": consumed.token_id,
                     },
                 )
-
                 return PublishResult(
                     success=True,
                     post_id=post_id,
@@ -329,7 +822,13 @@ def publish_post_atomic(
                     x_post_id=api_x_post_id,
                 )
 
-            # Manual-clipboard branch (publish_via_api_enabled = FALSE).
+            # Manual-clipboard branch.
+            intent_url = _build_intent_url(
+                row["text"],
+                in_reply_to_post_id=row["in_reply_to_post_id"]
+                if row["type"] == "reply"
+                else None,
+            )
             conn.execute(
                 """
                 UPDATE posts
@@ -342,7 +841,6 @@ def publish_post_atomic(
                 """,
                 (_utcnow_iso(), message_id, post_id),
             )
-
             audit.log_tool_call(
                 conn,
                 message_id=message_id,
@@ -352,7 +850,6 @@ def publish_post_atomic(
                 result={"method": "manual_clipboard", "intent_url": intent_url},
                 confirmation_token_id=consumed.token_id,
             )
-
             audit_log.log(
                 conn,
                 event_category="publish",
@@ -366,376 +863,31 @@ def publish_post_atomic(
                     "confirmation_token_id": consumed.token_id,
                 },
             )
-
-        return PublishResult(
-            success=True,
-            post_id=post_id,
-            method="manual_clipboard",
-            intent_url=intent_url,
-        )
-
-    except RateLimitRefusalError as exc:
-        # Phase 8 §22: 429 / capacity refusal BEFORE the X API call.
-        # Token stays UN-consumed (the consume UPDATE was inside the
-        # rolled-back transaction).
-        with transaction(conn):
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_attempt_count = publish_attempt_count + 1,
-                    publish_last_error = ?
-                WHERE id = ?
-                """,
-                (f"RateLimitRefusal: {exc}", post_id),
+            return PublishResult(
+                success=True,
+                post_id=post_id,
+                method="manual_clipboard",
+                intent_url=intent_url,
             )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"RateLimitRefusal: {exc}",
-                confirmation_token_id=None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_rate_limited",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=str(exc),
-                details={
-                    "tool_name": tool_name,
-                    "reset_at_iso": exc.reset_at_iso,
-                },
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=str(exc),
-            error_kind="rate_limited",
-        )
-
-    except x_client.XApiRateLimited as exc:
-        # X API itself returned 429 mid-publish. Token UN-consumed via
-        # ROLLBACK; if validate_and_consume_token ran, its UPDATE was
-        # rolled back so consumed_at_utc stays NULL.
-        with transaction(conn):
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_attempt_count = publish_attempt_count + 1,
-                    publish_last_error = ?
-                WHERE id = ?
-                """,
-                (f"XApiRateLimited: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"XApiRateLimited: {exc}",
-                confirmation_token_id=None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_rate_limited",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=str(exc),
-                details={
-                    "tool_name": tool_name,
-                    "retry_after_seconds": exc.retry_after_seconds,
-                },
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=str(exc),
-            error_kind="rate_limited",
-        )
-
-    except x_client.XApiColdReplyError as exc:
-        # 403: X accepted the request and refused it. Token CONSUMED
-        # per §22 + §29.11. Re-mark consumed_at_utc after the rollback.
-        with transaction(conn):
-            if consumed is not None:
-                conn.execute(
-                    "UPDATE publish_confirmation_tokens SET consumed_at_utc = ? WHERE id = ?",
-                    (_utcnow_iso(), consumed.token_id),
-                )
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_method = 'failed',
-                    publish_last_error = ?,
-                    publish_attempt_count = publish_attempt_count + 1
-                WHERE id = ?
-                """,
-                (f"XApiColdReply: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"XApiColdReply: {exc}",
-                confirmation_token_id=consumed.token_id if consumed else None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_cold_reply",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=str(exc),
-                details={
-                    "tool_name": tool_name,
-                    "confirmation_token_id": consumed.token_id if consumed else None,
-                },
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=str(exc),
-            error_kind="cold_reply",
-        )
-
-    except x_client.XApiTimeoutError as exc:
-        # Timeout mid-call: X may have processed the request. Token
-        # CONSUMED (re-mark). publish_method='unknown' so the crash-
-        # recovery scan (recovery.py) picks it up via the existing
-        # x_post_id IS NULL + publish_method != 'failed' predicate.
-        with transaction(conn):
-            if consumed is not None:
-                conn.execute(
-                    "UPDATE publish_confirmation_tokens SET consumed_at_utc = ? WHERE id = ?",
-                    (_utcnow_iso(), consumed.token_id),
-                )
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_method = 'unknown',
-                    published_to_x_at = ?,
-                    publish_last_error = ?,
-                    publish_attempt_count = publish_attempt_count + 1
-                WHERE id = ?
-                """,
-                (_utcnow_iso(), f"XApiTimeout: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"XApiTimeout: {exc}",
-                confirmation_token_id=consumed.token_id if consumed else None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_timeout",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=str(exc),
-                details={
-                    "tool_name": tool_name,
-                    "confirmation_token_id": consumed.token_id if consumed else None,
-                    "crash_recovery_required": True,
-                },
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=str(exc),
-            error_kind="timeout",
-        )
-
-    except x_client.XApiServerError as exc:
-        # 5xx after retry exhaustion: token CONSUMED per rule #10(f).
-        with transaction(conn):
-            if consumed is not None:
-                conn.execute(
-                    "UPDATE publish_confirmation_tokens SET consumed_at_utc = ? WHERE id = ?",
-                    (_utcnow_iso(), consumed.token_id),
-                )
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_method = 'failed',
-                    publish_last_error = ?,
-                    publish_attempt_count = publish_attempt_count + 1
-                WHERE id = ?
-                """,
-                (f"XApiServerError: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"XApiServerError: {exc}",
-                confirmation_token_id=consumed.token_id if consumed else None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_server_error",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=str(exc),
-                details={
-                    "tool_name": tool_name,
-                    "confirmation_token_id": consumed.token_id if consumed else None,
-                },
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=str(exc),
-            error_kind="server_error",
-        )
 
     except confirmation.ConfirmationTokenError as exc:
-        # Validation failure path (§28.10 step 6): the main transaction
-        # rolled back, so the token UPDATE never landed → token stays
-        # unconsumed and Daniel can retry within the TTL.
-        with transaction(conn):
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_attempt_count = publish_attempt_count + 1,
-                    publish_last_error = ?
-                WHERE id = ?
-                """,
-                (f"{type(exc).__name__}: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"{type(exc).__name__}: {exc}",
-                confirmation_token_id=None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_confirmation",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=f"{type(exc).__name__}: {exc}",
-                details={"tool_name": tool_name},
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=f"{type(exc).__name__}: {exc}",
-            error_kind="confirmation",
+        return _emit_confirmation_failure(
+            conn,
+            post_id,
+            exc,
+            message_id=message_id,
+            arguments=arguments,
+            tool_name=tool_name,
+            api_orphan=(api_data is not None),
         )
-
-    except DraftTooLongError as exc:
-        # Length-cap failure: token was never validated.
-        with transaction(conn):
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_attempt_count = publish_attempt_count + 1,
-                    publish_last_error = ?
-                WHERE id = ?
-                """,
-                (f"DraftTooLongError: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"DraftTooLongError: {exc}",
-                confirmation_token_id=None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_length_cap",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=f"DraftTooLongError: {exc}",
-                details={"tool_name": tool_name},
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=f"DraftTooLongError: {exc}",
-            error_kind="length",
-        )
-
     except Exception as exc:
-        # Post-validation runtime failure: token MUST stay consumed.
-        with transaction(conn):
-            if consumed is not None:
-                conn.execute(
-                    "UPDATE publish_confirmation_tokens SET consumed_at_utc = ? WHERE id = ?",
-                    (_utcnow_iso(), consumed.token_id),
-                )
-            conn.execute(
-                """
-                UPDATE posts
-                SET publish_method = 'failed',
-                    publish_last_error = ?,
-                    publish_attempt_count = publish_attempt_count + 1
-                WHERE id = ?
-                """,
-                (f"{type(exc).__name__}: {exc}", post_id),
-            )
-            audit.log_tool_call(
-                conn,
-                message_id=message_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                status="error",
-                error_message=f"{type(exc).__name__}: {exc}",
-                confirmation_token_id=consumed.token_id if consumed else None,
-            )
-            audit_log.log(
-                conn,
-                event_category="publish",
-                event_type="publish_failed_runtime",
-                target_type="post",
-                target_id=post_id,
-                success=False,
-                error_message=f"{type(exc).__name__}: {exc}",
-                details={
-                    "tool_name": tool_name,
-                    "confirmation_token_id": consumed.token_id if consumed else None,
-                },
-            )
-        return PublishResult(
-            success=False,
-            post_id=post_id,
-            method="failed",
-            error=f"{type(exc).__name__}: {exc}",
-            error_kind="runtime",
+        return _emit_runtime_failure(
+            conn,
+            post_id,
+            exc,
+            raw_token=raw_token,
+            message_id=message_id,
+            arguments=arguments,
+            tool_name=tool_name,
+            api_orphan=(api_data is not None),
         )

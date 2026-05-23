@@ -344,11 +344,18 @@ def test_generate_reply_target_creates_linked_row(
 # Tool registry smoke — surfaces failure as dict.
 # ---------------------------------------------------------------------------
 def test_analyze_account_tool_registered() -> None:
+    """Post-RV2-1: target_handle remains required, but target_recent_posts_text
+    is NOT required because auto_pull=True (Phase 7 X API path) makes it
+    optional. The function falls back to xurl /2/users/<id>/tweets when the
+    paste is empty."""
     tool = _tools.get_tool("analyze_account")
     assert "target_handle" in tool.input_schema["properties"]
     assert "target_recent_posts_text" in tool.input_schema["properties"]
     assert "target_handle" in tool.input_schema["required"]
-    assert "target_recent_posts_text" in tool.input_schema["required"]
+    # target_recent_posts_text is declared but no longer required.
+    # RV2-1: auto_pull flag must be declared so the agent can trigger it.
+    assert "auto_pull" in tool.input_schema["properties"]
+    assert tool.input_schema["properties"]["auto_pull"]["type"] == "boolean"
 
 
 def test_analyze_account_tool_handler_returns_dict_on_failure(

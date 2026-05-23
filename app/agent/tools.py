@@ -2263,19 +2263,36 @@ AGENT_TOOLS: list[ToolDef] = [
                     "description": (
                         "Newline-separated replier handles or "
                         "'@handle: excerpt' lines. Multi-line excerpts "
-                        "are blank-line-separated."
+                        "are blank-line-separated. Empty allowed when "
+                        "auto_scan=true (Phase 7 X API path)."
                     ),
                 },
                 "lookback_minutes": {"type": "integer", "default": 60},
+                # RV2-1: declare the Phase 7 §28.20 auto-pull flag in the
+                # schema so the agent can actually trigger the xurl path.
+                "auto_scan": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, calls xurl /2/tweets/search/recent?"
+                        "query=conversation_id:<id> instead of consuming "
+                        "the paste payload. Manual paste remains the "
+                        "always-available fallback when auto_scan=false."
+                    ),
+                },
             },
-            "required": ["thread_url", "replier_handles_or_excerpts_json"],
+            # Paste payload only required when auto_scan=False; the
+            # function defaults it to empty string when auto_scan=True.
+            "required": ["thread_url"],
         },
-        handler=lambda conn, *, thread_url, replier_handles_or_excerpts_json, lookback_minutes=60: (
+        handler=lambda conn, *, thread_url, replier_handles_or_excerpts_json="",
+        lookback_minutes=60, auto_scan=False: (
             _replier_pool.score_replier_pool(
                 conn,
                 thread_url=thread_url,
                 replier_handles_or_excerpts=replier_handles_or_excerpts_json,
                 lookback_minutes=int(lookback_minutes),
+                auto_scan=bool(auto_scan),
             )
         ),
     ),
@@ -2375,14 +2392,25 @@ AGENT_TOOLS: list[ToolDef] = [
                 "target_recent_posts_text": {"type": "string"},
                 "target_url": {"type": "string"},
                 "target_display_name": {"type": "string"},
+                # RV2-1: declare the Phase 7 §28.24 auto-pull flag.
+                "auto_pull": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, calls xurl /2/users/by/username/<handle> "
+                        "+ /2/users/<id>/tweets to populate bio + recent "
+                        "posts instead of using paste payload. Paste fields "
+                        "supplied explicitly always win over auto-pull. "
+                        "Manual paste remains the always-available fallback."
+                    ),
+                },
             },
-            "required": [
-                "target_handle",
-                "target_recent_posts_text",
-            ],
+            # target_recent_posts_text only required when auto_pull=False.
+            "required": ["target_handle"],
         },
-        handler=lambda conn, *, target_handle, target_recent_posts_text,
-        target_bio_text="", target_url=None, target_display_name=None: (
+        handler=lambda conn, *, target_handle, target_recent_posts_text="",
+        target_bio_text="", target_url=None, target_display_name=None,
+        auto_pull=False: (
             _analyze_account_to_dict(
                 conn,
                 target_handle=target_handle,
@@ -2390,6 +2418,7 @@ AGENT_TOOLS: list[ToolDef] = [
                 target_recent_posts_text=target_recent_posts_text,
                 target_url=target_url,
                 target_display_name=target_display_name,
+                auto_pull=bool(auto_pull),
             )
         ),
     ),
@@ -2415,17 +2444,32 @@ AGENT_TOOLS: list[ToolDef] = [
                     "default": 30,
                 },
                 "pinned_post_id": {"type": "integer"},
+                # RV2-1: declare the Phase 7 §28.25 auto-pull flag.
+                "auto_pull_bio": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true AND bio_text is empty, calls xurl "
+                        "/2/users/by/username/<daniel_handle>?user.fields="
+                        "description to populate the bio snapshot. "
+                        "Manual paste remains the always-available fallback; "
+                        "explicit bio_text always wins over auto-pull."
+                    ),
+                },
             },
-            "required": ["bio_text", "pinned_post_text"],
+            # bio_text only required when auto_pull_bio=False.
+            "required": ["pinned_post_text"],
         },
-        handler=lambda conn, *, bio_text, pinned_post_text,
-        recent_post_window_days=None, pinned_post_id=None: (
+        handler=lambda conn, *, pinned_post_text, bio_text="",
+        recent_post_window_days=None, pinned_post_id=None,
+        auto_pull_bio=False: (
             _audit_profile_to_dict(
                 conn,
                 bio_text=bio_text,
                 pinned_post_text=pinned_post_text,
                 recent_post_window_days=recent_post_window_days,
                 pinned_post_id=pinned_post_id,
+                auto_pull_bio=bool(auto_pull_bio),
             )
         ),
     ),

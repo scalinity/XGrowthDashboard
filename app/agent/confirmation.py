@@ -299,6 +299,38 @@ def validate_and_consume_token(
     it with the X API call + post updates.
     """
     now = now or _utcnow()
+    # Run the six-check read-only validator (single source of truth) then
+    # do the atomic consume UPDATE inside the caller's transaction.
+    token_id = validate_token_only(
+        conn, post_id=post_id, raw_token=raw_token, now=now
+    )
+    conn.execute(
+        "UPDATE publish_confirmation_tokens SET consumed_at_utc = ? WHERE id = ?",
+        (now.strftime("%Y-%m-%d %H:%M:%S"), token_id),
+    )
+    return ConsumedToken(token_id=token_id, post_id=post_id)
+
+
+def validate_token_only(
+    conn: sqlite3.Connection,
+    *,
+    post_id: int,
+    raw_token: str,
+    now: datetime | None = None,
+) -> int:
+    """Run the six checks WITHOUT consuming the token.
+
+    Phase 8 R-1: used by ``publish.publish_post_atomic`` as a read-only
+    pre-flight BEFORE the X API call so an invalid token never burns an
+    X API request. ``validate_and_consume_token`` delegates here and
+    adds the consume UPDATE on top so the six-check logic has one
+    source of truth.
+
+    Returns the matching ``publish_confirmation_tokens.id`` on success;
+    raises the appropriate typed ``ConfirmationTokenError`` subclass on
+    any of the six failure modes.
+    """
+    now = now or _utcnow()
     token_hash = hash_token(raw_token)
 
     row = conn.execute(
@@ -315,26 +347,18 @@ def validate_and_consume_token(
     if row is None:
         raise MissingTokenError("no token row matches the provided raw token")
 
-    # app.db.connect sets row_factory=sqlite3.Row globally, so the prior
-    # `hasattr(row, 'keys') else row[N]` defensive fallback was dead code.
     token_id = int(row["id"])
     row_post_id = int(row["post_id"])
     issued_text_hash = row["draft_text_hash_at_issue"]
     expires_at_str = row["expires_at_utc"]
     consumed_at_str = row["consumed_at_utc"]
 
-    # (c) not consumed (check before expiry to give the more actionable error
-    # when a token has been spent; expiry vs consumed are mutually exclusive
-    # in practice but order is defensive).
+    # (c) not consumed
     if consumed_at_str is not None:
         raise ConsumedTokenError(f"token {token_id} already consumed at {consumed_at_str}")
 
     # (b) not expired. P58RF-2: any timestamp form `fromisoformat` AND
-    # the strptime fallback can't parse (e.g. corrupted row written by
-    # a stray UPDATE) surfaces as ExpiredTokenError rather than a bare
-    # ValueError that escapes the typed-exception catch in
-    # publish_post_atomic. A token row whose expiry we can't read is by
-    # definition not safely usable; treat as expired.
+    # the strptime fallback can't parse surfaces as ExpiredTokenError.
     try:
         expires_at = _parse_db_timestamp(expires_at_str)
     except ValueError as exc:
@@ -354,7 +378,7 @@ def validate_and_consume_token(
             f"caller passed post_id={post_id}"
         )
 
-    # (d) draft text hasn't changed since issue (Daniel didn't edit after mint)
+    # (d) draft text hasn't changed since issue
     post_row = conn.execute(
         "SELECT text, manual_confirmation_status FROM posts WHERE id = ?",
         (post_id,),
@@ -377,9 +401,12 @@ def validate_and_consume_token(
             f"not 'draft' — refusing to consume token {token_id}"
         )
 
-    # All checks passed → consume atomically.
-    conn.execute(
-        "UPDATE publish_confirmation_tokens SET consumed_at_utc = ? WHERE id = ?",
-        (now.strftime("%Y-%m-%d %H:%M:%S"), token_id),
-    )
-    return ConsumedToken(token_id=token_id, post_id=post_id)
+    return token_id
+
+
+def _legacy_inline_validate_and_consume_DELETE_ME() -> None:
+    """Placeholder — the original inline implementation was extracted to
+    ``validate_token_only`` above. Kept as a comment-only marker to make
+    the refactor obvious in code-archaeology grep. Safe to remove in a
+    follow-up cleanup."""
+    raise NotImplementedError
