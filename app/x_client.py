@@ -62,6 +62,13 @@ _log = logging.getLogger(__name__)
 # transient network blips without hanging the scheduled job.
 _DEFAULT_TIMEOUT_SECONDS: float = 30.0
 
+# RV2-13: hard cap on the in-job rate-limit retry wait. Launchd plists
+# have ExitTimeOut=300s (5 min); if we sleep longer than that the OS
+# SIGKILLs the process mid-sleep, possibly between an audit-row INSERT
+# and a follow-up UPDATE. Set well below the timeout so the sweep can
+# still finish its current batch + write the scheduled_job audit row.
+_MAX_RATE_LIMIT_WAIT_SECONDS: float = 90.0
+
 # Default xurl binary path. Tests + scheduled jobs honor the
 # ``XURL_BIN`` env var to override (CI fixture mode points it at a fake
 # script that emits canned responses).
@@ -419,6 +426,25 @@ def batch_request(
             )
         except XApiRateLimited as rate:
             wait = max(1.0, float(rate.retry_after_seconds or 60.0))
+            # RV2-13: cap the in-job sleep so the launchd ExitTimeOut
+            # (300s default per docs/SCHEDULED_JOBS.md) doesn't SIGKILL
+            # the process mid-sleep — possibly between an audit-row
+            # INSERT and a subsequent UPDATE on the same logical work-
+            # unit. X API's documented Retry-After can be up to 15 min;
+            # if the wait exceeds the cap, abort the sweep cleanly and
+            # let the next scheduled run retry. The audit row already
+            # logged the 429 + retry_after via _log_raw.
+            if wait > _MAX_RATE_LIMIT_WAIT_SECONDS:
+                _log.warning(
+                    "batch_request retry_after=%.0fs exceeds in-job cap "
+                    "(%ss) at offset %d; aborting sweep — next run will retry",
+                    wait, _MAX_RATE_LIMIT_WAIT_SECONDS, offset,
+                )
+                raise XApiRateLimited(
+                    f"rate-limited; retry_after={wait}s exceeds in-job cap "
+                    f"({_MAX_RATE_LIMIT_WAIT_SECONDS}s)",
+                    retry_after_seconds=wait,
+                ) from rate
             _log.warning(
                 "batch_request rate-limited at offset %d; sleeping %.0fs before retry",
                 offset,
