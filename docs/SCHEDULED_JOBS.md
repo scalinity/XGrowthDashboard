@@ -208,9 +208,25 @@ invariant) before inserting into `reply_targets` with
 
 ### Enable
 
+P9R-18 — the checked-in plist is `…grok-sweep.plist.example` with the
+`REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD` placeholder. The operator copy
+(real key pasted in) lives at `~/Library/LaunchAgents/…grok-sweep.plist`
+and is `.gitignore`'d so a stray `git add launchd/` can't ship the
+live key to public history. There's also a local
+`launchd/com.scalinity.xgrowth.grok-sweep.plist` slot you can use as a
+working copy outside the LaunchAgents directory if you prefer; that
+path is gitignored too.
+
 ```bash
-cp launchd/com.scalinity.xgrowth.grok-sweep.plist \
-   ~/Library/LaunchAgents/
+# 1. Copy the template into LaunchAgents.
+cp launchd/com.scalinity.xgrowth.grok-sweep.plist.example \
+   ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+
+# 2. Replace the placeholder with the real key (edit in place — DO NOT
+#    edit the checked-in .example file).
+${EDITOR:-vi} ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+
+# 3. Load.
 launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
 ```
 

@@ -1,6 +1,14 @@
 # Secrets — NEVER commit
 .env
 
+# P9R-18: the active launchd plist holds XAI_API_KEY inline (launchd
+# doesn't inherit the dashboard's .env, so the plist needs the key
+# embedded). The CHECKED-IN copy is the .example variant with the
+# REPLACE_WITH_… placeholder; the operator-edited copy (real key
+# pasted in) is gitignored so a stray `git add launchd/` never ships
+# the live key to public history.
+launchd/com.scalinity.xgrowth.grok-sweep.plist
+
 # Local user data (private to this single-user tool; never committed)
 # Per §18 (privacy and security notes), data/ holds the user's private
 # SQLite DB, exports, and backups. Block contents but keep the directory
