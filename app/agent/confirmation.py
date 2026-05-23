@@ -402,11 +402,3 @@ def validate_token_only(
         )
 
     return token_id
-
-
-def _legacy_inline_validate_and_consume_DELETE_ME() -> None:
-    """Placeholder — the original inline implementation was extracted to
-    ``validate_token_only`` above. Kept as a comment-only marker to make
-    the refactor obvious in code-archaeology grep. Safe to remove in a
-    follow-up cleanup."""
-    raise NotImplementedError
