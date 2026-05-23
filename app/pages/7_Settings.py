@@ -99,7 +99,7 @@ _GROUPS: list[tuple[str, list[tuple[str, bool, str]]]] = [
     (
         "Data sources",
         [
-            ("data_collection_mode", True, "manual | xurl | api — MVP default per §17."),
+            ("data_collection_mode", True, "manual | api — Phase 7 default 'api' (§17 / §29.1). Toggle to 'manual' to disable scheduled jobs; manual paths always remain available."),
         ],
     ),
     (
@@ -1712,6 +1712,154 @@ if _pa_audits:
                 )
                 st.toast("notes saved.")
                 st.rerun()
+
+# ---------------------------------------------------------------------------
+# Phase 7 — X API data sources & scheduled-job health.
+# ---------------------------------------------------------------------------
+# Three things in one place: which mode the dashboard is in (manual vs.
+# API), when each scheduled job last touched its target table, and any
+# X API failures from the last `x_api_recent_failures_visible_days`
+# days. The toggle is the global setting; the launchd plists honor it
+# at run-time (data_collection_mode='manual' → jobs no-op).
+hairline()
+st.subheader("Data sources & X API health (Phase 7)")
+st.markdown(
+    "<div class='dim' style='margin-bottom:0.6rem;font-size:0.86rem;'>"
+    "Scheduled jobs (account snapshot, post import, post + reply-target "
+    "metrics refresh) run only when launchd plists are loaded "
+    "(<code>docs/SCHEDULED_JOBS.md</code>). When <code>data_collection_mode</code> "
+    "is set to <code>manual</code> the jobs no-op; manual entry paths remain "
+    "available regardless of the toggle.</div>",
+    unsafe_allow_html=True,
+)
+
+# Mode toggle — the load-bearing flag the four jobs check before any
+# API call. The existing _SETTING_ROWS["Data sources"] panel above is
+# the canonical write surface; this is a read-only echo for visibility.
+_mode_row = conn.execute(
+    "SELECT value_json FROM settings WHERE key = 'data_collection_mode'"
+).fetchone()
+_mode_value = "(unset)"
+if _mode_row and _mode_row[0]:
+    try:
+        _mode_value = str(json.loads(_mode_row[0]) or "")
+    except (TypeError, json.JSONDecodeError):
+        _mode_value = "(unparseable)"
+_mode_color = "#7ec97e" if _mode_value == "api" else "#d9a86b"
+st.markdown(
+    f"<div style='margin:0.4rem 0 0.8rem 0;font-size:0.92rem;'>"
+    f"<strong>Mode:</strong> "
+    f"<span style='color:{_mode_color};font-family:\"JetBrains Mono\", monospace;'>"
+    f"{html.escape(_mode_value)}</span>"
+    f"<span class='dim' style='margin-left:0.6rem;'>"
+    f"(change above under 'Data sources')</span></div>",
+    unsafe_allow_html=True,
+)
+
+# ----- Per-job last-refresh timestamps -----
+_last_refresh_rows: list[tuple[str, str | None]] = []
+_acct_row = conn.execute(
+    "SELECT collected_at_utc FROM account_snapshots "
+    "WHERE source = 'api' ORDER BY collected_at_utc DESC LIMIT 1"
+).fetchone()
+_last_refresh_rows.append(
+    ("collect_account_snapshot", _acct_row[0] if _acct_row else None)
+)
+_post_row = conn.execute(
+    "SELECT MAX(collected_at_utc) FROM post_metric_snapshots WHERE source = 'api'"
+).fetchone()
+_last_refresh_rows.append(
+    ("post_metrics_refresh", _post_row[0] if _post_row else None)
+)
+_rt_row = conn.execute(
+    "SELECT MAX(checked_at_utc) FROM reply_target_snapshots"
+).fetchone()
+_last_refresh_rows.append(
+    ("reply_target_metrics_refresh", _rt_row[0] if _rt_row else None)
+)
+_import_row = conn.execute(
+    "SELECT MAX(occurred_at_utc) FROM audit_logs "
+    "WHERE event_category = 'scheduled_job' "
+    "  AND event_type IN ('import_recent_posts', 'import_recent_posts_backfill')"
+).fetchone()
+_last_refresh_rows.append(
+    ("import_recent_posts", _import_row[0] if _import_row else None)
+)
+
+st.markdown(
+    "<div style='font-family:\"JetBrains Mono\", monospace;font-size:0.86rem;"
+    "margin:0.2rem 0 0.8rem 0;'>"
+    "<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
+    "Last-refresh timestamps</strong>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+for _job_name, _ts in _last_refresh_rows:
+    _ts_display = _ts or "(never)"
+    _ts_color = "#7ec97e" if _ts else "#a39d92"
+    st.markdown(
+        f"<div style='font-family:\"JetBrains Mono\", monospace;"
+        f"font-size:0.84rem;line-height:1.5;'>"
+        f"<span style='color:#a39d92;'>· {html.escape(_job_name):<32}</span>"
+        f"<span style='color:{_ts_color};'>{html.escape(str(_ts_display))}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+# ----- Recent X API failures -----
+_failures_window_days_row = conn.execute(
+    "SELECT value_json FROM settings WHERE key = 'x_api_recent_failures_visible_days'"
+).fetchone()
+_failures_window_days = 7
+if _failures_window_days_row and _failures_window_days_row[0]:
+    try:
+        _failures_window_days = int(json.loads(_failures_window_days_row[0]))
+    except (TypeError, json.JSONDecodeError, ValueError):
+        pass
+
+_failure_rows = conn.execute(
+    """
+    SELECT id, source, endpoint_or_command, status_code,
+           collected_at_utc, notes
+      FROM raw_api_responses
+     WHERE source IN ('xurl', 'x_api')
+       AND status_code IS NOT NULL
+       AND status_code >= 400
+       AND collected_at_utc >= datetime('now', ?)
+     ORDER BY collected_at_utc DESC
+     LIMIT 50
+    """,
+    (f"-{_failures_window_days} days",),
+).fetchall()
+
+st.markdown(
+    f"<div style='margin:0.8rem 0 0.3rem 0;font-size:0.92rem;'>"
+    f"<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
+    f"Recent X API failures</strong>"
+    f"<span class='dim'> · last {_failures_window_days} days · "
+    f"{len(_failure_rows)} event(s)</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+if not _failure_rows:
+    st.markdown(
+        "<div class='dim' style='font-size:0.86rem;margin-bottom:0.5rem;'>"
+        "(no X API failures recorded in the window)</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    for _fail in _failure_rows:
+        _badge_color = "#d97e7e" if _fail[3] >= 500 else "#d9a86b"
+        st.markdown(
+            f"<div style='font-family:\"JetBrains Mono\", monospace;"
+            f"font-size:0.82rem;line-height:1.55;'>"
+            f"<span style='color:#a39d92;'>{html.escape(str(_fail[4]))}</span> · "
+            f"<span style='color:{_badge_color};'>HTTP {int(_fail[3])}</span> · "
+            f"<span>{html.escape(str(_fail[1] or ''))}</span> · "
+            f"<span class='dim'>{html.escape(str(_fail[2] or '')[:80])}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 # ---------------------------------------------------------------------------
 # §14.7 / §28.30 — Audit log viewer (Phase 5.11).
