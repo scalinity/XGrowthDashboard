@@ -1685,15 +1685,104 @@ def _analyze_account_to_dict(
     conn: sqlite3.Connection,
     *,
     target_handle: str,
-    target_bio_text: str,
-    target_recent_posts_text: str,
-    target_url: str | None,
-    target_display_name: str | None,
+    target_bio_text: str = "",
+    target_recent_posts_text: str = "",
+    target_url: str | None = None,
+    target_display_name: str | None = None,
+    auto_pull: bool = False,
 ) -> dict[str, Any]:
-    # Read niche from settings so the prompt's niche_alignment_with_
-    # daniel field has the right context. Niche unset → analysis still
-    # runs but the alignment rationale carries "(niche not yet defined)".
+    # Phase 7 §28.24 programmatic auto-pull. When auto_pull=True, fetch
+    # bio + recent posts via xurl and replace any empty paste fields.
+    # Paste fields supplied explicitly always win over auto-pull —
+    # Daniel can mix-and-match (auto-pull recent posts, paste a richer
+    # bio annotated with his own context, etc.). The fall-back-to-paste
+    # discipline lives at the tool boundary: a failed X API call returns
+    # a 'failed' status dict so the caller can prompt for paste.
     from app.agent import niche as _niche
+
+    if auto_pull:
+        from app import x_client  # local — Phase 7-only dependency
+
+        handle_clean = target_handle.lstrip("@").strip()
+        if not handle_clean:
+            return {
+                "status": "failed",
+                "error": "auto_pull requires a non-empty target_handle",
+            }
+
+        # Endpoint 1 — bio + follower count.
+        try:
+            user_resp = x_client.request(
+                f"/2/users/by/username/{handle_clean}"
+                f"?user.fields=description,public_metrics,name",
+                method="GET",
+                conn=conn,
+                log_source="xurl",
+                log_notes="analyze_account auto_pull (user)",
+            )
+        except x_client.XApiError as exc:
+            return {
+                "status": "failed",
+                "error": (
+                    f"auto_pull user lookup failed ({type(exc).__name__}: {exc}); "
+                    "fall back to manual paste."
+                ),
+            }
+        user_body = user_resp.body if isinstance(user_resp.body, dict) else {}
+        user_data = user_body.get("data") if isinstance(user_body, dict) else None
+        if not isinstance(user_data, dict):
+            return {
+                "status": "failed",
+                "error": (
+                    f"auto_pull user lookup returned no 'data' object for "
+                    f"@{handle_clean}; fall back to manual paste."
+                ),
+            }
+        if not target_bio_text.strip():
+            target_bio_text = str(user_data.get("description") or "").strip()
+        if target_display_name is None:
+            target_display_name = user_data.get("name") or None
+        target_user_id = str(user_data.get("id") or "")
+
+        # Endpoint 2 — recent posts.
+        if target_user_id and not target_recent_posts_text.strip():
+            try:
+                tweets_resp = x_client.request(
+                    f"/2/users/{target_user_id}/tweets"
+                    f"?max_results=20&tweet.fields=created_at,text",
+                    method="GET",
+                    conn=conn,
+                    log_source="xurl",
+                    log_notes="analyze_account auto_pull (recent posts)",
+                )
+            except x_client.XApiError as exc:
+                return {
+                    "status": "failed",
+                    "error": (
+                        f"auto_pull tweets lookup failed for @{handle_clean} "
+                        f"({type(exc).__name__}: {exc}); fall back to manual paste."
+                    ),
+                }
+            tweets_body = (
+                tweets_resp.body if isinstance(tweets_resp.body, dict) else {}
+            )
+            tweets = tweets_body.get("data") if isinstance(tweets_body, dict) else None
+            if isinstance(tweets, list):
+                joined = "\n---\n".join(
+                    str(t.get("text") or "").strip()
+                    for t in tweets
+                    if isinstance(t, dict) and t.get("text")
+                )
+                target_recent_posts_text = joined
+
+        if not target_recent_posts_text.strip():
+            return {
+                "status": "failed",
+                "error": (
+                    f"auto_pull yielded no recent posts for @{handle_clean}; "
+                    "fall back to manual paste of one post per --- separator."
+                ),
+            }
 
     niche = _niche.get_niche(conn)
     try:
