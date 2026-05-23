@@ -7112,6 +7112,80 @@ The original Reply-Target-Finder draft included two ideas that §29 deliberately
 * **"Viability 82/100" composite score.** Heterogeneous 0–3 dimensions don't sum into a meaningful 100-point scale at <100-follower scale. The four (eventually seven) dimension scores and the deterministic `recommended_action` carry the same information without the false precision.
 * **Auto-attribution of Stir downloads / follower growth to specific replies.** §14.5 App Store gap and §13 hard rule "never claim causal attribution" apply unchanged. Reply postmortems track impressions/likes/replies on the reply itself; downstream funnel effects stay in the funnel view.
 
+### 29.12 Grok integration (Phase 9, migration 020)
+
+Grok firehose discovery is a third reply-target source alongside manual paste (§29.6 MVP) and curated `agent_target_accounts` (§28.4 #7). It exists for one reason: Daniel's lanes have semantically-related X posts that don't surface via Daniel's hand-written xurl saved-searches or his curated account list. Grok's value is **discovery breadth via real-time X firehose**, not measurement. The §29.2 source-of-truth invariant is what keeps Grok safely scoped.
+
+**API auth:**
+
+- `XAI_API_KEY` lives in `.env` (`.env.example` documents it next to `ANTHROPIC_API_KEY`).
+- Loaded by `app/grok_client.py` at sweep time; never logged, never persisted to SQLite.
+- Settings → Reply Targets → Grok queries shows "key: configured / not set" without ever displaying the key value.
+
+**Search endpoint (assumption to confirm at build time):**
+
+- `app/grok_client.py::search(query: str, max_results: int = 50)` shells out to xAI's Grok-with-X-firehose search endpoint. Exact endpoint path + parameter syntax confirmed against xAI docs at build time; flag inline as "Assuming xAI Grok-2 search endpoint X — flag if wrong" in the Phase 9 prompt.
+- Returns a list of candidate dicts: `{ target_x_post_id, target_post_url, target_author_handle, target_text, observed_metrics, grok_relevance_rationale }`.
+
+**Candidate ingestion pipeline:**
+
+1. `app/jobs/grok_discovery_sweep.py` walks `grok_query_list_json`; for each query, calls `grok_client.search(query)`.
+2. For each returned candidate, call §29.2 verification: `xurl /2/tweets/{target_x_post_id}?tweet.fields=public_metrics,non_public_metrics` (uses Phase 7's xurl wrapper + same OAuth scopes).
+3. On X API 200: candidate flows through §29.3 scoring with X API metrics as the source of truth (NOT Grok's `observed_metrics` — Grok is for discovery, not measurement). Insert into `reply_targets` with `discovered_via='grok_semantic'` and `created_via_agent_message_id=NULL`.
+4. On X API 404: candidate rejected; logged to `grok_api_responses.rejection_reason='verification_404'`; sweep continues.
+5. On dedupe (`unique(target_x_post_id)` index): silently drop; first insert wins.
+
+**Cost tracking integration (§28.6):**
+
+- Each Grok call accumulates spend in the same `combined_ai_monthly_cost_ceiling_usd` ceiling as Anthropic.
+- 80% of ceiling → yellow banner across Settings + agent surfaces.
+- 100% of ceiling → red banner; `app/grok_client.py` refuses next call AND Anthropic agent calls also pause per §28.6.
+
+**Rate-limit handling:**
+
+- On Grok 429: sweep pauses, logs to `grok_api_responses`, respects xAI's documented `Retry-After` (assumption flagged), resumes after the wait.
+- In-progress candidates already verified are committed; in-progress-but-unverified candidates are dropped (re-discovered next sweep). Per-candidate atomicity prevents partial state.
+
+**Daniel-maintained query list:**
+
+- `grok_query_list_json` stored in `settings` as a JSON array of strings (one natural-language query per entry, e.g., `"home cooks frustrated with meal planning"`).
+- Settings → Reply Targets → "Grok queries" panel: CRUD over the list (add / edit / delete / reorder); "Run sweep now" button bypasses the schedule.
+- Empty list = no Grok calls happen, even with `grok_api_enabled = TRUE`. Daniel populates as he learns which semantic queries surface relevant candidates.
+
+**Discovery sweep job:**
+
+- `app/jobs/grok_discovery_sweep.py` runs every `grok_discovery_sweep_interval_minutes` (default 120).
+- launchd plist ships under `launchd/com.scalinity.xgrowth.grok-sweep.plist` documented but NOT auto-loaded (§17). Daniel runs `launchctl load ...` to enable.
+- Each sweep writes a `scheduled_job` audit-log row (§28.30) with queries-run / candidates-discovered / candidates-verified / candidates-rejected counts.
+
+**Queue UI surface (§29.7):**
+
+- Rows where `discovered_via='grok_semantic'` render a small `grok_semantic` badge next to the candidate text.
+- Filter dropdown gains a `discovered_via` filter with `manual` / `agent_curated_account` / `replier_under_thread` / `grok_semantic` / (all) options.
+
+**Failure logging:**
+
+- Every Grok API call (success OR error) logged to `grok_api_responses` (the parallel of `raw_api_responses` for X; same auditability discipline).
+- Settings panel surfaces "Recent Grok failures (last 7 days)" alongside the X API failures view from §17 Phase 7.
+
+**Cross-references:**
+
+- §28.6 combined cost ceiling.
+- §29.2 source-of-truth invariant — Grok verification against X API.
+- §29.6 settings rows: `grok_api_enabled`, `grok_query_list_json`, `grok_discovery_sweep_interval_minutes`.
+- §29.7 Queue UI badge + filter.
+- §29.11 Grok edge cases.
+- §17 Phase 9 sweep job + launchd plist discipline.
+- §18 `XAI_API_KEY` storage; `grok_api_responses` export carve-out.
+
+**Anti-features (load-bearing):**
+
+- **Grok never replaces X API as source of truth** for any engagement metric. Discovery only.
+- **Grok never bypasses §29.2 verification.** A candidate that fails the X API check is rejected; the dashboard never scores or surfaces an unverified Grok candidate.
+- **Grok never reaches §28.10 publish flow directly.** The path from Grok-discovered candidate to posted reply goes through the same draft → confirm → publish flow as any other candidate.
+- **Grok does NOT auto-post replies.** Same per-action confirmation rule as everywhere else.
+- **No semantic-query expansion via Grok.** Daniel writes the queries; Grok runs them. Claude's role is drafting replies, not synthesizing search queries.
+
 ---
 
 ## 30. Changelog — 2026-05-21 revision
