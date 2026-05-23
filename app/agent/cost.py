@@ -51,6 +51,12 @@ _MODEL_RATES: dict[str, tuple[float, float]] = {
     # recommended general-purpose model and supports Live Search with
     # source type "x" for X firehose discovery (§29.12).
     "grok-4.3": (1.25, 2.50),
+    # P9R-35: 'grok-4' alias kept as a defensive fallback ONLY for
+    # historical rate-snapshot rows whose model field carried that
+    # value before Phase 9. No production caller picks 'grok-4' —
+    # DEFAULT_GROK_MODEL is 'grok-4.3'. Mapped to grok-4.3 rates so a
+    # historical row reconstructs at the documented Phase-9 price (the
+    # actual grok-4 base model was retired by Phase 9 land date).
     "grok-4": (1.25, 2.50),
 }
 
@@ -217,43 +223,58 @@ def xai_month_to_date_spend_usd(
 
     Returns 0.0 when the table doesn't exist (pre-migration-021
     databases — defensive against running on an older DB).
+
+    P9R-30: narrowed the OperationalError catch to "no such table"
+    only — a locked DB / disk error / SQL syntax error now propagates
+    instead of silently returning $0.0 spend and letting Daniel slip
+    one extra Grok call past the cap.
+
+    P9R-29: row access uses field-name only (matching
+    ``month_to_date_spend_usd`` directly above). The project sets
+    ``conn.row_factory = sqlite3.Row`` globally in ``app/db.py::
+    connect``; the prior ``isinstance(row, sqlite3.Row) else row[0]``
+    fallback was dead defensive code asymmetric with the Anthropic
+    helper.
+
+    P9R-51: aggregation now happens SQL-side via ``json_extract`` +
+    ``SUM`` for cleaner reads and constant-memory at the audit-table
+    scale we'll grow to. Falls back to the prior Python-side sum on
+    older SQLite builds (extremely unlikely — sqlite3 has shipped
+    JSON1 by default for years).
     """
     now = now or datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_start_iso = month_start.strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        rows = conn.execute(
+        row = conn.execute(
             """
-            SELECT rate_snapshot_json
+            SELECT COALESCE(SUM(
+                ((COALESCE(json_extract(rate_snapshot_json, '$.input_tokens'), 0) * 1.0)
+                 * COALESCE(json_extract(rate_snapshot_json, '$.input_per_million_usd'), 0.0)
+                 +
+                 (COALESCE(json_extract(rate_snapshot_json, '$.output_tokens'), 0) * 1.0)
+                 * COALESCE(json_extract(rate_snapshot_json, '$.output_per_million_usd'), 0.0)
+                ) / 1000000.0
+            ), 0.0) AS spend_usd
               FROM grok_api_responses
              WHERE created_at_utc >= ?
                AND rate_snapshot_json IS NOT NULL
             """,
             (month_start_iso,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # Table missing — pre-migration-021 DB. Treat as zero spend.
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        # P9R-30: narrow on missing-table specifically. Any other
+        # OperationalError ("database is locked", "disk I/O error",
+        # SQL syntax error) must propagate so we don't silently
+        # under-bill spend and slip past the ceiling.
+        if "no such table" not in str(exc).lower():
+            raise
         return 0.0
 
-    spend = 0.0
-    for row in rows:
-        raw = row["rate_snapshot_json"] if isinstance(row, sqlite3.Row) else row[0]
-        if not raw:
-            continue
-        try:
-            snap = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if not isinstance(snap, dict):
-            continue
-        in_tok = int(snap.get("input_tokens") or 0)
-        out_tok = int(snap.get("output_tokens") or 0)
-        rate_in = float(snap.get("input_per_million_usd") or 0.0)
-        rate_out = float(snap.get("output_per_million_usd") or 0.0)
-        spend += (in_tok / 1_000_000.0) * rate_in
-        spend += (out_tok / 1_000_000.0) * rate_out
-    return spend
+    if row is None or row["spend_usd"] is None:
+        return 0.0
+    return float(row["spend_usd"])
 
 
 def combined_month_to_date_spend_usd(
@@ -265,7 +286,14 @@ def combined_month_to_date_spend_usd(
     is the single source for "what's been spent so far this month
     against the combined cap." Both ``app/agent/client.py`` and
     ``app/grok_client.py`` route their preflight check through here.
+
+    P9R-14: resolve ``now`` ONCE and pass the materialized timestamp
+    into both inner functions. Pre-fix, when ``now=None`` each inner
+    call independently called ``datetime.now(timezone.utc)``; at a
+    UTC month boundary the two halves could read different months and
+    spend briefly appeared to halve.
     """
+    now = now or datetime.now(timezone.utc)
     return month_to_date_spend_usd(conn, now=now) + xai_month_to_date_spend_usd(
         conn, now=now
     )
@@ -283,6 +311,9 @@ def is_combined_ceiling_breached(
     pre-call gates in both Anthropic + xAI clients. Mirrors the strict
     ``>=`` comparison in ``check_ceiling_or_raise`` (W21 wording).
     """
+    # P9R-14: materialize `now` here too so the inner combined-spend
+    # call doesn't compute a second clock read on a month boundary.
+    now = now or datetime.now(timezone.utc)
     combined = combined_month_to_date_spend_usd(conn, now=now)
     cap = get_monthly_ceiling_usd(conn)
     return combined + projected_call_cost_usd >= cap
