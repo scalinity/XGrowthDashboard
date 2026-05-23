@@ -19,7 +19,6 @@ reads.
 from __future__ import annotations
 
 import difflib
-import json
 import sys
 from html import escape as _h
 from pathlib import Path
@@ -37,6 +36,12 @@ from app.agent import blogs as _blogs
 from app.agent import niche as _niche
 from app.agent import personality_lore as _personality_lore
 from app.agent import voice_profile as _voice_profile
+from app.agent._blog_ui_helpers import (
+    SuggestionAnchorAmbiguous,
+    SuggestionAnchorMissing,
+    apply_suggestion,
+    parse_default_export_dir,
+)
 from app.components.theme import apply_theme, hairline, kicker
 from app.pages import open_connection
 
@@ -170,30 +175,11 @@ def _accept_suggestion_cb(*, blog_id: int, index: int) -> None:
         with open_connection() as conn:
             blog = _blogs.get_blog(conn, blog_id)
             body = blog.current_body_markdown or ""
-            anchor = sug["anchor"]
-            replacement = sug["replacement"]
-            # Substring replace on the anchor — UI surfaces the
-            # suggestion with the exact anchor the model emitted.
-            occurrences = body.count(anchor)
-            if occurrences == 0:
-                st.session_state["editor_save_error"] = (
-                    f"suggestion anchor not found in body: {anchor[:40]}…"
-                )
+            try:
+                new_body = apply_suggestion(body, sug["anchor"], sug["replacement"])
+            except (SuggestionAnchorMissing, SuggestionAnchorAmbiguous) as exc:
+                st.session_state["editor_save_error"] = str(exc)
                 return
-            # P6R-9: if the anchor matches multiple paragraphs (common
-            # when headings repeat across sections), reject rather than
-            # silently rewriting the FIRST occurrence and surprising
-            # Daniel. Surface the ambiguity so he can manually pick
-            # which paragraph to rewrite (or re-prompt for a more
-            # specific anchor).
-            if occurrences > 1:
-                st.session_state["editor_save_error"] = (
-                    f"suggestion anchor matches {occurrences} paragraphs in the body — "
-                    "ambiguous; rewrite the matching paragraph manually or re-prompt "
-                    "the agent for a more-specific anchor."
-                )
-                return
-            new_body = body.replace(anchor, replacement, 1)
             _blogs.save_blog(
                 conn,
                 blog_id,
@@ -706,18 +692,10 @@ def _render_export_dialog(blog_id: int) -> None:
         row = conn.execute(
             "SELECT value_json FROM settings WHERE key = 'blog_export_default_directory'"
         ).fetchone()
-        # P6R-20: parse defensively — only accept a non-empty JSON
-        # string value. Pre-fix, a setting stored as a list/int would
-        # parse cleanly and then crash on .rstrip('/'). Type-check
-        # after json.loads.
-        default_dir = "data/blog_exports/"
-        if row is not None and row[0]:
-            try:
-                parsed = json.loads(row[0])
-                if isinstance(parsed, str) and parsed.strip():
-                    default_dir = parsed
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
+        # P6R-20: parse_default_export_dir (extracted pure helper) handles
+        # the missing-row / parse-failure / non-string / whitespace-only
+        # cases uniformly and is unit-tested.
+        default_dir = parse_default_export_dir(row[0] if row is not None else None)
         blog = _blogs.get_blog(conn, blog_id)
 
     st.selectbox(
