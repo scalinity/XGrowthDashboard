@@ -110,6 +110,24 @@ def _categorize_post(tweet: dict[str, Any]) -> str:
     - empty / none   → 'standalone' (thread roots are also standalones
                        from the API's perspective; thread continuation
                        is a Daniel-level annotation, not a tweet field)
+
+    RV2-11: 'thread_root' / 'thread_child' are reachable values of
+    posts.type per the CHECK constraint but this function never emits
+    them — they come from manually-tagged rows or future thread-
+    classification logic. TODO (V1.2 thread classification): inspect
+    ``conversation_id`` against the user's own ID to distinguish
+    thread_root (first post in a same-author thread) from thread_child
+    (subsequent posts). Until then, multi-post same-author threads land
+    as ``standalone`` rows.
+
+    Downstream impact analysis (grepped 2026-05-23):
+    - ``app/pages/3_Progress.py:78`` filters on
+      ``type IN ('standalone','thread_root','thread_child','quote')`` —
+      counts ALL non-reply rows as 'posts shipped'. Standalone-tagged
+      imports are still counted; the only effect of the missing labels
+      is that a thread of 5 posts counts as 5 standalones instead of
+      1 root + 4 children. Functionally identical for the metric.
+    - No other view, migration, or query branches on the missing labels.
     """
     refs = tweet.get("referenced_tweets") or []
     for ref in refs:
