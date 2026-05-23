@@ -99,6 +99,13 @@ CREATE INDEX IF NOT EXISTS idx_reply_target_snapshots_target_time
 -- "longest-unrefreshed first" SELECT lands in index order.
 ALTER TABLE posts ADD COLUMN last_metrics_refresh_at_utc TEXT;
 
+-- RV2-17: this partial index covers the WHERE pre-filter in
+-- app/jobs/post_metrics_refresh.py::_select_stale_post_ids but NOT the
+-- ORDER BY tier_due (a computed CASE expression). At MVP scale (<10K
+-- posts) the materialized intermediate is fine. If post count crosses
+-- 10K (V1.1+), add a covering index that includes
+-- (last_metrics_refresh_at_utc ASC, created_date ASC) to support the
+-- staleness-tier ORDER BY without forcing a full scan.
 CREATE INDEX IF NOT EXISTS idx_posts_last_metrics_refresh
     ON posts (last_metrics_refresh_at_utc)
     WHERE x_post_id IS NOT NULL;
