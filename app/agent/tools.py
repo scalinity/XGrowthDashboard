@@ -1279,6 +1279,8 @@ def _save_draft_reply(
     confidence_label: str | None = None,
     reply_quality_lint_passed: bool | None = None,
 ) -> dict[str, Any]:
+    import re as _re
+
     # Phase 5.9 / §28.17 — required, same enforcement as posts.
     ct = _content_types.validate_for_save(content_type)
     # Phase 5.9 / §28.18 — persistence: None when the lint wasn't run
@@ -1315,15 +1317,28 @@ def _save_draft_reply(
         )
         draft_id = int(draft_cur.lastrowid)
 
+        # P8R-2: extract the target's X post id from target_post_url so
+        # posts.in_reply_to_post_id matches the column's TEXT-snowflake
+        # contract (migrations/001 line 111 + app/forms/post_log.py). The
+        # Phase 8 publish wrapper reads this column directly to build the
+        # X API reply body. Falls back to NULL when the URL doesn't match
+        # /status/<id>/ — publish.py's _resolve_reply_target_x_post_id
+        # has a secondary parse-target_post_url fallback for that case.
+        _status_id_match = _re.search(
+            r"/status(?:es)?/(\d+)", target_post_url or ""
+        )
+        in_reply_to_x_id = _status_id_match.group(1) if _status_id_match else None
+
         post_cur = conn.execute(
             """
             INSERT INTO posts
                 (created_at_utc, created_date, text, type, posted_via,
-                 manual_confirmation_status, agent_draft_id, content_type)
+                 manual_confirmation_status, agent_draft_id, content_type,
+                 in_reply_to_post_id)
             VALUES (datetime('now'), date('now'), ?, 'reply',
-                    'agent_assisted', 'draft', ?, ?)
+                    'agent_assisted', 'draft', ?, ?, ?)
             """,
-            (text, draft_id, ct),
+            (text, draft_id, ct, in_reply_to_x_id),
         )
         post_id = int(post_cur.lastrowid)
 
