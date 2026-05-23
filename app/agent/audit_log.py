@@ -121,6 +121,16 @@ def log(
     caller is mid-``with transaction(conn):``, this insert lands as
     part of the same commit; when the caller is in autocommit, it
     lands immediately. Either way the append-only invariant holds.
+
+    **target_id normalization (post-/review-2 P8R-12 follow-up):**
+    ``target_id`` accepts either ``str`` or ``int`` and is stringified
+    here on the way to SQLite (audit_logs.target_id is TEXT in the
+    schema). Call sites may pass whichever form is most natural —
+    ``target_id=post.id`` (bare int) and ``target_id=str(post.id)``
+    are semantically identical at insert time and on read. There is
+    no convention to follow; both shapes are committed across the
+    codebase and that's intentional. Don't churn diffs to convert
+    one to the other.
     """
     if event_category not in ALLOWED_CATEGORIES:
         raise ValueError(
