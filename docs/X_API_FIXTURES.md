@@ -39,16 +39,32 @@ door open if we ever migrate transports.
 
 ## 2. Cassette file layout
 
+**Canonical list:** the cassettes that exist are exactly those under
+`tests/fixtures/x_api/*.yaml` — run `ls tests/fixtures/x_api/` (or
+`uv run python -m scripts.rerecord_x_api_fixtures --dry-run` for the
+re-recordable subset) for the current set.
+
+**Per-cassette doc lives in the cassette YAML itself** (top-of-file
+comment block), not duplicated here — that way the doc moves with
+the cassette and can't drift. As of this writing:
+
 ```text
 tests/fixtures/x_api/
-  publish_post_success_200.yaml          — POST /2/tweets returning data.id
-  publish_reply_success_200.yaml         — POST /2/tweets with reply.in_reply_to_tweet_id
-  publish_rate_limit_429.yaml            — 429 with Retry-After
-  publish_cold_reply_403.yaml            — 403 with X cold-reply error body
-  publish_server_error_500.yaml          — 500 with no body
-  publish_timeout.yaml                   — sentinel that triggers subprocess.TimeoutExpired
-  recent_tweets_match.yaml               — GET /2/users/me/tweets for crash-recovery
+  publish_post_success_200.yaml          — POST /2/tweets returning data.id (recordable)
+  publish_reply_success_200.yaml         — POST /2/tweets with reply.in_reply_to_tweet_id (recordable)
+  publish_rate_limit_429.yaml            — 429 with Retry-After (hand-maintained)
+  publish_cold_reply_403.yaml            — 403 with X cold-reply error body (hand-maintained)
+  publish_server_error_500.yaml          — 500 with no body (hand-maintained)
+  publish_timeout.yaml                   — sentinel that triggers subprocess.TimeoutExpired (hand-maintained)
+  recent_tweets_match.yaml               — GET /2/users/me/tweets for crash-recovery (recordable)
 ```
+
+When adding a new cassette: also add a one-line top-of-file YAML
+comment describing what response shape it captures, and if it's
+re-recordable, append it to `_RECORDABLE_CASSETTES` in
+`scripts/rerecord_x_api_fixtures.py`. The script is the source of
+truth for which cassettes can be re-recorded automatically; this doc
+is the source of truth for cassette semantics and the safety rules.
 
 Each YAML cassette has this shape:
 
