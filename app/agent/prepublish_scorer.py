@@ -717,8 +717,18 @@ def _validate_screenshot_score(raw: Any) -> int | None:
     Out-of-range and non-numeric inputs return None — the §28.11 schema
     CHECK rejects anything but NULL or 0..3, so the validator is the
     last line of defense before the persisted row.
+
+    Phase 10 S2 — explicit bool guard. Python's ``bool`` is a subclass
+    of ``int`` so ``int(True) == 1`` and ``int(False) == 0`` — both
+    would silently pass the 0..3 clamp. A model returning JSON
+    ``{"score": false}`` would land as score=0 instead of being
+    rejected as malformed. Reject booleans explicitly.
     """
     if raw is None:
+        return None
+    # Bool MUST be checked before isinstance(int) because bool is a
+    # subclass of int — `isinstance(True, int)` is True.
+    if isinstance(raw, bool):
         return None
     try:
         candidate = int(raw)

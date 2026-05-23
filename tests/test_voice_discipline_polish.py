@@ -364,7 +364,11 @@ def test_score_screenshot_test_with_mock_caller_returns_0_through_3() -> None:
         assert out == expected
 
 
-@pytest.mark.parametrize("invalid_raw", [4, -1, "three", None, 99, "a"])
+# Phase 10 S2 — bool MUST be rejected (Python bool is a subclass of int
+# so int(True)==1 and int(False)==0 would otherwise silently pass).
+@pytest.mark.parametrize(
+    "invalid_raw", [4, -1, "three", None, 99, "a", True, False],
+)
 def test_score_screenshot_test_refuses_out_of_range(invalid_raw) -> None:
     out = ps.score_screenshot_test(
         "draft",
