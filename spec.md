@@ -5194,21 +5194,140 @@ Adds long-form blog authoring as a first-class production surface. Five workstre
 * [ ] README addition: short Phase 6 section — what the Blogs surface adds; how it closes the final CreatorOS consolidation gap; the explicit reminder that the app NEVER publishes blogs (Daniel publishes externally).
 * [ ] Spec rename consideration: a one-line "consider renaming to Distribution Dashboard / Personal Distribution OS" note in `docs/index.html` Phase 6 block, flagging the decision for Daniel without committing to it.
 
-### Phase 7 — V1.1: Data collection (deferred from MVP, previously labeled Phase 6 before the Phase 6 Blogs renumber)
+### Phase 7 — X API reads (see §29.1 Phase 7 block, §17 Phase 7 scheduling, §29.10, §29.12 prereqs for full spec)
 
-* [ ] Configure xurl auth outside the app.
-* [ ] Implement `scripts/collect_account_snapshot.py`.
-* [ ] Store raw response.
-* [ ] Insert immutable account snapshot.
-* [ ] Implement recent post import.
-* [ ] Implement post metrics refresh.
-* [ ] Add failure logs.
-* [ ] Manual form remains available (already the MVP default).
-* [ ] Add cron/launchd job for scheduled collection.
-* [ ] **Upgrade `submit_post` to direct X API posting** when `data_collection_mode = api`.
-* [ ] **Upgrade `find_reply_targets` to use X API search** in addition to curated accounts.
+Wires xurl, ships scheduled read jobs, populates `reply_target_snapshots`, activates velocity + timing scoring, ships the §29.10 thread-classifier lint with force-draft override, and adds programmatic X API auto-pull to §28.20 / §28.24 / §28.25. Flips `data_collection_mode` default to `'api'`. Manual fallback remains inviolable.
 
-### Phase 7 — QA
+* [ ] Migration `migrations/018_x_api_reads.sql`:
+
+  * [ ] Promote `reply_target_snapshots` to v1 schema (CHECK constraints per §29.6).
+  * [ ] Add `posts.last_metrics_refresh_at_utc` column.
+  * [ ] Add `reply_targets.lint_category`, `.force_drafted`, `.force_drafted_reason` columns.
+  * [ ] Add Phase 7 settings rows per §29.6: flip `data_collection_mode` default to `'api'`; seed `reply_target_metrics_refresh_interval_minutes = 60`, `post_metrics_refresh_interval_minutes = 60`, `combined_ai_monthly_cost_ceiling_usd = 30.0`, `x_api_rate_limit_window_minutes = 15`, `x_api_recent_failures_visible_days = 7`.
+  * [ ] Log a `migration_applied_018` row to `audit_logs` (`category='migration'`) as the migration's final step.
+  * [ ] Add `scheduled_job` to `audit_logs.category` CHECK constraint (per §28.30).
+* [ ] xurl OAuth setup:
+
+  * [ ] One-time `xurl auth login` with scopes `tweet.read users.read offline.access`.
+  * [ ] Document in `docs/X_API_SETUP.md` (per-platform install instructions + auth flow + scope rationale).
+  * [ ] Verify tokens live under `~/.xurl/`; dashboard shells out via `subprocess`, never holds raw OAuth tokens itself.
+* [ ] `scripts/collect_account_snapshot.py` — daily snapshot job per §17 Phase 7 block #1.
+* [ ] `scripts/import_recent_posts.py` — daily import per §17 #2; one-shot backfill at install for existing post history; skip-existing-`x_post_id` rule preserves manually-logged rows.
+* [ ] `app/jobs/post_metrics_refresh.py` — hourly metrics refresh per §17 #3; batches of 100 via `/2/tweets?ids=...`.
+* [ ] `app/jobs/reply_target_metrics_refresh.py` — hourly reply-target metrics refresh per §17 #4; on 404 transition `status='target_deleted'`; on 429 respect Retry-After.
+* [ ] Velocity + timing scoring in `app/agent/reply_targets.py` per §29.3 boundaries; resolver consumes 6 dimensions.
+* [ ] Thread-classifier lint pass — extend `app/agent/lint.py` with NEW function `thread_classifier_lint(target_post_text, target_author_handle, ...)`. **Distinct from existing `reply_quality_lint` (§28.18, shipped Phase 5.9)** — do NOT modify the existing function. Categories per §29.10. Haiku invocation; runs at scoring time inside `score_reply_candidates`.
+* [ ] Force-draft override UI (§29.7 / §29.10): when `lint_blocked=true`, dim row + disable "Draft reply" button; "Force-draft (overrides lint)" affordance prompts for mandatory `force_drafted_reason`; on submit, sets `force_drafted=true`, logs `data`-category `audit_logs` row with the reason.
+* [ ] Phase 7 programmatic auto-pull paths:
+
+  * [ ] §28.20 replier-pool: add `auto_scan: bool = false` to tool #14 signature; when TRUE, call `xurl /2/tweets/search/recent?query=conversation_id:<id>`.
+  * [ ] §28.24 Account Researcher: add `auto_pull: bool = false` to tool #19 signature; when TRUE, call `xurl /2/users/by/username/<handle>?user.fields=description,public_metrics` + `xurl /2/users/<id>/tweets?max_results=20`.
+  * [ ] §28.25 Profile Audit: bio auto-pull via the same Account Researcher endpoint; paste flow remains as fallback.
+* [ ] launchd plist files for each scheduled job — ship under `launchd/com.scalinity.xgrowth.<job>.plist`; document exact `launchctl load` invocations in `docs/SCHEDULED_JOBS.md`. **Do NOT auto-load** — Daniel runs `launchctl load` per job after confirmation. Each plist references the same xurl auth state under `~/.xurl/`.
+* [ ] Settings UI updates:
+
+  * [ ] `data_collection_mode` toggle (default `'api'`).
+  * [ ] Per-job last-refresh timestamps (joined from `account_snapshots`, `post_metric_snapshots`, `reply_target_snapshots`).
+  * [ ] "Recent X API failures (last 7 days)" panel joined from `raw_api_responses` filtered by error status.
+* [ ] Scheduled-job audit-log integration: every job writes a `scheduled_job` row at run-end with success/failure + counts per §28.30.
+* [ ] Tests (**+40 minimum**):
+
+  * [ ] 4⁶ = 4096-combo resolver test in `tests/test_reply_target_resolver.py` (parameterized batch, <100ms total).
+  * [ ] Per-job rate-limit handling tests (~10): 429 + Retry-After respected, `last_checked_at_utc` stays stable on rate-limit.
+  * [ ] 404 → `status='target_deleted'` transition (~3 cases).
+  * [ ] Thread-classifier lint per-category classification (~8: 4 categories × passing + blocking outcomes).
+  * [ ] Force-draft override audit (~3: override logged, reason mandatory, audit row inspectable).
+  * [ ] Manual-fallback parity tests (~10): every API path has a manual-equivalent path with a separate test.
+  * [ ] Q1-promotion tests (~10): §28.20 replier-pool auto_scan / §28.24 Account Researcher auto_pull / §28.25 Profile Audit auto_pull round-trips.
+  * [ ] Backfill smoke test (~2): `scripts/import_recent_posts.py` first run populates existing post history without overwriting metadata.
+* [ ] Update README with a Phase 7 section: what xurl + the four scheduled jobs do; how `data_collection_mode` toggles; that launchd plists ship documented but not auto-loaded; that manual mode is the fallback.
+* [ ] Append a new Phase 7 block to `docs/index.html` per the CLAUDE.md "Implementation status doc" workflow.
+
+### Phase 8 — X API writes (see §29.1 Phase 8 block, §28.10 Phase 5.5 → Phase 8 transition for full spec)
+
+Replaces the Phase-5.5-stubbed manual-clipboard-only publish branch with a real `POST /2/tweets` branch alongside the existing manual branch. Adds `publish_via_api_enabled` (default TRUE) as the per-publish gate. Same six-check + atomic-transaction wrapper.
+
+* [ ] Migration `migrations/019_x_api_writes.sql`:
+
+  * [ ] Add `publish_via_api_enabled boolean default true` setting per §29.6.
+  * [ ] Add `x_write_rate_limit_per_15min integer default 50` and `x_write_rate_limit_per_24h integer default 1000` settings.
+  * [ ] Log a `migration_applied_019` row to `audit_logs`.
+* [ ] `app/x_client.py` write surface:
+
+  * [ ] Implement `publish_post_to_x_via_api(text, in_reply_to_x_post_id=None)` — shells out to `xurl --request POST /2/tweets ...` using Phase 7's xurl auth with `tweet.write` scope augmented at auth-login time.
+  * [ ] Replace the existing stub in `_internal_tools.publish_post_to_x` so it calls the real `xurl` path when `publish_via_api_enabled = TRUE` and the existing manual-clipboard branch when FALSE. **Same six-check + atomic-transaction wrapper** — only the X API call inside the transaction changes.
+* [ ] Write-side rate-limit handling:
+
+  * [ ] Sliding window tracker in `app/x_client.py` honoring `x_write_rate_limit_per_15min` and `x_write_rate_limit_per_24h`.
+  * [ ] On 429: surface "rate-limited until {reset_time}" in publish modal; the confirmation token stays unconsumed (Daniel retries after reset).
+  * [ ] On 5xx: bounded retry per existing `x_posting_publish_retry_attempts_per_token`.
+  * [ ] On 403 (cold reply): surface UX message "X API refused this reply (403). Engage with this author's posts first, or use the manual fallback." Token consumed (X considers it a real attempt). No `posts` row created.
+  * [ ] On timeout mid-transaction: ROLLBACK; `publish_last_error` set; §28.10 crash-recovery scan reconciles on next boot.
+* [ ] `publish_via_api_enabled` UI gate in Settings → Growth Agent (default TRUE; when FALSE, publish flow takes existing manual-clipboard branch end-to-end).
+* [ ] vcr.py recorded fixtures:
+
+  * [ ] `tests/fixtures/x_api/*.yaml` recording every X API response shape the publish flow can see (200 success, 429, 403, 5xx, timeout).
+  * [ ] `scripts/rerecord_x_api_fixtures.py` — documented procedure for re-recording fixtures when X API contracts change. Includes the safety rule: re-recording posts real tweets to Daniel's sandbox account; delete them after.
+* [ ] Tests:
+
+  * [ ] Every existing test in `tests/test_agent.py` that exercises the §28.10 publish flow re-runs against the real X API surface via vcr.py fixtures, with green parity to pre-Phase-8 behavior.
+  * [ ] New write-failure-mode tests: 429 + token stays unconsumed; 5xx + bounded retry exhaustion → ROLLBACK; 403 cold-reply → UX message + token consumed + no posts row; timeout mid-transaction → ROLLBACK + crash-recovery reconciliation.
+  * [ ] Manual-fallback round-trip test with `publish_via_api_enabled = FALSE`: full flow ends with Daniel pasting `x_post_id` into manual mark-posted; no X API call fires.
+  * [ ] End-to-end fixture-recorded run with `publish_via_api_enabled = TRUE`: draft → token mint → confirm → POST /2/tweets → `posts` row created with real `x_post_id` + `published_to_x_at` + `publish_method='agent_confirmed'`.
+* [ ] Update README with a Phase 8 section: the API vs manual toggle, the cold-reply 403 UX, the vcr.py fixture procedure.
+* [ ] Append a new Phase 8 block to `docs/index.html`.
+
+### Phase 9 — Grok integration (see §29.12 for full spec; §29.1 Phase 9 block + §28.6 cost integration)
+
+Adds Grok firehose discovery as a third reply-target source. Defaults `grok_api_enabled` to TRUE. Combined Anthropic + xAI cost ceiling (§28.6) at $30/month default. Phase 7 X API reads are a hard prerequisite (Grok-discovered candidates verify via Phase 7's xurl wrapper per §29.2).
+
+* [ ] Migration `migrations/020_grok_integration.sql`:
+
+  * [ ] Extend `reply_targets.discovered_via` CHECK constraint with `'grok_semantic'` (drop-and-recreate the constraint per SQLite norm).
+  * [ ] Create `grok_api_responses` audit table (mirrors `raw_api_responses` shape; columns: `id`, `query`, `request_payload_json`, `response_status_code`, `response_body_json`, `rate_snapshot_json`, `rejection_reason`, `created_at_utc`).
+  * [ ] Seed Phase 9 settings rows per §29.6: `grok_api_enabled = TRUE`, `grok_query_list_json = '[]'`, `grok_discovery_sweep_interval_minutes = 120`.
+  * [ ] Log a `migration_applied_020` row to `audit_logs`.
+* [ ] `app/grok_client.py` (new):
+
+  * [ ] `search(query: str, max_results: int = 50) -> list[CandidateDict]` — shells out to xAI's Grok-with-X-firehose search endpoint. **Assumption: confirm exact endpoint path + parameters against xAI docs at build time; flag inline.**
+  * [ ] `XAI_API_KEY` loaded from `.env` once at client init; never logged.
+  * [ ] On 429: pause + respect `Retry-After`; log to `grok_api_responses`.
+  * [ ] On cost-ceiling-hit per §28.6: refuse next call; sweep aborts.
+* [ ] `app/jobs/grok_discovery_sweep.py` (new):
+
+  * [ ] Walk `grok_query_list_json`; for each query, call `grok_client.search()`.
+  * [ ] Per candidate: §29.2 verification via `xurl /2/tweets/{target_x_post_id}` (uses Phase 7's xurl wrapper).
+  * [ ] On 200: §29.3 scoring with X API metrics as source-of-truth; insert into `reply_targets` with `discovered_via='grok_semantic'`.
+  * [ ] On X API 404: reject candidate; log to `grok_api_responses.rejection_reason='verification_404'`.
+  * [ ] On `unique(target_x_post_id)` dedupe: silently drop second insert.
+  * [ ] Write per-sweep `scheduled_job` audit-log row with queries-run / candidates-discovered / candidates-verified / candidates-rejected counts.
+* [ ] Settings UI:
+
+  * [ ] "Grok queries" panel under `app/pages/7_Settings.py` Reply Targets section: CRUD over `grok_query_list_json` (add / edit / delete / reorder), one query per line.
+  * [ ] "Run sweep now" button (bypasses schedule).
+  * [ ] `grok_api_enabled` toggle.
+  * [ ] "Recent Grok failures (last 7 days)" panel joined from `grok_api_responses`.
+  * [ ] "Combined AI spend this month" panel (§28.6) shows Anthropic + xAI split with progress bar against ceiling.
+* [ ] Queue UI (`app/pages/10_Reply_Target_Queue.py`):
+
+  * [ ] `grok_semantic` badge on rows where `discovered_via='grok_semantic'`.
+  * [ ] `discovered_via` filter dropdown with `manual` / `agent_curated_account` / `replier_under_thread` / `grok_semantic` / (all) options.
+* [ ] launchd plist for `app/jobs/grok_discovery_sweep.py` — shipped documented under `launchd/com.scalinity.xgrowth.grok-sweep.plist`; documented in `docs/SCHEDULED_JOBS.md`. **Do NOT auto-load** — Daniel runs `launchctl load`.
+* [ ] Code TODO cleanup: update `app/agent/reply_targets.py:199` comment to reference Phase 9 instead of "V1.2-deferred".
+* [ ] Tests:
+
+  * [ ] Happy-path Grok candidate ingestion: recorded Grok fixture → X API 200 verification → `reply_targets` insert with `discovered_via='grok_semantic'`.
+  * [ ] §29.2 404-on-verification rejection: candidate dropped, `grok_api_responses` row with `rejection_reason='verification_404'`, no `reply_targets` insert.
+  * [ ] Rate-limit pause-and-resume.
+  * [ ] Combined-ceiling enforcement: at 100% spend, both `grok_client.search()` AND `app/agent/client.py` refuse calls.
+  * [ ] Queue UI badge renders for `discovered_via='grok_semantic'` rows; filter dropdown returns expected subsets.
+  * [ ] Query list CRUD round-trip via Settings.
+  * [ ] Dedupe: same `target_x_post_id` from Grok + manual paste → first insert wins; second silently drops.
+  * [ ] Manual + X API search paths still work alongside Grok (no regression in pre-Phase-9 reply_target tests).
+* [ ] Update README with a Phase 9 section: what Grok adds, that it defaults ON, the combined ceiling, that Daniel maintains the query list.
+* [ ] Append a new Phase 9 block to `docs/index.html`.
+
+### Phase 10 — QA
 
 * [ ] Test missing snapshot day.
 * [ ] Test duplicate snapshot.
