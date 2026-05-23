@@ -21,6 +21,7 @@ from __future__ import annotations
 import difflib
 import json
 import sys
+from html import escape as _h
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -345,9 +346,12 @@ def _render_identity_panel(conn) -> None:
     kicker("identity")
     nd = _niche.get_niche(conn)
     if nd.is_defined():
+        # P6R-2: niche_person and niche_problem are Daniel-controlled but
+        # Settings → Growth Agent → Niche → text input takes free text,
+        # so escape defensively before splicing into unsafe_allow_html.
         st.markdown(
             f"<div style='color:#e6e1d8;font-size:0.85rem;'>"
-            f"<b>niche:</b> {nd.person} × {nd.problem}</div>",
+            f"<b>niche:</b> {_h(nd.person)} × {_h(nd.problem)}</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -359,12 +363,13 @@ def _render_identity_panel(conn) -> None:
     profile = _voice_profile.get_active(conn)
     if profile is not None:
         desc = profile.self_description() or "(no self-description)"
+        truncated = desc[:140] + ("…" if len(desc) > 140 else "")
         st.markdown(
             f"<div style='color:#a8a39a;font-size:0.78rem;margin-top:0.4rem;'>"
-            f"<b>voice profile:</b> id={profile.id}, "
-            f"window={profile.source_post_window_days}d, "
-            f"posts={profile.source_post_count}<br>"
-            f"<i>{desc[:140]}{'…' if len(desc) > 140 else ''}</i></div>",
+            f"<b>voice profile:</b> id={int(profile.id)}, "
+            f"window={int(profile.source_post_window_days)}d, "
+            f"posts={int(profile.source_post_count)}<br>"
+            f"<i>{_h(truncated)}</i></div>",
             unsafe_allow_html=True,
         )
     else:
@@ -410,14 +415,18 @@ def main() -> None:
         versions = _blogs.list_versions(conn, blog_id)
 
         # ---- Header ----
+        # P6R-2: st.title escapes by default. The unsafe_allow_html markdown
+        # below splices blog.slug — slug is _normalize_slug-sanitized to
+        # [a-z0-9-] so it's already safe, but escape defensively so a
+        # future relaxation of _normalize_slug doesn't open a vector.
         st.title(blog.title)
         header_cols = st.columns([3, 1])
         with header_cols[0]:
             st.markdown(
-                f"slug: <code>{blog.slug}</code> · {_status_chip(blog.status)} "
-                f"· {blog.actual_length_words} words"
-                + (f" / target {blog.target_length_words}" if blog.target_length_words else "")
-                + f" · v.{versions[0].version_number if versions else 0}",
+                f"slug: <code>{_h(blog.slug)}</code> · {_status_chip(blog.status)} "
+                f"· {int(blog.actual_length_words)} words"
+                + (f" / target {int(blog.target_length_words)}" if blog.target_length_words else "")
+                + f" · v.{int(versions[0].version_number) if versions else 0}",
                 unsafe_allow_html=True,
             )
         with header_cols[1]:
@@ -520,11 +529,15 @@ def main() -> None:
                 hairline()
                 kicker(f"pending suggestions ({len(pending)})")
                 for i, sug in enumerate(pending):
+                    # P6R-2: sug['anchor'] and sug['rationale'] are
+                    # model-generated text from the suggest_blog_edits
+                    # Claude call — escape before rendering with
+                    # unsafe_allow_html. CWE-79.
                     st.markdown(
                         f"<div style='background:#1c2128;padding:0.5rem;"
                         "border-radius:0.35rem;margin-bottom:0.5rem;'>"
-                        f"<b>anchor:</b> <code>{sug['anchor'][:60]}…</code><br>"
-                        f"<b>rationale:</b> {sug['rationale']}<br>"
+                        f"<b>anchor:</b> <code>{_h(sug['anchor'][:60])}…</code><br>"
+                        f"<b>rationale:</b> {_h(sug['rationale'])}<br>"
                         f"{_confidence_chip(sug.get('confidence_label'))}</div>",
                         unsafe_allow_html=True,
                     )
@@ -550,11 +563,14 @@ def main() -> None:
                 chip = ""
                 if v.confidence_label_at_version:
                     chip = _confidence_chip(v.confidence_label_at_version)
+                # P6R-2: version_number/created_by/agent_action/created_at_utc
+                # are CHECK-constrained enums or schema-generated values
+                # (never free-text) — but escape defensively.
                 st.markdown(
                     f"<div style='color:#e6e1d8;font-size:0.82rem;'>"
-                    f"v.{v.version_number} · ●{v.created_by}"
-                    + (f" · {v.agent_action}" if v.agent_action else "")
-                    + f" · {v.created_at_utc} {chip}</div>",
+                    f"v.{int(v.version_number)} · ●{_h(v.created_by)}"
+                    + (f" · {_h(v.agent_action)}" if v.agent_action else "")
+                    + f" · {_h(v.created_at_utc)} {chip}</div>",
                     unsafe_allow_html=True,
                 )
                 if not v.is_current_for_blog:
@@ -601,11 +617,17 @@ def main() -> None:
                 hairline()
                 kicker(f"linked posts ({len(linked)})")
                 for row in linked:
-                    txt = (row["text"] or "")[:80]
+                    # P6R-2: row['text'] is posts.text — saved X content
+                    # that can carry arbitrary tweet text including
+                    # <script>...</script>. Escape before splicing into
+                    # unsafe_allow_html. CWE-79.
+                    txt = _h((row["text"] or "")[:80])
+                    direction = _h(row["direction"].replace("_", " "))
+                    kind = _h(row["relationship_kind"].replace("_", " "))
                     st.markdown(
                         f"<div style='color:#a8a39a;font-size:0.78rem;'>"
-                        f"#{row['pid']} · {row['direction'].replace('_', ' ')} · "
-                        f"{row['relationship_kind'].replace('_', ' ')}<br>"
+                        f"#{int(row['pid'])} · {direction} · "
+                        f"{kind}<br>"
                         f"<i>{txt}…</i></div>",
                         unsafe_allow_html=True,
                     )
@@ -693,12 +715,14 @@ def _render_repurpose_dialog(blog_id: int) -> None:
             "you accept the overlap (audit-logged)."
         )
         for item in blocked["blocked_outputs"]:
+            # P6R-2: text_excerpt is the agent's repurposed X output —
+            # may contain HTML if the model emitted it. Escape.
             st.markdown(
                 f"<div style='background:#2a2f37;padding:0.4rem;"
                 "border-radius:0.35rem;margin:0.3rem 0;'>"
-                f"jaccard={item['jaccard_similarity']:.2f} · "
-                f"ngram={item['longest_shared_ngram_length']}<br>"
-                f"<i>{item['text_excerpt']}…</i></div>",
+                f"jaccard={float(item['jaccard_similarity']):.2f} · "
+                f"ngram={int(item['longest_shared_ngram_length'])}<br>"
+                f"<i>{_h(item['text_excerpt'])}…</i></div>",
                 unsafe_allow_html=True,
             )
         st.button(

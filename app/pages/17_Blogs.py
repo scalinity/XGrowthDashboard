@@ -15,6 +15,7 @@ a separate tool is precisely this unified identity surface (§28.31).
 from __future__ import annotations
 
 import sys
+from html import escape as _h
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -337,7 +338,7 @@ def main() -> None:
             lane_bits.append(r["pillar"])
         if r.get("audience"):
             lane_bits.append(r["audience"])
-        lane = " × ".join(lane_bits) or "(unclassified)"
+        lane = _h(" × ".join(lane_bits) or "(unclassified)")
 
         actual = int(r.get("actual_length_words") or 0)
         target = r.get("target_length_words")
@@ -349,16 +350,20 @@ def main() -> None:
             length_label = f"{actual} words"
             gap_label = ""
 
-        author = r.get("last_edited_by") or "—"
-        last_edited = r.get("last_edited_at_utc") or "never"
+        author = _h(str(r.get("last_edited_by") or "—"))
+        last_edited = _h(str(r.get("last_edited_at_utc") or "never"))
 
         with st.container():
+            # P6R-2: escape every user/agent-controlled field before
+            # interpolating into the unsafe_allow_html=True markdown.
+            # title is free-text on create AND agent-generated via
+            # repurpose_x_to_blog_idea — never trust either source.
             st.markdown(
                 f"<div style='border-left: 3px solid {keyline}; "
                 "padding: 0.4rem 0.8rem; margin-bottom: 0.5rem; "
                 "background: #161a20; border-radius: 0 0.35rem 0.35rem 0;'>"
                 f"<div style='font-family:\"Fraunces\",serif;font-size:1.1rem;"
-                f"color:#e6e1d8;font-weight:500;'>{r['title']}</div>"
+                f"color:#e6e1d8;font-weight:500;'>{_h(r['title'])}</div>"
                 f"<div style='color:#a8a39a;font-size:0.85rem;margin:0.25rem 0;'>"
                 f"{lane} · {chip_html} · "
                 f"<span class='numeric'>{numeric(length_label)} {numeric(gap_label)}</span> · "
