@@ -1633,11 +1633,60 @@ def _record_reply_target(
 def _audit_profile_to_dict(
     conn: sqlite3.Connection,
     *,
-    bio_text: str,
+    bio_text: str = "",
     pinned_post_text: str,
     recent_post_window_days: int | None,
     pinned_post_id: int | None,
+    auto_pull_bio: bool = False,
 ) -> dict[str, Any]:
+    # Phase 7 §28.25 — when auto_pull_bio=True AND bio_text is empty,
+    # fetch Daniel's bio via xurl /2/users/by/username/<daniel_handle>
+    # ?user.fields=description. Pinned post, recent posts, voice profile,
+    # and niche remain Daniel-supplied or read from settings — the
+    # other audit composition steps are unaffected by Phase 7 (per §28.25).
+    if auto_pull_bio and not bio_text.strip():
+        from app import x_client  # local — Phase 7-only dependency
+
+        # Resolve Daniel's handle from settings.
+        handle_row = conn.execute(
+            "SELECT value_json FROM settings WHERE key = 'x_handle'"
+        ).fetchone()
+        daniel_handle: str = "dannyscalant"
+        if handle_row and handle_row[0]:
+            try:
+                daniel_handle = (json.loads(handle_row[0]) or daniel_handle).lstrip("@")
+            except (TypeError, json.JSONDecodeError):
+                pass
+
+        try:
+            resp = x_client.request(
+                f"/2/users/by/username/{daniel_handle}?user.fields=description",
+                method="GET",
+                conn=conn,
+                log_source="xurl",
+                log_notes="audit_profile auto_pull_bio",
+            )
+        except x_client.XApiError as exc:
+            return {
+                "status": "failed",
+                "error": (
+                    f"auto_pull_bio failed for @{daniel_handle} "
+                    f"({type(exc).__name__}: {exc}); fall back to paste."
+                ),
+            }
+        body = resp.body if isinstance(resp.body, dict) else {}
+        data = body.get("data") if isinstance(body, dict) else None
+        if isinstance(data, dict):
+            bio_text = str(data.get("description") or "").strip()
+        if not bio_text:
+            return {
+                "status": "failed",
+                "error": (
+                    f"auto_pull_bio returned empty description for @{daniel_handle}; "
+                    "fall back to paste."
+                ),
+            }
+
     try:
         analysis, snapshot = _profile_audit.audit(
             conn,
