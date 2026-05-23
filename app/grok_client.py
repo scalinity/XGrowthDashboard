@@ -856,7 +856,69 @@ def _log_grok_response(
         # on rejection_reason doesn't escape and break the upstream
         # call. Audit-row insert is documented as "logging never raises".
         _LOG.warning("grok_api_responses insert failed (suppressed): %s", exc)
+        # P9R-17: JSONL sidecar fallback. When the DB INSERT fails (locked
+        # / disk full / migration drift), the §28.6 spend reconstruction
+        # silently loses the row's rate_snapshot_json. Persist a JSON line
+        # to data/logs/grok_api_responses.lost.jsonl so the spend can be
+        # reconciled later via a one-off ingestion script. Best-effort;
+        # any filesystem error is also suppressed (we don't make the
+        # upstream call fail to record an audit-of-an-audit).
+        try:
+            _append_lost_audit_row(
+                query=query,
+                request_payload_json=payload_str,
+                response_status_code=response_status_code,
+                response_body_json=body_str,
+                rate_snapshot_json=rate_str,
+                rejection_reason=rejection_reason,
+                duration_ms=duration_ms,
+                db_error=str(exc),
+            )
+        except Exception:  # noqa: BLE001 — sidecar is best-effort
+            pass
         return None
+
+
+def _append_lost_audit_row(
+    *,
+    query: str,
+    request_payload_json: str | None,
+    response_status_code: int | None,
+    response_body_json: str | None,
+    rate_snapshot_json: str | None,
+    rejection_reason: str | None,
+    duration_ms: int,
+    db_error: str,
+) -> None:
+    """P9R-17: append one JSON line to data/logs/grok_api_responses.lost.jsonl.
+
+    Used when the DB INSERT to grok_api_responses fails. The line shape
+    mirrors the table columns so a future ingestion script can read
+    the JSONL and replay the rows into grok_api_responses.
+
+    Defensive: silently no-ops if the logs directory can't be created
+    or written. The caller already logged a WARNING about the original
+    DB failure; we don't want to mask the original error with a
+    sidecar-write error.
+    """
+    from pathlib import Path as _Path
+
+    log_dir = _Path("data") / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    sidecar_path = log_dir / "grok_api_responses.lost.jsonl"
+    record = {
+        "query": query[:1000] if query else None,
+        "request_payload_json": request_payload_json,
+        "response_status_code": response_status_code,
+        "response_body_json": response_body_json,
+        "rate_snapshot_json": rate_snapshot_json,
+        "rejection_reason": rejection_reason,
+        "duration_ms": duration_ms,
+        "lost_at_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+        "db_error": db_error,
+    }
+    with sidecar_path.open("a", encoding="utf-8") as fp:
+        fp.write(json.dumps(record) + "\n")
 
 
 def _safe_truncate(body: dict[str, Any] | None, n: int) -> str:
