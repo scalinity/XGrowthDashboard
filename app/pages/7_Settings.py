@@ -851,6 +851,87 @@ for key, editable, helptext in [
     _render_setting(conn, key, editable, helptext)
 
 # ---------------------------------------------------------------------------
+# Publishing — Phase 8 (§28.10 Phase 5.5 → Phase 8 transition; §29.1
+# "Manual workflows remain inviolable as Settings-selectable fallbacks
+# forever"). publish_via_api_enabled gates the §28.10 atomic-transaction
+# wrapper's branch: TRUE → real POST /2/tweets; FALSE → manual-clipboard
+# fallback path Daniel completes via the existing "Mark posted" UI.
+# ---------------------------------------------------------------------------
+st.markdown("### Publishing")
+st.caption(
+    "Phase 8 (§28.10): the publish flow's atomic transaction calls the X API "
+    "directly via xurl when ON. When OFF, every publish takes the manual-"
+    "clipboard fallback path — the agent stages an intent URL and you finish "
+    "the post via the existing Mark posted form. Manual fallback is never "
+    "deprecated (§29.1). Rate-limit windows count manual AND API publishes "
+    "globally — Daniel is rate-limited per X account, not per branch."
+)
+
+_publish_api_row = conn.execute(
+    "SELECT value_json FROM settings WHERE key = 'publish_via_api_enabled'"
+).fetchone()
+_publish_via_api_current = True
+if _publish_api_row and _publish_api_row[0]:
+    try:
+        _publish_via_api_current = bool(json.loads(_publish_api_row[0]))
+    except (TypeError, json.JSONDecodeError):
+        _publish_via_api_current = True
+
+_publish_api_new = st.toggle(
+    "publish_via_api_enabled — call POST /2/tweets via xurl on publish",
+    value=_publish_via_api_current,
+    help=(
+        "ON (default): the §28.10 wrapper calls the X API on Publish. "
+        "OFF: the wrapper opens an intent URL and you finish the post manually "
+        "via Mark posted. Toggle persists across sessions."
+    ),
+    key="publish_via_api_enabled_toggle",
+)
+if _publish_api_new != _publish_via_api_current:
+    conn.execute(
+        "UPDATE settings SET value_json = ? WHERE key = 'publish_via_api_enabled'",
+        ("true" if _publish_api_new else "false",),
+    )
+    conn.commit()
+    st.toast(
+        "publish_via_api_enabled = " + ("ON · X API writes active" if _publish_api_new else "OFF · manual-clipboard mode active")
+    )
+    st.rerun()
+
+if not _publish_via_api_current:
+    st.markdown(
+        f"<div style='border-left: 2px solid {PALETTE['warn_amber']}; "
+        f"padding: 0.55rem 0.85rem; margin: 0.4rem 0 0.6rem 0; "
+        f"background: {PALETTE['surface']};'>"
+        f"<div class='numeric' style='font-size: 0.75rem; color: {PALETTE['warn_amber']}; "
+        f"letter-spacing: 0.08em; text-transform: uppercase;'>"
+        f"MANUAL-CLIPBOARD MODE · X API WRITES DISABLED"
+        f"</div>"
+        f"<div style='font-family: Fraunces, serif; font-size: 0.95rem; color: {PALETTE['bone']}; "
+        f"margin-top: 0.3rem;'>"
+        f"Every publish opens the intent URL and waits for you to confirm on X."
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+for key, editable, helptext in [
+    (
+        "x_write_rate_limit_per_15min",
+        True,
+        "Sliding-window cap on X API writes per 15 minutes. Honored by "
+        "check_write_rate_capacity() before each publish call. Default 50 "
+        "matches §25 Phase 8; tune as your X API tier allows.",
+    ),
+    (
+        "x_write_rate_limit_per_24h",
+        True,
+        "Sliding-window cap on X API writes per 24 hours. Default 1000 per §25 Phase 8.",
+    ),
+]:
+    _render_setting(conn, key, editable, helptext)
+
+# ---------------------------------------------------------------------------
 # Niche definition (§28.16, Phase 5.9) — load-bearing identity anchor.
 # Two settings rows spliced into Section 1 of the system prompt; empty
 # values BLOCK drafting via §28.2 rule #15 (orchestrator-enforced).
