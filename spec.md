@@ -1413,7 +1413,7 @@ Notes:
 
 ### `account_research_reports`
 
-Strategic analysis of a target X account — posting patterns, positioning, reply-strategy entry points. Manual-paste workflow for MVP; V1.1+ adds X API auto-pull. See §28.24.
+Strategic analysis of a target X account — posting patterns, positioning, reply-strategy entry points. Manual-paste workflow for MVP; Phase 7 adds X API auto-pull via the shared xurl wrapper. See §28.24.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -6078,7 +6078,7 @@ The most novel tactical insight from the source video: niche-relevant audiences 
 2. Inputs:
    - `thread_url` — URL of the big account's post whose reply section Daniel is mining.
    - `replier_handles_or_excerpts` — pasted text. Either a list of @handles, or replier-text excerpts, or both (one per line).
-   - `lookback_minutes` (default 60) — for the §29.3 timing-score sub-input (V1.1+ uses this; MVP records it for future calibration).
+   - `lookback_minutes` (default 60) — for the §29.3 timing-score sub-input (Phase 7 uses this once the `reply_target_metrics_refresh` job is running; MVP records it for future calibration).
 3. Click "Score" → calls new tool `#14 score_replier_pool(thread_url, replier_handles_or_excerpts_json, lookback_minutes)`.
 4. Each candidate is scored on the existing §29.3 4-dim model PLUS a new dimension `thread_context_fit_score` (0-3, deterministic): how well the replier's text matches Daniel's `niche_person` description from §28.16.
 5. Candidates land in `reply_targets` with `source = 'replier_under_thread'` and `agent_reasoning` populated with the per-dimension explanation.
@@ -7634,12 +7634,13 @@ Phase 7, Phase 8, Phase 9. Three deferred capabilities — originally V1.1 (X AP
 
 100. **Phase 9 — Grok integration (migration 020).** Third reply-target discovery source via xAI Grok firehose search. `reply_targets.discovered_via` CHECK extended with `'grok_semantic'`; new `grok_api_responses` audit table; new `app/grok_client.py` + `app/jobs/grok_discovery_sweep.py`. Daniel-maintained `grok_query_list_json` (default `[]`); sweep cadence `grok_discovery_sweep_interval_minutes` (default 120). `grok_api_enabled = TRUE` default. Combined Anthropic + xAI cost ceiling (§28.6) at $30 default; 100% pauses both Grok sweep AND Anthropic agent calls. Source-of-truth invariant: Grok-discovered candidates verify against X API (via Phase 7's xurl) per §29.2 before any score affects `engagement_surface_score`; on 404 candidate rejected. Queue UI gains `grok_semantic` badge + filter. launchd plist ships documented but NOT auto-loaded. Manual + X API search discovery paths still work alongside Grok. Phase 7 is a hard prerequisite (§29.2 verification uses Phase 7's xurl wrapper). See §29.12 for the full section. (§10 `grok_api_responses`, §10 Grok settings rows, §17 Phase 9 sweep job, §18 `XAI_API_KEY` + `grok_api_responses` export carve-out, §22 Grok edge cases, §25 Phase 9, §28.6 combined ceiling, §28.30 audit-log integration, §29.1 Phase 9 block, §29.2 verification invariant extension, §29.6 settings rows, §29.7 Queue UI badge, §29.11 Grok edge cases, §29.12 full section)
 
-Historical version-label updates (items 22 / 29 / 65 / 84 originally framed against V1.1+ / V1.1 / V1.2 labels — the labels are stale post-consolidation; the items themselves describe shipped or absorbed work and stay correct in substance):
+Historical version-label updates (items 22 / 29 / 65 / 82 / 86 originally framed against V1.1+ / V1.1 / V1.2 labels — the labels are stale post-consolidation; the items themselves describe shipped or absorbed work and stay correct in substance):
 
 - Item 22 — "Removed Multi-user / Cloud sync from V1.1+ deferred list": still accurate; these are V1.x+ deferred forever per §0.
 - Item 29 — "Two-step confirmation flow applies in manual mode and V1.1+ API mode": "V1.1+ API mode" now reads as "Phase 8 API mode"; the contract is unchanged.
-- Item 65 — "Direct posting via X API is deferred to V1.1": now Phase 8; same content shipped via the §28.10 Phase 5.5 → Phase 8 transition paragraph.
-- Item 84 — "Account Researcher: X API direct is V1.1+": now Phase 7 per item 98 above.
+- Item 65 — "Direct posting via X API is deferred to V1.1; MVP uses clipboard handoff": now Phase 8; same content shipped via the §28.10 Phase 5.5 → Phase 8 transition paragraph.
+- Item 82 — "Replier-pool: V1.1+ adds the programmatic X API scan": now Phase 7 per item 98 above (§28.20 `auto_scan` parameter).
+- Item 86 — "Account Researcher: V1.1+ adds programmatic X API pull": now Phase 7 per item 98 above (§28.24 `auto_pull` parameter).
 
 [1]: https://docs.x.com/x-api/fundamentals/data-dictionary "Data Dictionary - X"
 [2]: https://docs.x.com/x-api/getting-started/about-x-api "About the X API - X"
