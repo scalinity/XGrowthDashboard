@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sqlite3
 import sys
 from datetime import date, datetime, timezone
@@ -26,6 +27,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
+from app import grok_client as _grok_client  # P9R-41: hoist from mid-file
 from app.agent import cost as _agent_cost
 from app.agent import recovery as _agent_recovery
 from app.agent import repetition_guard as _repetition_guard
@@ -1996,12 +1998,14 @@ st.markdown(
 
 # ----- Phase 9 settings batch read -----
 _phase9_settings_rows = conn.execute(
-    "SELECT key, value_json FROM settings WHERE key IN (?, ?, ?, ?)",
+    # P9R-36: dropped the unused combined_ai_monthly_cost_ceiling_usd
+    # from the batched read — the ceiling panel reads it via
+    # _agent_cost.get_monthly_ceiling_usd directly.
+    "SELECT key, value_json FROM settings WHERE key IN (?, ?, ?)",
     (
         "grok_api_enabled",
         "grok_query_list_json",
         "grok_discovery_sweep_interval_minutes",
-        "combined_ai_monthly_cost_ceiling_usd",
     ),
 ).fetchall()
 _phase9_settings: dict[str, str | None] = {
@@ -2013,10 +2017,8 @@ _phase9_settings: dict[str, str | None] = {
 # detection hardening (P9R-5) applies uniformly to both the runtime
 # call site AND the Settings UI indicator. Otherwise the launchd
 # plist placeholder shows green "configured" here while the sweep
-# refuses to call.
-from app import grok_client as _grok_client_for_settings  # noqa: E402
-
-_xai_key_configured = _grok_client_for_settings.is_configured()
+# refuses to call. P9R-41: _grok_client is hoisted to page-top imports.
+_xai_key_configured = _grok_client.is_configured()
 _xai_key_color = "#7ec97e" if _xai_key_configured else "#d9a86b"
 _xai_key_label = "configured" if _xai_key_configured else "not set"
 st.markdown(
@@ -2029,7 +2031,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ----- grok_api_enabled toggle + cadence input -----
+# ----- Phase 9 settings: explicit-handler form (P9R-10) -----
+# Pre-fix, the checkbox/number-input/text-area each used the
+# read-widget→compare-to-old→INSERT-if-changed→st.rerun() anti-
+# pattern. Per project CLAUDE.md (Streamlit side-effects discipline),
+# mutations belong in explicit handlers — on_change callbacks or
+# form-submit handlers. Wrap the three controls in a single
+# st.form so saves are a deliberate user action, not a render-time
+# side effect.
 _grok_enabled_raw = _phase9_settings.get("grok_api_enabled")
 _grok_enabled_value = True  # comprehensive default per §29.12
 if _grok_enabled_raw:
@@ -2046,60 +2055,6 @@ if _grok_interval_raw:
     except (TypeError, json.JSONDecodeError, ValueError):
         pass
 
-_grok_toggle_cols = st.columns([1, 1])
-with _grok_toggle_cols[0]:
-    _new_enabled = st.checkbox(
-        "Grok API enabled",
-        value=_grok_enabled_value,
-        key="settings_grok_api_enabled",
-        help=(
-            "When OFF the discovery sweep aborts at start; manual + X API "
-            "search paths still work. Default ON per §29.12."
-        ),
-    )
-    if _new_enabled != _grok_enabled_value:
-        conn.execute(
-            "INSERT INTO settings (key, value_json) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-            ("grok_api_enabled", json.dumps(bool(_new_enabled))),
-        )
-        conn.commit()
-        st.toast(f"grok_api_enabled → {bool(_new_enabled)}")
-        st.rerun()
-
-with _grok_toggle_cols[1]:
-    _new_interval = st.number_input(
-        "Sweep interval (minutes)",
-        min_value=15,
-        max_value=24 * 60,
-        value=int(_grok_interval_value),
-        step=15,
-        key="settings_grok_sweep_interval",
-        help="launchd plist StartInterval default (120 min). Edit the plist after changing here.",
-    )
-    if int(_new_interval) != int(_grok_interval_value):
-        conn.execute(
-            "INSERT INTO settings (key, value_json) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-            (
-                "grok_discovery_sweep_interval_minutes",
-                json.dumps(int(_new_interval)),
-            ),
-        )
-        conn.commit()
-        st.toast(f"grok_discovery_sweep_interval_minutes → {int(_new_interval)}")
-        st.rerun()
-
-# ----- Grok queries CRUD panel -----
-st.markdown(
-    "<div style='margin:0.8rem 0 0.3rem 0;font-size:0.92rem;'>"
-    "<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
-    "Grok queries</strong>"
-    "<span class='dim'> · one natural-language query per line · empty list = no Grok calls</span>"
-    "</div>",
-    unsafe_allow_html=True,
-)
-
 _grok_queries_raw = _phase9_settings.get("grok_query_list_json")
 _grok_queries: list[str] = []
 if _grok_queries_raw:
@@ -2110,45 +2065,160 @@ if _grok_queries_raw:
     except (TypeError, json.JSONDecodeError):
         _grok_queries = []
 
-_queries_text_default = "\n".join(_grok_queries)
-_queries_text_new = st.text_area(
-    "Queries (one per line)",
-    value=_queries_text_default,
-    height=160,
-    key="settings_grok_queries_textarea",
-    help=(
-        "Example: 'home cooks frustrated with meal planning'. Each line "
-        "becomes one Grok firehose search per sweep."
-    ),
+# P9R-21 + P9R-22: bounds the queries panel enforces on save. The
+# length cap stops Daniel from pasting a 100KB string (which would
+# ship full to xAI but get truncated to 1KB in the audit row); the
+# secret patterns refuse-on-save with a warning if Daniel ever pastes
+# an API key into a query string.
+_MAX_GROK_QUERY_LEN: int = 500
+_SECRET_REGEXES = (
+    re.compile(r"sk-[A-Za-z0-9\-_]{16,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{16,}"),
+    re.compile(r"AKIA[A-Z0-9]{12,}"),
+    re.compile(r"xai-[A-Za-z0-9\-_]{16,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9\-_]{16,}"),
 )
-_queries_cols = st.columns([1, 1, 4])
-with _queries_cols[0]:
-    if st.button("Save queries", key="settings_grok_save_queries"):
-        _new_queries = [
-            line.strip()
-            for line in (_queries_text_new or "").splitlines()
-            if line.strip()
-        ]
-        conn.execute(
-            "INSERT INTO settings (key, value_json) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-            ("grok_query_list_json", json.dumps(_new_queries)),
+
+
+def _scrub_secrets_in_query(text: str) -> str | None:
+    """Return the matching secret-pattern label if ``text`` looks like it
+    embeds a secret, else None."""
+    for pat in _SECRET_REGEXES:
+        if pat.search(text):
+            return pat.pattern
+    return None
+
+
+with st.form("grok_settings_form"):
+    _form_cols = st.columns([1, 1])
+    with _form_cols[0]:
+        st.checkbox(
+            "Grok API enabled",
+            value=_grok_enabled_value,
+            key="settings_grok_api_enabled",
+            help=(
+                "When OFF the discovery sweep aborts at start; manual + "
+                "X API search paths still work. Default ON per §29.12."
+            ),
         )
-        conn.commit()
-        st.toast(f"saved {len(_new_queries)} query/queries")
-        st.rerun()
-with _queries_cols[1]:
-    if st.button(
-        "Run sweep now",
-        key="settings_grok_run_sweep_now",
+    with _form_cols[1]:
+        st.number_input(
+            "Sweep interval (minutes)",
+            min_value=15,
+            max_value=24 * 60,
+            value=int(_grok_interval_value),
+            step=15,
+            key="settings_grok_sweep_interval",
+            help=(
+                "launchd plist StartInterval default (120 min). Edit "
+                "the plist after changing here."
+            ),
+        )
+    st.markdown(
+        "<div style='margin:0.6rem 0 0.2rem 0;font-size:0.92rem;'>"
+        "<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
+        "Grok queries</strong>"
+        "<span class='dim'> · one query per line · max "
+        f"{_MAX_GROK_QUERY_LEN} chars · empty list = no Grok calls</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.text_area(
+        "Queries (one per line)",
+        value="\n".join(_grok_queries),
+        height=160,
+        key="settings_grok_queries_textarea",
+        label_visibility="collapsed",
         help=(
-            "Runs app/jobs/grok_discovery_sweep.py synchronously. Honors "
-            "the kill switch + ceiling + query list."
+            "Example: 'home cooks frustrated with meal planning'. Each "
+            "line becomes one Grok firehose search per sweep."
         ),
-    ):
+    )
+    _submitted = st.form_submit_button("Save Grok settings", type="primary")
+    if _submitted:
+        _enabled_new = bool(st.session_state["settings_grok_api_enabled"])
+        _interval_new = int(st.session_state["settings_grok_sweep_interval"])
+        _raw_queries = st.session_state.get(
+            "settings_grok_queries_textarea", ""
+        ) or ""
+        # P9R-21 length cap + P9R-22 secret-scrub. Reject the whole save
+        # rather than silently truncating; Daniel sees the offending line.
+        _parsed_queries: list[str] = []
+        _reject_reason: str | None = None
+        for _ln_idx, _line in enumerate(_raw_queries.splitlines(), start=1):
+            _q = _line.strip()
+            if not _q:
+                continue
+            if len(_q) > _MAX_GROK_QUERY_LEN:
+                _reject_reason = (
+                    f"line {_ln_idx} is {len(_q)} chars — exceeds "
+                    f"{_MAX_GROK_QUERY_LEN}-char cap"
+                )
+                break
+            _secret_pat = _scrub_secrets_in_query(_q)
+            if _secret_pat is not None:
+                _reject_reason = (
+                    f"line {_ln_idx} matches a known secret pattern "
+                    f"({_secret_pat}); remove the secret before saving"
+                )
+                break
+            _parsed_queries.append(_q)
+
+        if _reject_reason is not None:
+            st.error(f"refused to save: {_reject_reason}")
+        else:
+            # Three rows up-serted in one go; the form-submit handler is
+            # the single explicit mutation site per CLAUDE.md.
+            conn.execute(
+                "INSERT INTO settings (key, value_json) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                ("grok_api_enabled", json.dumps(_enabled_new)),
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value_json) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                (
+                    "grok_discovery_sweep_interval_minutes",
+                    json.dumps(_interval_new),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value_json) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                ("grok_query_list_json", json.dumps(_parsed_queries)),
+            )
+            conn.commit()
+            st.toast(
+                f"saved · enabled={_enabled_new} · interval={_interval_new}m "
+                f"· {len(_parsed_queries)} query/queries"
+            )
+            st.rerun()
+
+# ----- Run sweep now button (P9R-25 in-flight guard) -----
+# Lives OUTSIDE the form so the sweep button doesn't conflict with the
+# Save-Grok-settings submit. The session-state flag disables the button
+# while a synchronous sweep is in flight — pre-fix, Streamlit would queue
+# a second click and double-spend at xAI.
+if "grok_sweep_in_flight" not in st.session_state:
+    st.session_state["grok_sweep_in_flight"] = False
+
+if st.button(
+    "Run sweep now",
+    key="settings_grok_run_sweep_now",
+    disabled=st.session_state["grok_sweep_in_flight"],
+    help=(
+        "Runs app/jobs/grok_discovery_sweep.py synchronously. Honors the "
+        "kill switch + ceiling + query list. Button is disabled while a "
+        "prior sweep is still in flight."
+    ),
+):
+    st.session_state["grok_sweep_in_flight"] = True
+    try:
         with st.spinner("Running Grok sweep (this may take 30–60 seconds)…"):
             try:
-                from app.jobs.grok_discovery_sweep import run as _run_grok_sweep
+                from app.jobs.grok_discovery_sweep import (  # noqa: E402
+                    run as _run_grok_sweep,
+                )
                 _sweep_summary = _run_grok_sweep(conn)
                 if _sweep_summary.get("error"):
                     st.warning(
@@ -2165,7 +2235,13 @@ with _queries_cols[1]:
                         f"rejected_404={_sweep_summary.get('candidates_rejected_404', 0)}"
                     )
             except Exception as _sweep_err:
-                st.error(f"sweep failed: {_sweep_err}")
+                # Surface the exception class explicitly so Daniel can
+                # disambiguate ceiling vs rate-limit vs network from the toast.
+                st.error(
+                    f"sweep failed ({type(_sweep_err).__name__}): {_sweep_err}"
+                )
+    finally:
+        st.session_state["grok_sweep_in_flight"] = False
 
 # ----- Combined AI spend this month (§28.6) -----
 hairline()
