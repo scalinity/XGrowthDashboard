@@ -440,6 +440,57 @@ class ReplyQualityLintPromptMissingError(RuntimeError):
     """
 
 
+def verify_reply_quality_failure_mode_enum_matches_schema(
+    conn,  # type: ignore[no-untyped-def]  # sqlite3.Connection — kept loose to avoid an import cycle
+) -> tuple[list[str], list[str]]:
+    """Phase 10 W3 — assert REPLY_QUALITY_FAILURE_MODES (Python source)
+    matches the agent_drafts.reply_quality_lint_failure_mode CHECK
+    constraint enum (SQL source).
+
+    Returns ``(code_values, schema_values)`` as ordered lists. Callers
+    (pre-commit / CI / tests) assert ``set(code) == set(schema)`` —
+    the schema CHECK is the boundary the runtime hits; the Python
+    tuple is what the dispatcher writes through. Drift between them
+    silently lets the dispatcher emit a value the schema rejects (or
+    blocks a value the dispatcher will never emit). Same discipline
+    as the §29.5 reply_intent three-way drift check in prompt_builder.
+
+    Implementation: pulls the CHECK clause via ``PRAGMA table_xinfo``
+    is not available cross-version; we read ``sql`` from
+    ``sqlite_master`` for the agent_drafts table and parse the
+    column's CHECK with a single regex anchored on the column name.
+    """
+    import re as _re
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_drafts'"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "agent_drafts table not found in sqlite_master — apply migrations first."
+        )
+    schema_sql: str = row[0]
+    # Find the CHECK clause for the column. Both ALTER ADD COLUMN
+    # (migration 023) and an original CREATE TABLE landing add CHECK
+    # in the same parenthesized shape after the column name.
+    pattern = _re.compile(
+        r"reply_quality_lint_failure_mode\s+TEXT\s+CHECK\s*\("
+        r"[^)]*?IN\s*\(([^)]+)\)"
+        r"[^)]*?\)",
+        flags=_re.IGNORECASE | _re.DOTALL,
+    )
+    m = pattern.search(schema_sql)
+    if not m:
+        raise RuntimeError(
+            "Could not locate reply_quality_lint_failure_mode CHECK clause in "
+            "agent_drafts schema SQL. Has the migration shape changed? "
+            "Update the regex anchor in verify_reply_quality_failure_mode_enum_matches_schema."
+        )
+    raw_values = m.group(1)
+    schema_values = [v.strip().strip("'\"") for v in raw_values.split(",") if v.strip()]
+    return (list(REPLY_QUALITY_FAILURE_MODES), schema_values)
+
+
 def verify_reply_quality_lint_prompt_present(
     path: Path | None = None,
 ) -> tuple[bool, int]:

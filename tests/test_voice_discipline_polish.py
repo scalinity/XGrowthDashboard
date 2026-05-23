@@ -487,6 +487,23 @@ def test_offline_lint_passes_substantive_replies(substantive_text: str) -> None:
     assert result.failure_mode is None
 
 
+def test_reply_quality_failure_mode_enum_matches_schema(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Phase 10 W3 — Python tuple must equal SQL CHECK enum as a set."""
+    code_values, schema_values = (
+        lint.verify_reply_quality_failure_mode_enum_matches_schema(db_conn)
+    )
+    assert set(code_values) == set(schema_values), (
+        f"REPLY_QUALITY_FAILURE_MODES drift: code={sorted(code_values)} "
+        f"vs schema={sorted(schema_values)}"
+    )
+    # Pin the count too — Phase 10 ships exactly 11; future expansions
+    # should grow both sources together.
+    assert len(code_values) == 11
+    assert len(schema_values) == 11
+
+
 def test_failure_mode_enum_has_eleven_canonical_values() -> None:
     """REPLY_QUALITY_FAILURE_MODES is the single source of truth."""
     assert len(lint.REPLY_QUALITY_FAILURE_MODES) == 11
