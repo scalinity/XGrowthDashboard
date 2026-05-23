@@ -1,0 +1,621 @@
+"""Phase 10 — Voice Discipline Polish Pack acceptance tests.
+
+Five sub-features, each pinned by targeted unit tests:
+
+  1. Migration 023 — schema columns + settings rows + CHECK constraints.
+  2. Prescriptive voice layer — file presence + splice ordering + drift.
+  3. Screenshot test scorer (10th dimension) — None/0..3 behavior,
+     composite_label gating, out-of-range refusal.
+  4. Reply-quality lint expansion — 16 cases (8 new categories × pos/neg)
+     + failure_mode persistence on agent_drafts.
+  5. Section 4 — drift check fires on missing additive blocks.
+  6. reply_intent enforcement — dispatcher refuses missing/invalid,
+     honors the settings toggle; drift check covers dispatcher import.
+
+End-to-end happy path lives in tests/test_phase10_end_to_end.py.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from app.agent import lint, prepublish_scorer as ps, prompt_builder
+from app.agent import niche as _niche
+from app.agent import client as _agent_client
+from app.agent.client import dispatch_tool_call
+from app.agent.reply_targets import REPLY_INTENT_ENUM
+
+
+# ===========================================================================
+# 1. Migration 023 — schema columns + settings rows + CHECK constraints.
+# ===========================================================================
+def test_migration_023_adds_screenshot_test_score(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """The prepublish_scores table has screenshot_test_score after 023."""
+    cols = {r[1] for r in db_conn.execute("PRAGMA table_info(prepublish_scores)")}
+    assert "screenshot_test_score" in cols
+
+
+def test_migration_023_adds_reply_quality_lint_failure_mode(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """agent_drafts gains reply_quality_lint_failure_mode after 023."""
+    cols = {r[1] for r in db_conn.execute("PRAGMA table_info(agent_drafts)")}
+    assert "reply_quality_lint_failure_mode" in cols
+
+
+def test_migration_023_seeds_settings(db_conn: sqlite3.Connection) -> None:
+    rows = dict(
+        db_conn.execute(
+            "SELECT key, value_json FROM settings WHERE key IN "
+            "('screenshot_test_minimum_for_strong', 'reply_intent_required')"
+        ).fetchall()
+    )
+    assert rows["screenshot_test_minimum_for_strong"] == "2"
+    assert rows["reply_intent_required"] in {"true", "1"}
+
+
+@pytest.mark.parametrize("invalid_value", [4, -1, 99])
+def test_screenshot_test_score_rejects_out_of_range(
+    db_conn: sqlite3.Connection, invalid_value: int
+) -> None:
+    """CHECK constraint rejects scores outside 0..3 + NULL."""
+    draft_id = db_conn.execute(
+        "INSERT INTO agent_drafts (draft_kind, text) VALUES ('standalone', 'p') RETURNING id"
+    ).fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO prepublish_scores
+              (agent_draft_id, clarity_score, hook_strength_score,
+               specificity_score, length_fit_score, format_fit_score,
+               topic_fit_score, composite_label, scorer_version,
+               screenshot_test_score)
+            VALUES (?, 1,1,1,1,1,1, 'weak', 'v0', ?)
+            """,
+            (draft_id, invalid_value),
+        )
+
+
+@pytest.mark.parametrize("valid_value", [None, 0, 1, 2, 3])
+def test_screenshot_test_score_accepts_valid_range_and_null(
+    db_conn: sqlite3.Connection, valid_value: int | None
+) -> None:
+    draft_id = db_conn.execute(
+        "INSERT INTO agent_drafts (draft_kind, text) VALUES ('standalone', 'p') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO prepublish_scores
+          (agent_draft_id, clarity_score, hook_strength_score,
+           specificity_score, length_fit_score, format_fit_score,
+           topic_fit_score, composite_label, scorer_version,
+           screenshot_test_score)
+        VALUES (?, 1,1,1,1,1,1, 'weak', 'v0', ?)
+        """,
+        (draft_id, valid_value),
+    )
+    # No IntegrityError raised → CHECK admits the value.
+
+
+@pytest.mark.parametrize("mode", lint.REPLY_QUALITY_FAILURE_MODES + (None,))
+def test_reply_quality_lint_failure_mode_accepts_enum_and_null(
+    db_conn: sqlite3.Connection, mode: str | None
+) -> None:
+    db_conn.execute(
+        """
+        INSERT INTO agent_drafts (draft_kind, text, reply_quality_lint_failure_mode)
+        VALUES ('reply', 'x', ?)
+        """,
+        (mode,),
+    )
+
+
+def test_reply_quality_lint_failure_mode_rejects_unknown_value(
+    db_conn: sqlite3.Connection,
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            """
+            INSERT INTO agent_drafts (draft_kind, text, reply_quality_lint_failure_mode)
+            VALUES ('reply', 'x', 'NOT_AN_ENUM_VALUE')
+            """,
+        )
+
+
+# ===========================================================================
+# 2. Prescriptive voice layer — drift + splice.
+# ===========================================================================
+def test_prescriptive_voice_file_present_and_nonempty() -> None:
+    ok, n_bytes = prompt_builder.verify_voice_profile_prescriptive_present()
+    assert ok is True
+    assert n_bytes > 0
+
+
+def test_prescriptive_voice_drift_check_raises_on_missing(tmp_path: Path) -> None:
+    fake_path = tmp_path / "missing.md"
+    with pytest.raises(prompt_builder.VoiceProfilePrescriptiveMissingError):
+        prompt_builder.verify_voice_profile_prescriptive_present(path=fake_path)
+
+
+def test_prescriptive_voice_drift_check_raises_on_empty(tmp_path: Path) -> None:
+    empty_path = tmp_path / "empty.md"
+    empty_path.write_text("", encoding="utf-8")
+    with pytest.raises(prompt_builder.VoiceProfilePrescriptiveMissingError):
+        prompt_builder.verify_voice_profile_prescriptive_present(path=empty_path)
+
+
+def test_build_system_prompt_includes_prescriptive_layer(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """The §28.12 prescriptive anchor renders inside Section 5, after the
+    generated profile structural block and before the voice samples block."""
+    out = prompt_builder.build_system_prompt(db_conn)
+    assert "Voice — what it IS" in out
+    assert "Voice — what it IS NOT" in out
+    assert "screenshot test" in out.lower()
+    # No placeholder leaks.
+    assert prompt_builder.VOICE_PROFILE_PRESCRIPTIVE_PLACEHOLDER not in out
+    # Splice ordering: inside Section 5, before Section 6.
+    sec5_idx = out.find("# Section 5 — Voice samples")
+    presc_idx = out.find("Voice — what it IS")
+    sec6_idx = out.find("# Section 6 — Current taxonomy")
+    assert 0 < sec5_idx < presc_idx < sec6_idx
+
+
+# ===========================================================================
+# 3. Screenshot test scorer — None/0..3 behavior + composite_label gating.
+# ===========================================================================
+def test_score_screenshot_test_offline_returns_none(monkeypatch) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    assert ps.score_screenshot_test("any draft", voice_profile=None) is None
+
+
+def test_score_screenshot_test_with_mock_caller_returns_0_through_3() -> None:
+    for expected in (0, 1, 2, 3):
+        out = ps.score_screenshot_test(
+            "draft",
+            voice_profile=None,
+            model_caller=lambda d, p, e=expected: e,
+        )
+        assert out == expected
+
+
+@pytest.mark.parametrize("invalid_raw", [4, -1, "three", None, 99, "a"])
+def test_score_screenshot_test_refuses_out_of_range(invalid_raw) -> None:
+    out = ps.score_screenshot_test(
+        "draft",
+        voice_profile=None,
+        model_caller=lambda d, p: invalid_raw,
+    )
+    assert out is None
+
+
+def test_score_screenshot_test_swallows_caller_exception() -> None:
+    def boom(draft, prof):
+        raise RuntimeError("haiku exploded")
+    out = ps.score_screenshot_test(
+        "draft", voice_profile=None, model_caller=boom
+    )
+    assert out is None
+
+
+def test_score_screenshot_test_empty_draft_returns_none() -> None:
+    """A blank draft skips the model call entirely (defense in depth)."""
+    assert ps.score_screenshot_test("", voice_profile=None,
+                                     model_caller=lambda d, p: 3) is None
+    assert ps.score_screenshot_test("   \n  ", voice_profile=None,
+                                     model_caller=lambda d, p: 3) is None
+
+
+# Composite label gating per §28.11 Phase 10:
+#   * NULL screenshot score → no downgrade (passes through)
+#   * non-NULL + below floor → strong → viable; viable/weak unchanged
+def _strong_qualifying_scores() -> dict[str, int]:
+    """Scores that qualify for 'strong' WITHOUT the screenshot dim."""
+    return {"a": 3, "b": 3, "c": 3, "d": 2, "e": 2, "f": 2, "g": 2, "h": 2}
+
+
+def test_composite_label_null_screenshot_passes_through() -> None:
+    label = ps.compute_composite_label(
+        _strong_qualifying_scores(), screenshot_test_score=None,
+    )
+    assert label == "strong"
+
+
+def test_composite_label_above_floor_stays_strong() -> None:
+    label = ps.compute_composite_label(
+        _strong_qualifying_scores(),
+        screenshot_test_score=3,
+        screenshot_test_minimum_for_strong=2,
+    )
+    assert label == "strong"
+
+
+def test_composite_label_at_floor_stays_strong() -> None:
+    label = ps.compute_composite_label(
+        _strong_qualifying_scores(),
+        screenshot_test_score=2,
+        screenshot_test_minimum_for_strong=2,
+    )
+    assert label == "strong"
+
+
+def test_composite_label_below_floor_downgrades_strong_to_viable() -> None:
+    label = ps.compute_composite_label(
+        _strong_qualifying_scores(),
+        screenshot_test_score=1,
+        screenshot_test_minimum_for_strong=2,
+    )
+    assert label == "viable"
+
+
+def test_composite_label_below_floor_zero_also_downgrades() -> None:
+    label = ps.compute_composite_label(
+        _strong_qualifying_scores(),
+        screenshot_test_score=0,
+        screenshot_test_minimum_for_strong=2,
+    )
+    assert label == "viable"
+
+
+def test_composite_label_viable_does_not_cascade_to_weak() -> None:
+    """A miscalibrated screenshot score CANNOT push viable → weak."""
+    viable_scores = {"a": 2, "b": 2, "c": 2, "d": 2, "e": 2, "f": 1, "g": 1, "h": 1}
+    label = ps.compute_composite_label(
+        viable_scores,
+        screenshot_test_score=0,
+        screenshot_test_minimum_for_strong=2,
+    )
+    assert label == "viable"
+
+
+def test_composite_label_weak_stays_weak() -> None:
+    weak_scores = {"a": 0, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1, "g": 1, "h": 1}
+    label = ps.compute_composite_label(
+        weak_scores,
+        screenshot_test_score=0,
+        screenshot_test_minimum_for_strong=2,
+    )
+    assert label == "weak"
+
+
+def test_score_persists_screenshot_test_score_in_db(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """End-to-end: score() with a non-NULL screenshot value persists it."""
+    draft_id = db_conn.execute(
+        "INSERT INTO agent_drafts (draft_kind, text) VALUES ('standalone', 'placeholder') RETURNING id"
+    ).fetchone()[0]
+    row = ps.score(
+        draft_text="Three dinners. Two failures. One cookbook scan that landed.",
+        draft_kind="standalone",
+        pillar="stir", cta="none",
+        target_post_text=None,
+        active_voice_profile=None,
+        conn=db_conn,
+        screenshot_test_caller=lambda d, p: 3,
+    )
+    ps.insert_score_row(db_conn, agent_draft_id=draft_id, row=row)
+    fetched = ps.get_score_for_draft(db_conn, agent_draft_id=draft_id)
+    assert fetched is not None
+    assert fetched["screenshot_test_score"] == 3
+
+
+# ===========================================================================
+# 4. Reply-quality lint expansion — 8 new categories × pos/neg.
+# ===========================================================================
+@pytest.mark.parametrize(
+    ("text", "expected_mode"),
+    [
+        # engagement_bait — positive matches
+        ("5 secrets no one tells you about React", "engagement_bait"),
+        ("Number 3 will surprise you", "engagement_bait"),
+        # ragebait — positive matches
+        ("Unpopular opinion: most founders are LARPing", "ragebait"),
+        ("Change my mind: TypeScript is overrated", "ragebait"),
+        # manipulative_question — positive matches
+        ("Anyone else think this is overrated?", "manipulative_question"),
+        ("Am I crazy or is this complete nonsense?", "manipulative_question"),
+        # fake_authority — positive matches
+        ("After scaling 50+ creator businesses to 100k followers, I can tell you...", "fake_authority"),
+        ("As someone who's coached hundreds of founders, here is the thing", "fake_authority"),
+        # performative_threading — positive matches
+        ("Great take 🧵 1/ Let me share my thoughts in a thread", "performative_threading"),
+        # diving_preamble — positive matches
+        ("Let me unpack why this matters", "diving_preamble"),
+        ("Diving into the details now", "diving_preamble"),
+        # emoji_as_personality — positive matches
+        ("So much energy here 🔥✨💯", "emoji_as_personality"),
+        # hedging_that_erases — positive matches
+        ("No expert but this seems wrong", "hedging_that_erases"),
+        ("Just thinking out loud, but maybe...", "hedging_that_erases"),
+    ],
+)
+def test_offline_lint_catches_new_categories(text: str, expected_mode: str) -> None:
+    result = lint._offline_reply_quality(text)
+    assert result.passed is False, f"expected failure for: {text!r}"
+    assert result.failure_mode == expected_mode, (
+        f"text={text!r}: expected {expected_mode}, got {result.failure_mode}"
+    )
+
+
+@pytest.mark.parametrize(
+    "substantive_text",
+    [
+        "The schema-grounded approach changes the failure mode — hallucinated ingredients become a clean 'no match' signal.",
+        "Your point about cohort-specific funnels lines up with what I've seen at 12 testers.",
+        "Worth tracking the bimodal distribution before splitting by working-parent vs. solo cook.",
+    ],
+)
+def test_offline_lint_passes_substantive_replies(substantive_text: str) -> None:
+    result = lint._offline_reply_quality(substantive_text)
+    assert result.passed is True
+    assert result.failure_mode is None
+
+
+def test_failure_mode_enum_has_eleven_canonical_values() -> None:
+    """REPLY_QUALITY_FAILURE_MODES is the single source of truth."""
+    assert len(lint.REPLY_QUALITY_FAILURE_MODES) == 11
+    assert "forced" in lint.REPLY_QUALITY_FAILURE_MODES
+    assert "engagement_bait" in lint.REPLY_QUALITY_FAILURE_MODES
+    assert "hedging_that_erases" in lint.REPLY_QUALITY_FAILURE_MODES
+
+
+def test_parse_response_recognizes_new_categories() -> None:
+    """Haiku response parser handles all 8 new verdict tokens."""
+    for mode in (
+        "engagement_bait", "ragebait", "manipulative_question",
+        "fake_authority", "performative_threading",
+        "diving_preamble", "emoji_as_personality", "hedging_that_erases",
+    ):
+        body = f"yes, {mode} — clearly matches the pattern"
+        result = lint._parse_reply_quality_response(body)
+        assert result.passed is False
+        assert result.failure_mode == mode, f"verdict={body!r} → {result.failure_mode}"
+
+
+def test_save_draft_reply_persists_failure_mode_when_failed(
+    db_conn: sqlite3.Connection,
+) -> None:
+    from app.agent.tools import _save_draft_reply
+    _niche.set_niche(db_conn, problem="x", person="y")
+    out = _save_draft_reply(
+        db_conn,
+        text="Great post! 🔥 Check out my stuff",
+        target_post_url="https://x.com/foo/status/100",
+        content_type="value",
+        reply_quality_lint_passed=False,
+        reply_quality_lint_failure_mode="selfishly_self_promoting",
+    )
+    row = db_conn.execute(
+        "SELECT reply_quality_lint_passed, reply_quality_lint_failure_mode "
+        "FROM agent_drafts WHERE id = ?",
+        (out["draft_id"],),
+    ).fetchone()
+    assert row["reply_quality_lint_passed"] == 0
+    assert row["reply_quality_lint_failure_mode"] == "selfishly_self_promoting"
+
+
+def test_save_draft_reply_leaves_failure_mode_null_on_pass(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Per spec: failure_mode populated only when passed=False."""
+    from app.agent.tools import _save_draft_reply
+    _niche.set_niche(db_conn, problem="x", person="y")
+    out = _save_draft_reply(
+        db_conn,
+        text="A substantive reply.",
+        target_post_url="https://x.com/foo/status/101",
+        content_type="value",
+        reply_quality_lint_passed=True,
+        # Even if dispatcher accidentally injected a failure_mode while
+        # passed=True, the handler must NULL it. We don't pass one here;
+        # the dispatcher's contract prevents it.
+    )
+    row = db_conn.execute(
+        "SELECT reply_quality_lint_passed, reply_quality_lint_failure_mode "
+        "FROM agent_drafts WHERE id = ?",
+        (out["draft_id"],),
+    ).fetchone()
+    assert row["reply_quality_lint_passed"] == 1
+    assert row["reply_quality_lint_failure_mode"] is None
+
+
+# ===========================================================================
+# 5. Section 4 drift check — fires on each missing additive block.
+# ===========================================================================
+def test_section_4_anchors_present_by_default() -> None:
+    result = prompt_builder.verify_section_4_anchors()
+    assert all(result.values()), f"missing: {[k for k, v in result.items() if not v]}"
+
+
+@pytest.mark.parametrize(
+    "anchor_to_remove",
+    [
+        "engagement_with_integrity",
+        "screenshot_test_principle",
+        "iwh_operationalized",
+    ],
+)
+def test_section_4_drift_check_fires_on_missing_block(
+    anchor_to_remove: str,
+) -> None:
+    template = prompt_builder._read_template()
+    # Find the matching sentinel pair and remove it from the template.
+    for name, begin, _end in prompt_builder.SECTION_4_ANCHOR_SENTINELS:
+        if name == anchor_to_remove:
+            fake = template.replace(begin, "")
+            break
+    else:
+        pytest.fail(f"unknown anchor name: {anchor_to_remove}")
+    with pytest.raises(prompt_builder.Section4AnchorMissingError) as exc:
+        prompt_builder.verify_section_4_anchors(fake)
+    assert anchor_to_remove in str(exc.value)
+
+
+# ===========================================================================
+# 6. reply_intent enforcement — dispatcher gate + toggle + drift check.
+# ===========================================================================
+def _seed_msg(conn: sqlite3.Connection) -> int:
+    conv = conn.execute(
+        "INSERT INTO agent_conversations (status) VALUES ('active') RETURNING id"
+    ).fetchone()[0]
+    return int(conn.execute(
+        "INSERT INTO agent_messages (conversation_id, role, content) "
+        "VALUES (?, 'assistant', '') RETURNING id",
+        (conv,),
+    ).fetchone()[0])
+
+
+_PERFECT_IWH = '<iwh_self_score>{"intelligence": 3, "wisdom": 3, "humility": 3}</iwh_self_score>'
+
+
+def test_dispatcher_refuses_save_draft_reply_without_intent(
+    db_conn: sqlite3.Connection, monkeypatch
+) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    _niche.set_niche(db_conn, problem="x", person="y")
+    msg_id = _seed_msg(db_conn)
+    result = dispatch_tool_call(
+        db_conn,
+        tool_name="save_draft_reply",
+        tool_input={
+            "text": "A substantive reply that addresses the OP.",
+            "target_post_url": "https://x.com/foo/status/200",
+            "target_post_text": "x",
+            "content_type": "value",
+            # No reply_intent — should be refused.
+        },
+        message_id=msg_id,
+        assistant_text=_PERFECT_IWH,
+        current_attempt_index=1,
+    )
+    assert result["status"] == "error"
+    assert "reply-intent gate" in result["error"]
+    assert "§29.5" in result["error"]
+    # No draft landed.
+    n = db_conn.execute("SELECT COUNT(*) FROM agent_drafts").fetchone()[0]
+    assert n == 0
+
+
+def test_dispatcher_refuses_invalid_reply_intent(
+    db_conn: sqlite3.Connection, monkeypatch
+) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    _niche.set_niche(db_conn, problem="x", person="y")
+    msg_id = _seed_msg(db_conn)
+    result = dispatch_tool_call(
+        db_conn,
+        tool_name="save_draft_reply",
+        tool_input={
+            "text": "A substantive reply.",
+            "target_post_url": "https://x.com/foo/status/201",
+            "target_post_text": "x",
+            "content_type": "value",
+            "reply_intent": "NOT_IN_ENUM",
+        },
+        message_id=msg_id,
+        assistant_text=_PERFECT_IWH,
+        current_attempt_index=1,
+    )
+    assert result["status"] == "error"
+    assert "reply-intent gate" in result["error"]
+    assert "not in §29.5 enum" in result["error"]
+
+
+def test_dispatcher_accepts_valid_reply_intent(
+    db_conn: sqlite3.Connection, monkeypatch
+) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    _niche.set_niche(db_conn, problem="x", person="y")
+    msg_id = _seed_msg(db_conn)
+    result = dispatch_tool_call(
+        db_conn,
+        tool_name="save_draft_reply",
+        tool_input={
+            "text": "A substantive reply that addresses the OP.",
+            "target_post_url": "https://x.com/foo/status/202",
+            "target_post_text": "x",
+            "content_type": "value",
+            "reply_intent": "icp_discovery",
+        },
+        message_id=msg_id,
+        assistant_text=_PERFECT_IWH,
+        current_attempt_index=1,
+    )
+    assert result["status"] == "success", result
+
+
+def test_dispatcher_honors_reply_intent_required_toggle_off(
+    db_conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """When reply_intent_required = false, NULL intent passes through."""
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    _niche.set_niche(db_conn, problem="x", person="y")
+    db_conn.execute(
+        "UPDATE settings SET value_json = 'false' WHERE key = ?",
+        ("reply_intent_required",),
+    )
+    msg_id = _seed_msg(db_conn)
+    result = dispatch_tool_call(
+        db_conn,
+        tool_name="save_draft_reply",
+        tool_input={
+            "text": "A substantive reply.",
+            "target_post_url": "https://x.com/foo/status/203",
+            "target_post_text": "x",
+            "content_type": "value",
+            # No reply_intent — accepted because toggle is off.
+        },
+        message_id=msg_id,
+        assistant_text=_PERFECT_IWH,
+        current_attempt_index=1,
+    )
+    assert result["status"] == "success", result
+
+
+def test_reply_intent_required_default_is_true() -> None:
+    assert _agent_client._REPLY_INTENT_REQUIRED_DEFAULT is True
+
+
+def test_reply_intent_required_reads_setting_correctly(
+    db_conn: sqlite3.Connection,
+) -> None:
+    # default seed = true
+    assert _agent_client._read_reply_intent_required(db_conn) is True
+    db_conn.execute(
+        "UPDATE settings SET value_json = 'false' WHERE key = ?",
+        ("reply_intent_required",),
+    )
+    assert _agent_client._read_reply_intent_required(db_conn) is False
+    db_conn.execute(
+        "UPDATE settings SET value_json = ? WHERE key = ?",
+        ("garbage{not json", "reply_intent_required"),
+    )
+    # Malformed value_json → fail-safe to the default (True).
+    assert _agent_client._read_reply_intent_required(db_conn) is True
+    # Row absent entirely → also fail-safe to default True.
+    db_conn.execute(
+        "DELETE FROM settings WHERE key = ?", ("reply_intent_required",)
+    )
+    assert _agent_client._read_reply_intent_required(db_conn) is True
+
+
+def test_reply_intent_drift_check_dispatcher_in_sync() -> None:
+    """The dispatcher imports REPLY_INTENT_ENUM from reply_targets."""
+    assert prompt_builder.verify_reply_intent_enum_dispatcher_in_sync() is True
+
+
+def test_reply_intent_drift_check_three_way_match() -> None:
+    spec_values, code_values, prompt_values = (
+        prompt_builder.verify_reply_intent_enum_matches()
+    )
+    # All three sources must agree as sets.
+    assert set(spec_values) == set(code_values) == set(prompt_values)
+    # And the canonical Python tuple has all five values.
+    assert len(REPLY_INTENT_ENUM) == 5

@@ -663,6 +663,7 @@
         <li><a href="#phase-7"><span class="dot-complete" aria-hidden="true"></span><span class="num">7</span><span>X API reads</span></a></li>
         <li><a href="#phase-8"><span class="dot-complete" aria-hidden="true"></span><span class="num">8</span><span>X API writes</span></a></li>
         <li><a href="#phase-9"><span class="dot-complete" aria-hidden="true"></span><span class="num">9</span><span>Grok integration</span></a></li>
+        <li><a href="#phase-10"><span class="dot-complete" aria-hidden="true"></span><span class="num">10</span><span>Voice Discipline Polish</span></a></li>
       </ul>
       <div class="add-phase">+ NEXT PHASE GOES HERE</div>
 
@@ -2004,6 +2005,108 @@
           <div class="subsection-body">
             <p>The §25 Phase 10 QA pass is the next checklist — comprehensive end-to-end tests across the loop, the agent surface, and the new Phase 7/8/9 paths. The Phase 9 acceptance tests already cover the §29.12 happy + 404 + dedupe + ceiling + rate-limit matrix; Phase 10 broadens to corner cases (missing snapshot day, manual reply without X post ID, UTM extraction round-trip, etc.).</p>
             <p>Manual workflows remain inviolable: the Grok sweep failing or being disabled means Daniel still has manual paste in the Queue, replier-under-thread discovery in Account Research, and the Phase 8 manual-clipboard publish path. Every API path has a separately-tested manual equivalent per §29.1.</p>
+          </div>
+        </details>
+      </section>
+
+      <!-- ============================================================
+           PHASE 10 — VOICE DISCIPLINE POLISH PACK
+           ============================================================ -->
+      <section class="phase" id="phase-10" data-phase-id="10" data-phase-title="Voice Discipline Polish Pack">
+        <header class="phase-header">
+          <p class="kicker">Phase 10 · Polish round 1 of 1</p>
+          <h2>Voice Discipline <em>Polish</em></h2>
+          <p class="meta"><span data-mono>2026-05-23</span><span class="sep">·</span>spec <span class="spec">28.11 / 28.18 / 29.5</span><span class="sep">·</span>6 implementation commits</p>
+        </header>
+
+        <div class="score-bank" aria-label="Phase 10 counters">
+          <div class="tile">
+            <p class="tile-kicker">Migrations</p>
+            <div class="tile-number">01</div>
+            <div class="tile-bar" aria-hidden="true"><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div>
+          </div>
+          <div class="tile">
+            <p class="tile-kicker">Tests passing</p>
+            <div class="tile-number">1123</div>
+            <div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="tile">
+            <p class="tile-kicker">Acceptance gates</p>
+            <div class="tile-number">12</div>
+            <div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="tile">
+            <p class="tile-kicker">Fix commits</p>
+            <div class="tile-number zero">00</div>
+            <div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div>
+          </div>
+        </div>
+
+        <details class="subsection" id="phase-10-completed" data-section-type="completed" open>
+          <summary><span class="caret"></span><span class="label-kicker">01 / Five sub-features</span><span class="label-title">What landed</span></summary>
+          <div class="subsection-body">
+            <ul>
+              <li><strong>Migration 023</strong> — <code>prepublish_scores.screenshot_test_score</code> (<code>NULL</code> or 0..3) AND <code>agent_drafts.reply_quality_lint_failure_mode</code> (eleven-value enum). Two new settings rows: <code>screenshot_test_minimum_for_strong</code> (default 2) and <code>reply_intent_required</code> (default <code>true</code>). Audit-log tail row per the §28.30 write-through pattern.</li>
+              <li><strong>Prescriptive voice layer</strong> — new <code>config/voice_profile_prescriptive.md</code> (static, version-controlled). <code>app/agent/prompt_builder.py</code> gains <code>load_voice_profile_prescriptive()</code> + <code>verify_voice_profile_prescriptive_present()</code> drift check. Splices into Section 5 of the system prompt AFTER the generated voice profile, BEFORE the raw voice samples block. (§28.12 Phase 10 extension.)</li>
+              <li><strong>Screenshot test (10th dimension)</strong> — <code>config/screenshot_test_prompt.md</code> + <code>app/agent/prepublish_scorer.py::score_screenshot_test()</code>. Composite-label gate: <code>strong → viable</code> if <code>screenshot_test_score</code> is non-NULL and below <code>screenshot_test_minimum_for_strong</code>; NULL passes through (calibration period or model unavailable). <code>SCORER_VERSION</code> bumped to <code>prepublish-scorer/0.2.0</code>. Content Performance calibration table gains an <em>avg screenshot test</em> column. (§28.11.)</li>
+              <li><strong>Reply-quality lint expansion</strong> — <code>config/reply_quality_lint_prompt.md</code> + <code>app/agent/lint.py</code> grow from 3 to 11 failure modes (new: <code>engagement_bait</code>, <code>ragebait</code>, <code>manipulative_question</code>, <code>fake_authority</code>, <code>performative_threading</code>, <code>diving_preamble</code>, <code>emoji_as_personality</code>, <code>hedging_that_erases</code>). <code>_label_to_failure_mode</code> centralises the enum mapping. <code>_save_draft_reply</code> persists <code>reply_quality_lint_failure_mode</code> only when <code>passed=False</code>; NULL on pass. Queue card badge tightened to <code>Lint: &lt;category&gt;</code>. (§28.18.)</li>
+              <li><strong>Section 4 additive blocks</strong> — three new blocks in <code>config/agent_system_prompt.md</code>: engagement-with-integrity (after dark-patterns floor), screenshot test principle (in Structure), IWH operationalized (before Format guidance). All bracketed by sentinel comments so <code>verify_section_4_anchors()</code> fires on accidental deletion. No deletions — pure additive. (§28.3.)</li>
+              <li><strong>reply_intent promotion</strong> — <code>save_draft_reply</code> schema marks <code>reply_intent</code> required; <code>app/agent/client.py::dispatch_tool_call</code> validates against <code>REPLY_INTENT_ENUM</code> BEFORE niche/IWH/lint gates. Honors <code>reply_intent_required</code> setting toggle (default ON; OFF is the calibration escape hatch). New Settings panel <em>Reply discipline</em> surfaces both <code>reply_intent_required</code> and the previously-hidden <code>reply_quality_lint_enabled</code> toggle. <code>verify_reply_intent_enum_dispatcher_in_sync()</code> drift check covers the dispatcher import. (§29.5.)</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-10-gates" data-section-type="gates">
+          <summary><span class="caret"></span><span class="label-kicker">02 / Acceptance</span><span class="label-title">Gates satisfied (<span class="spec">25</span> Phase 10)</span></summary>
+          <div class="subsection-body">
+            <ul class="gates-list">
+              <li>Migration 023 applies cleanly on fresh + main-branch DBs; <code>schema_migrations</code> records it; re-apply is idempotent.</li>
+              <li><code>uv run pytest -q</code> green: 1123 passing (1043 → 1123, +80 new Phase 10 tests).</li>
+              <li><code>uv run ruff check app/ tests/ scripts/</code> clean.</li>
+              <li><code>uv run streamlit run app/main.py --server.headless true</code> boots without exception.</li>
+              <li>Reply-quality lint offline-matcher catches each of the 8 new categories (positive cases) + the original 3 still pass + substantive replies still pass.</li>
+              <li><code>agent_drafts.reply_quality_lint_failure_mode</code> persists on <code>passed=False</code>; stays NULL on pass.</li>
+              <li><code>score_screenshot_test</code> returns None on offline / missing key / out-of-range; produces 0..3 on mocked response.</li>
+              <li>Composite label <code>strong</code> unreachable when <code>screenshot_test_score &lt; screenshot_test_minimum_for_strong</code>; NULL passes through; viable/weak never cascade further.</li>
+              <li><code>dispatch_tool_call</code> refuses <code>save_draft_reply</code> without <code>reply_intent</code> when toggle is on; accepts when toggle is off.</li>
+              <li>Section 4 drift check fires per-anchor on missing block: engagement-with-integrity, screenshot test, IWH operationalized.</li>
+              <li>§29.7 Queue card renders specific failure mode in the lint badge (<code>Lint: ragebait</code>) instead of the prior <code>Lint blocked — ragebait</code>.</li>
+              <li><code>verify_voice_profile_prescriptive_present()</code> raises on missing or empty file.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-10-limitations" data-section-type="limitations">
+          <summary><span class="caret"></span><span class="label-kicker">03 / Carried</span><span class="label-title">Known limitations</span></summary>
+          <div class="subsection-body">
+            <ul class="limitations-list">
+              <li>The 10th dimension (<code>screenshot_test_score</code>) is the only model-dependent dimension in <code>prepublish_scorer</code>. In <code>LINT_OFFLINE=1</code> mode or when <code>ANTHROPIC_API_KEY</code> is unset, the score is NULL and the composite-label gate skips. This is the calibration-period contract; the dimension fires for real only in production.</li>
+              <li>The 8 new reply-quality lint categories are scoped to Daniel's voice anchor. They are NOT the full universe of bad reply patterns; future phases may extend, but this one tracks the anchor verbatim.</li>
+              <li>The §29.7 Queue card surfaces THREAD-classifier lint categories (§29.10): <code>ragebait</code>, <code>meme_with_no_serious_reply_path</code>, <code>low_quality_reply_thread</code>, <code>hijacking_required_to_mention_stir</code>. The §28.18 reply-quality failure modes (this phase's expansion) surface on <code>agent_drafts</code> rows, not on Queue rows — different scopes, different storage.</li>
+              <li><code>reply_intent_required = true</code> may create friction in the first week if existing chat flows lack the intent in their tool calls. The settings toggle is the documented escape hatch; watch for false-positive friction during calibration.</li>
+              <li>The screenshot-test dimension is intentionally soft: <code>strong → viable</code> only, never <code>viable → weak</code>. A miscalibrated 10th dimension cannot cascade Daniel's pipeline into <code>weak</code> bucket noise.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-10-lessons" data-section-type="lessons">
+          <summary><span class="caret"></span><span class="label-kicker">04 / Lessons</span><span class="label-title">Lessons</span></summary>
+          <div class="subsection-body">
+            <ul class="lessons-list">
+              <li><strong>Pure additive phases are the cheapest discipline upgrades.</strong> Phase 10 adds zero new surfaces — every change extends an existing module by one column / one category / one block. The 1043 → 1123 test delta cost ~2 hours including the four pre-existing-test fixes (the new <code>reply_intent</code> gate).</li>
+              <li><strong>Drift checks earn their keep when they fire by name.</strong> <code>verify_section_4_anchors</code> raises <code>Section4AnchorMissingError</code> with the specific anchor name; future copy edits get a one-line restoration path instead of "Section 4 looks different somehow."</li>
+              <li><strong>Soft gates beat hard gates on calibration-dependent dimensions.</strong> The composite-label gate downgrades <code>strong → viable</code> only — never <code>viable → weak</code>. A mis-calibrated screenshot signal cannot cascade.</li>
+              <li><strong>Toggle escape hatches earn their keep early.</strong> <code>reply_intent_required</code> is default-ON because that's the right enforcement direction, but the toggle lives in Settings so Daniel can disable it if the first-week friction is too much. The toggle is the contract that lets us promote a soft check to a hard gate without a roll-back.</li>
+              <li><strong>Spec text drifts from migration numbers when phases land out of order.</strong> The Phase 10 prompt assumed migration 021 was free, but Phase 9 had already shipped 021/022 — landed migration is 023. Phase 11 onward should treat the migration-number slot as "whatever's next" rather than a spec-baked number.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-10-next" data-section-type="next">
+          <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Next phase pointer</span></summary>
+          <div class="subsection-body">
+            <p>Two natural next steps: (a) the deferred 7th resolver dimension <code>audience_quality_score</code> once Phase 9 Grok calibration produces a clear data-source signal (the dimension's data source is unresolved without Grok-author-classification calibration); (b) further QoL work — a Settings → Growth Agent → Reply discipline → "Calibration report" panel that surfaces (i) <code>screenshot_test_score</code> distribution over shipped drafts, (ii) per-failure-mode bounce rate, (iii) <code>reply_intent</code> distribution across actually-shipped replies.</p>
+            <p>Manual workflows remain inviolable. The screenshot test dimension being NULL (offline / no API key) never blocks publish per §28.11 design rule #4. The new reply-quality categories all degrade to "pass" when the lint runs offline and no patterns match — Daniel can always ship a reply that the offline matcher missed; the live Haiku call catches the nuance.</p>
           </div>
         </details>
       </section>
