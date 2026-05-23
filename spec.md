@@ -6700,7 +6700,9 @@ Four places in the existing spec touch reply-related concepts. §29 extends rath
 | `posts` with `type = reply` (§10.2) | Replies Daniel has actually posted | A posted reply MAY link to its originating candidate via new column `posts.in_reply_to_reply_target_id` (nullable FK, ON DELETE SET NULL). Manually-posted replies that bypass the queue stay supported (NULL FK). |
 | §14.2 Next Rep view | Daily generative prompt | Now shows the top 3–5 rows from `reply_targets WHERE status = 'candidate' ORDER BY recommended_action_score DESC`. The full Reply Target Queue (§29.6) is the dedicated detail view. No duplicated state — Next Rep is a window onto the queue, not a parallel list. |
 
-`reply_targets` is the new MVP table. `reply_target_snapshots` arrives in V1.1 alongside automated metric refresh.
+`reply_targets` is the new MVP table. `reply_target_snapshots` arrives in Phase 7 (migration 018) alongside the automated metrics-refresh job.
+
+**Source-of-truth invariant (extended by Phase 9 Grok):** for any candidate whose `discovered_via='grok_semantic'`, the candidate MUST have its engagement metrics verified against the X API (via Phase 7's `xurl /2/tweets/{id}` endpoint) before any score affects `engagement_surface_score`. The verification call lives in `app/agent/reply_targets.py::verify_grok_candidate_against_x_api(target_x_post_id)`; on 200 the candidate flows through §29.3 scoring with X API metrics as the source of truth; on 404 the candidate is rejected and logged to `grok_api_responses.rejection_reason='verification_404'`, never inserted into `reply_targets`. Grok is never the source of truth for any engagement metric — its job is discovery, not measurement.
 
 ### 29.3 Scoring model — four MVP dimensions, no composite
 
@@ -6725,16 +6727,23 @@ else:                                                                    → 'co
 
 Stored as `reply_targets.recommended_action_label`. The UI sorts the Queue by an integer ordering: `reply_now (3) > reply_if_time (2) > consider (1) > skip (0)`.
 
-**V1.1 adds two more dimensions** when the metrics-refresh job is running:
+**Phase 7 adds two more dimensions** once the `reply_target_metrics_refresh` job is running (§17):
 
 | Dimension | 0 | 1 | 2 | 3 |
 | --- | --- | --- | --- | --- |
 | **Velocity** | Decaying or stale | Flat | Modest engagement gain over last hour | Accelerating: top-quartile per-hour gain for the author's typical post |
 | **Timing** | Past optimal window for the author tier | Late in the window | Within the window | Early in the window (first 30 min for large-account targets, first 6h for small-niche) |
 
-**V1.2+ adds** an audience-quality classifier as a seventh dimension.
+**Resolver interaction with velocity + timing (post-Phase-7):**
 
-Until V1.1+ metrics are flowing, `velocity_score` and `timing_score` default to NULL (not 0) and the deterministic action ignores them. The composite "Viability 82/100" score from the original Reply-Target-Finder draft is deliberately omitted: a weighted sum across heterogeneous 0–3 scores fabricates precision that doesn't exist at <100-follower scale.
+- High velocity (`velocity_score >= 2`) upgrades `engagement_surface_score` by one tier, capped at 3. Intuition: accelerating engagement compensates for a thread that looks mid-sized by static like-count.
+- Low timing (`timing_score < 2`) downgrades `recommended_action` by one tier (`reply_now` → `reply_if_time`, `reply_if_time` → `consider`, `consider` → `skip`). Intuition: a great reply that lands after the window is a worse use of Daniel's hour than a good reply that lands inside the window.
+- The upgrade/downgrade applies AFTER the base four-dimension resolver runs; the modifiers are deterministic and pure-function-testable.
+- Combined effect: pure-function test in `tests/test_reply_target_resolver.py` enumerates all 4⁶ = 4096 combinations (4 values per 6 dimensions); resolver runs in <100ms over the full batch and asserts the deterministic action label for each.
+
+**V1.2+ adds** an audience-quality classifier as a seventh dimension (`audience_quality_score`). Data source unresolved; deferred entirely. Column persists as NULL-tolerated in `reply_targets`; resolver ignores until a future phase defines the source.
+
+The composite "Viability 82/100" score from the original Reply-Target-Finder draft is deliberately omitted: a weighted sum across heterogeneous 0–3 scores fabricates precision that doesn't exist at <100-follower scale.
 
 ### 29.4 Engagement-surface thresholds — relative, not absolute
 
