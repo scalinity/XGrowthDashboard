@@ -576,10 +576,16 @@ def _save_blog_in_tx(
     new_length = _count_words(new_body)
 
     # No-op detection — all four content/identity columns unchanged.
+    # P6R-11: compare new_outline and current outline DIRECTLY, NOT via
+    # `... or None` coalescence. Pre-fix, "" and None were treated as
+    # equal — so clearing a prior `"# Old"` outline to "" was falsely
+    # detected as no-op. None semantically means "don't change"; ""
+    # semantically means "set to empty string", and those must be
+    # distinguished.
     if current is not None:
         unchanged = (
             new_body_hash == current["body_text_hash"]
-            and (new_outline or None) == (current["outline_markdown_at_version"] or None)
+            and new_outline == current["outline_markdown_at_version"]
             and new_title == current["title_at_version"]
             and new_status == current["status_at_version"]
         )

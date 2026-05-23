@@ -166,6 +166,25 @@ def test_save_blog_rejects_unknown_agent_action(db_conn: sqlite3.Connection) -> 
         )
 
 
+def test_save_blog_empty_string_outline_is_not_noop_against_populated(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-11: clearing a populated outline to empty string is a real
+    change, NOT a no-op. Pre-fix, falsy-coalescence treated "" and None
+    as equal, so the version row was suppressed."""
+    b = bm.create_blog(db_conn, title="empty-outline")
+    # First save populates an outline.
+    bm.save_blog(
+        db_conn, b.id, outline_markdown="## Old outline", created_by="daniel"
+    )
+    # Now clear it to "".
+    v = bm.save_blog(
+        db_conn, b.id, outline_markdown="", created_by="daniel"
+    )
+    assert v is not None, "clearing outline to '' must create a new version"
+    assert v.outline_markdown_at_version == ""
+
+
 def test_save_blog_partial_unique_current_invariant(
     db_conn: sqlite3.Connection,
 ) -> None:
