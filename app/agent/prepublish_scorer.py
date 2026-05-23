@@ -471,6 +471,40 @@ def voice_fit_score(text: str, profile: _voice_profile.VoiceProfile | None) -> i
 # ---------------------------------------------------------------------------
 # Phase 10 / §28.11 — screenshot test (10th dimension).
 # ---------------------------------------------------------------------------
+class ScreenshotTestPromptMissingError(RuntimeError):
+    """Phase 10 W11 drift check — screenshot-test prompt file is missing
+    or empty. The Haiku call returns None with no signal otherwise;
+    raising here makes the missing-file failure mode loud at CI time.
+    """
+
+
+def verify_screenshot_test_prompt_present(
+    path: Path | None = None,
+) -> tuple[bool, int]:
+    """Drift check — assert the §28.11 Phase 10 screenshot-test prompt
+    exists and is nonempty. Mirrors
+    ``prompt_builder.verify_voice_profile_prescriptive_present`` and
+    ``lint.verify_reply_quality_lint_prompt_present``.
+
+    Returns ``(exists, byte_count)``. Callers (pre-commit / CI /
+    tests) assert ``exists is True AND byte_count > 0``.
+    """
+    p = path or SCREENSHOT_TEST_PROMPT_PATH
+    if not p.exists():
+        raise ScreenshotTestPromptMissingError(
+            f"screenshot-test prompt not found at {p}. "
+            "score_screenshot_test would silently degrade to permanent "
+            "NULL — the §28.11 Phase 10 10th dimension would never fire."
+        )
+    contents = p.read_bytes()
+    if not contents.strip():
+        raise ScreenshotTestPromptMissingError(
+            f"screenshot-test prompt at {p} is empty. An empty file "
+            "yields a zero-instruction Haiku call — populate or restore."
+        )
+    return (True, len(contents))
+
+
 @functools.lru_cache(maxsize=8)
 def _read_screenshot_prompt_cached(mtime_ns: int) -> str:  # noqa: ARG001 — mtime keys the cache
     return SCREENSHOT_TEST_PROMPT_PATH.read_text(encoding="utf-8")

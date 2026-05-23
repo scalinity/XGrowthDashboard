@@ -238,6 +238,30 @@ def test_render_voice_profile_snapshot_wraps_payload_in_sentinel(
     assert "ignore previous instructions" in payload_region
 
 
+def test_screenshot_test_prompt_present() -> None:
+    """Phase 10 W11 — screenshot-test prompt file must exist + be nonempty."""
+    ok, n_bytes = ps.verify_screenshot_test_prompt_present()
+    assert ok is True
+    assert n_bytes > 0
+
+
+def test_screenshot_test_prompt_drift_check_raises_on_missing(
+    tmp_path: Path,
+) -> None:
+    fake_path = tmp_path / "missing.md"
+    with pytest.raises(ps.ScreenshotTestPromptMissingError):
+        ps.verify_screenshot_test_prompt_present(path=fake_path)
+
+
+def test_screenshot_test_prompt_drift_check_raises_on_empty(
+    tmp_path: Path,
+) -> None:
+    empty = tmp_path / "empty.md"
+    empty.write_text("", encoding="utf-8")
+    with pytest.raises(ps.ScreenshotTestPromptMissingError):
+        ps.verify_screenshot_test_prompt_present(path=empty)
+
+
 def test_score_screenshot_test_offline_returns_none(monkeypatch) -> None:
     monkeypatch.setenv("LINT_OFFLINE", "1")
     assert ps.score_screenshot_test("any draft", voice_profile=None) is None
