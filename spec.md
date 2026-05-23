@@ -6403,7 +6403,7 @@ Append-only canonical record of state-changing events. Distinct from `agent_tool
 
 | Category | What it covers |
 | --- | --- |
-| `auth` | OAuth connect/disconnect events for X (Phase 5.5+). |
+| `auth` | OAuth connect/disconnect events for X (Phase 5.5+); xurl auth-state changes (Phase 7); xAI Grok key configuration changes (Phase 9). |
 | `x_op` | X API operations: publish attempts (success + failure), token refreshes, rate-limit hits. |
 | `publish` | Publish lifecycle events — every confirmation token mint, every publish-tool invocation, every reconciliation event (§28.10 crash recovery). |
 | `settings` | Settings row UPDATEs. `details_json` carries `{setting_key, old_value, new_value}`. |
@@ -6411,6 +6411,7 @@ Append-only canonical record of state-changing events. Distinct from `agent_tool
 | `data` | Data mutations: row deletions (with `snapshot_of_deleted_row`), corrections, inspiration plagiarism overrides. |
 | `admin` | Backup runs, vacuum runs, audit-log prunes, manual data-integrity actions. |
 | `migration` | Each applied migration logs one row at migration end. |
+| `scheduled_job` | (Phase 7+) Per-run summary of each scheduled job: `collect_account_snapshot`, `import_recent_posts`, `post_metrics_refresh`, `reply_target_metrics_refresh`, `grok_discovery_sweep`. One row per run with success/failure status, candidates ingested, rate-limit hits encountered, runtime duration. Volume estimate: ~30–50 rows/day once Phase 7 + 9 are running; filterable distinctly from `settings` so Daniel can audit job health without scrolling past every setting change. |
 
 **Write-through points (every state-changing path must call `audit_log.log(...)`):**
 
@@ -6427,6 +6428,9 @@ Append-only canonical record of state-changing events. Distinct from `agent_tool
 - §16 every export action.
 - `scripts/backup_db.py` every backup run.
 - Every migration application.
+- (Phase 7+) Every scheduled-job run: `app/jobs/post_metrics_refresh.py`, `app/jobs/reply_target_metrics_refresh.py`, `scripts/collect_account_snapshot.py`, `scripts/import_recent_posts.py` all write a `scheduled_job` row at run-end with success/failure + counts.
+- (Phase 9) `app/jobs/grok_discovery_sweep.py` writes a `scheduled_job` row per sweep with queries-run / candidates-discovered / candidates-verified / candidates-rejected counts.
+- (Phase 7) Thread-classifier lint force-draft override writes a `data` row with the override reason in `details_json`.
 
 **Retention:**
 
