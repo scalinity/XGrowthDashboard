@@ -415,8 +415,12 @@ def _wrap_html_document(
     title = (seo.get("title") if include_seo else None) or "Untitled"
     description = seo.get("description") if include_seo else None
     tags = seo.get("tags") if include_seo else None
+    # P6R-28: include a viewport meta so mobile browsers don't render
+    # the blog at a synthetic desktop width. <html lang="en"> below
+    # gives a11y tools + search engines a content-language signal.
     head_parts: list[str] = [
         '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{_escape_html(title)}</title>",
     ]
     if include_seo and description:
@@ -431,7 +435,7 @@ def _wrap_html_document(
     head = "\n  ".join(head_parts)
     return (
         f"<!DOCTYPE html>\n"
-        f"<html>\n<head>\n  {head}\n</head>\n<body>\n"
+        f'<html lang="en">\n<head>\n  {head}\n</head>\n<body>\n'
         f"{body_html}\n"
         f"</body>\n</html>\n"
     )
