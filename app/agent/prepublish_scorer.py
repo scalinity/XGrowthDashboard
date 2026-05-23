@@ -861,6 +861,107 @@ def insert_score_row(
     return score_id
 
 
+# Phase 10 C2 fix — sentinel injected by tools.py to skip the screenshot
+# Haiku call inside the write transaction. The post-commit follow-up
+# (update_screenshot_score) runs the actual call outside the lock and
+# UPDATEs the row in a narrow transaction. Same module-public symbol
+# both sides can reach so the contract is grep-able.
+def skip_screenshot_caller(_draft_text, _profile):  # pragma: no cover — sentinel
+    """Marker callable used to skip score_screenshot_test inside a
+    write transaction. Returns None so the score is NULL until the
+    post-commit follow-up fires."""
+    return None
+
+
+def update_screenshot_score(
+    conn: sqlite3.Connection,
+    *,
+    agent_draft_id: int,
+    draft_text: str,
+    active_voice_profile: _voice_profile.VoiceProfile | None,
+    screenshot_test_caller: Callable[..., Any] | None = None,
+) -> tuple[int | None, str | None]:
+    """Phase 10 C2 — fire the screenshot Haiku call OUTSIDE the write
+    transaction and UPDATE the prepublish_scores row + re-derive the
+    composite_label.
+
+    Returns ``(screenshot_test_score, new_composite_label)`` — both
+    None when the screenshot call returned None (offline / missing key
+    / Haiku unreachable). Callers may ignore the return; the side
+    effect is the row update.
+
+    Atomicity: the screenshot Haiku call is the slow part (~60s
+    worst-case timeout) and runs WITHOUT any open SQLite transaction.
+    The follow-up UPDATE is a single statement wrapped in a narrow
+    transaction held for milliseconds. This preserves Phase 5.8's
+    "scorer crash rolls back the draft" semantics for the nine
+    deterministic dimensions (which still run inside the parent
+    write transaction in tools.py) while keeping the network call
+    out of the writer-lock window.
+
+    Composite_label re-derivation: the existing row's 9 dimensions are
+    re-read from prepublish_scores and combined with the fresh
+    screenshot_test_score via compute_composite_label. The new label
+    replaces the old one — the screenshot gate may downgrade
+    'strong' to 'viable' per §28.11 Phase 10.
+    """
+    ss_score = score_screenshot_test(
+        draft_text, active_voice_profile, model_caller=screenshot_test_caller,
+    )
+    if ss_score is None:
+        return (None, None)
+
+    # Read the persisted nine dimensions back to re-derive the label.
+    row = conn.execute(
+        """
+        SELECT clarity_score, hook_strength_score, specificity_score,
+               length_fit_score, format_fit_score, topic_fit_score,
+               reply_substance_score, cta_strength_score, voice_fit_score
+          FROM prepublish_scores
+         WHERE agent_draft_id = ?
+        """,
+        (int(agent_draft_id),),
+    ).fetchone()
+    if row is None:
+        _LOG.warning(
+            "update_screenshot_score: no prepublish_scores row for "
+            "agent_draft_id=%s — skipping post-commit screenshot update",
+            agent_draft_id,
+        )
+        return (None, None)
+
+    scores: dict[str, int | None] = {
+        "clarity": row["clarity_score"],
+        "hook_strength": row["hook_strength_score"],
+        "specificity": row["specificity_score"],
+        "length_fit": row["length_fit_score"],
+        "format_fit": row["format_fit_score"],
+        "topic_fit": row["topic_fit_score"],
+        "reply_substance": row["reply_substance_score"],
+        "cta_strength": row["cta_strength_score"],
+        "voice_fit": row["voice_fit_score"],
+    }
+    floor = _read_screenshot_test_minimum_for_strong(conn)
+    new_label = compute_composite_label(
+        scores,
+        screenshot_test_score=ss_score,
+        screenshot_test_minimum_for_strong=floor,
+    )
+    # Narrow transaction held for the single UPDATE — milliseconds.
+    from app.db import transaction
+    with transaction(conn):
+        conn.execute(
+            """
+            UPDATE prepublish_scores
+               SET screenshot_test_score = ?,
+                   composite_label = ?
+             WHERE agent_draft_id = ?
+            """,
+            (ss_score, new_label, int(agent_draft_id)),
+        )
+    return (ss_score, new_label)
+
+
 def get_score_for_draft(conn: sqlite3.Connection, *, agent_draft_id: int) -> dict | None:
     """Read a score row by draft id. Returns dict-of-columns or None."""
     row = conn.execute(

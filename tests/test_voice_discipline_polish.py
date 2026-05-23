@@ -284,6 +284,135 @@ def test_composite_label_weak_stays_weak() -> None:
     assert label == "weak"
 
 
+def test_update_screenshot_score_persists_and_re_derives_label(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Phase 10 C2 helper — verify the post-commit path UPDATEs the row
+    and re-derives composite_label when the screenshot dim arrives."""
+    draft_id = db_conn.execute(
+        "INSERT INTO agent_drafts (draft_kind, text) VALUES ('standalone', 'p') RETURNING id"
+    ).fetchone()[0]
+    # Seed a 'strong'-qualifying row WITHOUT a screenshot score (mirrors
+    # what the inside-tx skip_screenshot_caller path produces).
+    db_conn.execute(
+        """
+        INSERT INTO prepublish_scores
+          (agent_draft_id, clarity_score, hook_strength_score,
+           specificity_score, length_fit_score, format_fit_score,
+           topic_fit_score, reply_substance_score, cta_strength_score,
+           voice_fit_score, composite_label, scorer_version, screenshot_test_score)
+        VALUES (?, 3, 3, 3, 2, 2, 2, NULL, 2, 2, 'strong', 'v0', NULL)
+        """,
+        (draft_id,),
+    )
+    # Fire the helper with a mocked low screenshot score (1, below the
+    # default floor of 2) — composite_label should downgrade strong→viable.
+    ss_score, new_label = ps.update_screenshot_score(
+        db_conn,
+        agent_draft_id=draft_id,
+        draft_text="some text",
+        active_voice_profile=None,
+        screenshot_test_caller=lambda d, p: 1,
+    )
+    assert ss_score == 1
+    assert new_label == "viable"
+    row = db_conn.execute(
+        "SELECT screenshot_test_score, composite_label FROM prepublish_scores "
+        "WHERE agent_draft_id = ?",
+        (draft_id,),
+    ).fetchone()
+    assert row["screenshot_test_score"] == 1
+    assert row["composite_label"] == "viable"
+
+
+def test_update_screenshot_score_noop_when_caller_returns_none(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """When the screenshot call returns None (offline / no key), the
+    helper must not UPDATE the row — the original composite_label
+    stays. Pins the contract used in offline / fresh-install paths."""
+    draft_id = db_conn.execute(
+        "INSERT INTO agent_drafts (draft_kind, text) VALUES ('standalone', 'p') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO prepublish_scores
+          (agent_draft_id, clarity_score, hook_strength_score,
+           specificity_score, length_fit_score, format_fit_score,
+           topic_fit_score, composite_label, scorer_version)
+        VALUES (?, 3, 3, 3, 2, 2, 2, 'strong', 'v0')
+        """,
+        (draft_id,),
+    )
+    ss_score, new_label = ps.update_screenshot_score(
+        db_conn,
+        agent_draft_id=draft_id,
+        draft_text="x",
+        active_voice_profile=None,
+        screenshot_test_caller=lambda d, p: None,
+    )
+    assert ss_score is None
+    assert new_label is None
+    row = db_conn.execute(
+        "SELECT screenshot_test_score, composite_label FROM prepublish_scores "
+        "WHERE agent_draft_id = ?",
+        (draft_id,),
+    ).fetchone()
+    assert row["screenshot_test_score"] is None
+    assert row["composite_label"] == "strong"
+
+
+def test_save_draft_post_keeps_screenshot_call_outside_write_tx(
+    db_conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """Phase 10 C2 acceptance: when _save_draft_post runs, the screenshot
+    Haiku call must NOT fire while the SQLite write transaction is open.
+
+    We monkeypatch score_screenshot_test to record whether it was
+    called and assert the row landed even when our mock returned None
+    (the inside-tx call is the sentinel skip_screenshot_caller; the
+    post-commit call is a real score_screenshot_test invocation).
+    """
+    monkeypatch.setenv("LINT_OFFLINE", "1")
+    _niche.set_niche(db_conn, problem="x", person="y")
+
+    # Spy records the model_caller passed on every score_screenshot_test
+    # invocation. The inside-tx call MUST pass skip_screenshot_caller
+    # (the sentinel that returns None without network I/O); the post-
+    # commit call from update_screenshot_score MUST pass None (real
+    # network path, which goes through LINT_OFFLINE=1 short-circuit
+    # here so still returns None — but the absence of the sentinel is
+    # what proves the network code path is reachable post-commit).
+    callers: list[object] = []
+
+    def _spy_screenshot(draft_text, voice_profile, *, model_caller=None, **kw):
+        callers.append(model_caller)
+        return None  # mimic offline / no-key behavior on both paths
+
+    monkeypatch.setattr(ps, "score_screenshot_test", _spy_screenshot)
+
+    from app.agent.tools import _save_draft_post
+    _save_draft_post(
+        db_conn,
+        text="A rich substantive standalone draft about Stir.",
+        pillar="stir", audience="icp", cta="none", content_type="value",
+    )
+    # Two invocations: inside-tx skip-sentinel + post-commit real path.
+    assert len(callers) == 2, (
+        f"C2 regression: expected 2 calls (1 in-tx skip + 1 post-commit), "
+        f"got {len(callers)}"
+    )
+    assert callers[0] is ps.skip_screenshot_caller, (
+        "C2 regression: inside-tx call did not pass skip_screenshot_caller — "
+        "the Haiku call would fire while the SQLite writer lock is held."
+    )
+    assert callers[1] is None, (
+        "C2 regression: post-commit call passed a caller — it should call "
+        "score_screenshot_test with no model_caller so the real Haiku path "
+        "(or offline fallback) runs."
+    )
+
+
 def test_score_persists_screenshot_test_score_in_db(
     db_conn: sqlite3.Connection,
 ) -> None:

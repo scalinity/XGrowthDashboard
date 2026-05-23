@@ -1276,6 +1276,13 @@ def _save_draft_post(
         # never blocks. Writes a prepublish_scores row and wires the
         # cyclical FK on agent_drafts. Lives inside the transaction so a
         # scorer crash rolls back the draft alongside.
+        #
+        # Phase 10 C2 fix — screenshot_test (10th dim) is the only
+        # network-bound dimension. We SKIP it inside the transaction
+        # via the skip_screenshot_caller sentinel (returns None) so the
+        # writer lock isn't held across the Haiku call; the post-commit
+        # follow-up below fires the call out-of-band and UPDATEs the
+        # row.
         score_row = _prepublish_scorer.score(
             draft_text=text,
             draft_kind="standalone",
@@ -1284,6 +1291,7 @@ def _save_draft_post(
             target_post_text=None,
             active_voice_profile=_voice_profile.get_active(conn),
             conn=conn,  # Phase 10 / §28.11 — read screenshot floor from settings.
+            screenshot_test_caller=_prepublish_scorer.skip_screenshot_caller,
         )
         _prepublish_scorer.insert_score_row(
             conn, agent_draft_id=draft_id, row=score_row
@@ -1308,12 +1316,27 @@ def _save_draft_post(
                 conn, draft_text=text
             )
 
+    # Phase 10 C2 fix — screenshot Haiku call OUTSIDE the write
+    # transaction. update_screenshot_score may take up to 60s on a
+    # transient API hiccup; running it here means the writer lock is
+    # released first so concurrent launchd jobs / Streamlit reruns
+    # don't SQLITE_BUSY. The follow-up UPDATE is itself a narrow tx.
+    ss_score, ss_label = _prepublish_scorer.update_screenshot_score(
+        conn,
+        agent_draft_id=draft_id,
+        draft_text=text,
+        active_voice_profile=_voice_profile.get_active(conn),
+    )
+    # Return the post-commit label when the screenshot signal landed —
+    # otherwise the original composite_label from inside the tx wins.
+    prepublish_label = ss_label or score_row.composite_label
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
         "iwh_attempt_index": int(iwh_attempt_index),
         "draft_url": f"/?draft_id={draft_id}",
-        "prepublish_label": score_row.composite_label,
+        "prepublish_label": prepublish_label,
         "similarity_warning": similarity_warning,
         "invoked_lore_ids": invoked_lore_ids,
     }
@@ -1420,6 +1443,9 @@ def _save_draft_reply(
 
         # Phase 5.8 / §28.11 — same scoring pass for replies. Includes
         # the reply_substance dimension keyed off target_post_text.
+        # Phase 10 C2 fix — skip the screenshot Haiku call inside the
+        # write transaction (see _save_draft_post for the rationale);
+        # the post-commit update_screenshot_score below fires it.
         score_row = _prepublish_scorer.score(
             draft_text=text,
             draft_kind="reply",
@@ -1428,6 +1454,7 @@ def _save_draft_reply(
             target_post_text=target_post_text,
             active_voice_profile=_voice_profile.get_active(conn),
             conn=conn,  # Phase 10 / §28.11 — read screenshot floor from settings.
+            screenshot_test_caller=_prepublish_scorer.skip_screenshot_caller,
         )
         _prepublish_scorer.insert_score_row(
             conn, agent_draft_id=draft_id, row=score_row
@@ -1453,12 +1480,22 @@ def _save_draft_reply(
                 conn, draft_text=text
             )
 
+    # Phase 10 C2 fix — screenshot Haiku call OUTSIDE the write
+    # transaction. Mirror of the _save_draft_post post-commit path.
+    ss_score, ss_label = _prepublish_scorer.update_screenshot_score(
+        conn,
+        agent_draft_id=draft_id,
+        draft_text=text,
+        active_voice_profile=_voice_profile.get_active(conn),
+    )
+    prepublish_label = ss_label or score_row.composite_label
+
     return {
         "draft_id": draft_id,
         "post_id": post_id,
         "iwh_attempt_index": int(iwh_attempt_index),
         "target_post_url": target_post_url,
-        "prepublish_label": score_row.composite_label,
+        "prepublish_label": prepublish_label,
         "similarity_warning": similarity_warning,
         "invoked_lore_ids": invoked_lore_ids,
     }
