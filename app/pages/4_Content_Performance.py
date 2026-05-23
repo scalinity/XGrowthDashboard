@@ -313,7 +313,9 @@ _calibration_rows = conn.execute(
     SELECT ps.composite_label,
            COUNT(*) AS n,
            AVG(plm.impressions) AS avg_impressions,
-           AVG(plm.engagement_rate) AS avg_engagement_rate
+           AVG(plm.engagement_rate) AS avg_engagement_rate,
+           AVG(ps.screenshot_test_score) AS avg_screenshot_test_score,
+           COUNT(ps.screenshot_test_score) AS n_with_screenshot_score
     FROM agent_drafts ad
     JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
     JOIN posts p ON p.id = ad.final_post_id
@@ -351,13 +353,37 @@ else:
         f"color:{PALETTE['bone_dim']}; font-weight: 500;'>n</th>"
         f"<th style='text-align:right; padding:0.4rem 0.6rem; "
         f"color:{PALETTE['bone_dim']}; font-weight: 500;'>avg impressions</th>"
-        f"<th style='text-align:right; padding:0.4rem 0; "
+        f"<th style='text-align:right; padding:0.4rem 0.6rem; "
         f"color:{PALETTE['bone_dim']}; font-weight: 500;'>avg engagement rate</th>"
+        # Phase 10 / §28.11 — screenshot test calibration column. Shows
+        # avg(screenshot_test_score) over scored shipped drafts in this
+        # composite_label bucket. Dimmed "—" when no drafts in the
+        # bucket have a non-NULL screenshot score yet.
+        f"<th style='text-align:right; padding:0.4rem 0; "
+        f"color:{PALETTE['bone_dim']}; font-weight: 500;' "
+        f"title='Avg §28.11 screenshot_test_score over shipped agent drafts. "
+        f"Dimmed when no drafts in this bucket have been scored yet.'>"
+        f"avg screenshot test</th>"
         f"</tr>"
     ]
     for _r in _calibration_rows:
         _imp = f"{int(_r['avg_impressions']):,}" if _r["avg_impressions"] is not None else "—"
         _er = f"{_r['avg_engagement_rate']:.3f}" if _r["avg_engagement_rate"] is not None else "—"
+        # Phase 10 / §28.11 — render the screenshot calibration cell.
+        # Dimmed "—" when no draft in this bucket has a non-NULL score
+        # yet; "X.X (n=N)" otherwise so Daniel sees both the mean and
+        # the support behind it (Phase 10 acceptance gate calls for the
+        # screenshot dimension to surface here).
+        _ss_avg = _r["avg_screenshot_test_score"]
+        _ss_n = _r["n_with_screenshot_score"] or 0
+        if _ss_avg is None or _ss_n == 0:
+            _ss_cell = f"<span style='color:{PALETTE['bone_dim']};'>—</span>"
+        else:
+            _ss_cell = (
+                f"<span style='color:{PALETTE['bone']};'>{float(_ss_avg):.2f}</span>"
+                f"<span style='color:{PALETTE['bone_dim']}; font-size:0.75rem; "
+                f"margin-left:0.3rem;'>(n={int(_ss_n)})</span>"
+            )
         rows_html.append(
             f"<tr><td style='padding:0.3rem 0.6rem 0.3rem 0; color:{PALETTE['bone']};'>"
             f"{_r['composite_label']}</td>"
@@ -365,8 +391,10 @@ else:
             f"color:{PALETTE['bone']};'>{int(_r['n'])}</td>"
             f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
             f"color:{PALETTE['bone']};'>{_imp}</td>"
-            f"<td class='numeric' style='text-align:right; padding:0.3rem 0; "
-            f"color:{PALETTE['bone']};'>{_er}</td></tr>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0.6rem; "
+            f"color:{PALETTE['bone']};'>{_er}</td>"
+            f"<td class='numeric' style='text-align:right; padding:0.3rem 0;'>"
+            f"{_ss_cell}</td></tr>"
         )
     st.markdown(
         "<table style='border-collapse: collapse; font-family: IBM Plex Sans, sans-serif;'>"

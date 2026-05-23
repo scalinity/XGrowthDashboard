@@ -26,16 +26,37 @@ constants here; do not move the contract.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
 
 from app.agent import voice_profile as _voice_profile
+from app.db import PROJECT_ROOT
 
 _LOG = logging.getLogger(__name__)
 
-SCORER_VERSION = "prepublish-scorer/0.1.0"
+# Phase 10 bumps the scorer version because compute_composite_label gains
+# the §28.11 screenshot_test_score gate. Same input dimensions can now
+# produce a different label when screenshot_test_score is non-NULL and
+# below the configured floor.
+SCORER_VERSION = "prepublish-scorer/0.2.0"
+
+# Phase 10 / §28.11 — screenshot-test prompt file path. Static; read once
+# per score() call. The prompt is hand-curated, version-controlled, and
+# splices the draft + active voice_profile snapshot at call time.
+SCREENSHOT_TEST_PROMPT_PATH: Path = (
+    PROJECT_ROOT / "config" / "screenshot_test_prompt.md"
+)
+
+# Phase 10 / §28.11 default for screenshot_test_minimum_for_strong when
+# the settings row isn't readable (fresh DB pre-seed, transient DB
+# failure). Matches the migration 023 INSERT OR IGNORE default.
+_SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT: int = 2
 
 # Length anchors (mirror settings keys x_short_post_target_chars and
 # x_post_max_chars, hardcoded here because the scorer should not
@@ -99,6 +120,11 @@ class ScoreRow:
     voice_fit_score: int | None
     composite_label: str
     warnings_json: list[str]
+    # Phase 10 / §28.11 — screenshot test (10th dimension). NULL when the
+    # scorer was unable to run a model call (offline mode, API outage,
+    # no API key). The composite_label gate tolerates NULL: a NULL
+    # screenshot score never blocks 'strong'.
+    screenshot_test_score: int | None = None
     scorer_version: str = SCORER_VERSION
 
     def as_db_tuple(self, draft_id: int) -> tuple:
@@ -118,11 +144,11 @@ class ScoreRow:
             self.composite_label,
             None if not self.warnings_json else _json_dump(self.warnings_json),
             self.scorer_version,
+            self.screenshot_test_score,
         )
 
 
 def _json_dump(items: list[str]) -> str:
-    import json
     return json.dumps(items, ensure_ascii=False)
 
 
@@ -442,14 +468,215 @@ def voice_fit_score(text: str, profile: _voice_profile.VoiceProfile | None) -> i
 
 
 # ---------------------------------------------------------------------------
+# Phase 10 / §28.11 — screenshot test (10th dimension).
+# ---------------------------------------------------------------------------
+def _read_screenshot_prompt() -> str:
+    """Read the static screenshot-test prompt template.
+
+    Lazy: caller invokes only when score_screenshot_test actually fires.
+    Not @lru_cache'd because the file is small and the lazy path
+    keeps test isolation simple (tmp dir tests can override the
+    PROJECT_ROOT path without needing a cache flush).
+    """
+    return SCREENSHOT_TEST_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _render_voice_profile_snapshot(
+    profile: _voice_profile.VoiceProfile | None,
+) -> str:
+    """Compact one-block render of the active voice profile for the
+    screenshot-test prompt's {voice_profile} slot. Empty when no profile."""
+    if profile is None:
+        return "(no active voice profile)"
+    parts: list[str] = []
+    self_desc = profile.self_description()
+    if self_desc:
+        parts.append(f"self-description: {self_desc}")
+    vocab = profile.vocabulary_signatures()[:5]
+    if vocab:
+        parts.append("vocabulary_signatures: " + ", ".join(vocab))
+    cadence = profile.cadence()
+    if isinstance(cadence, dict) and cadence:
+        bits = [f"{k}={v}" for k, v in cadence.items() if v is not None]
+        if bits:
+            parts.append("cadence: " + ", ".join(bits))
+    return "\n".join(parts) if parts else "(active profile has no rendered cues)"
+
+
+def score_screenshot_test(
+    draft_text: str,
+    voice_profile: _voice_profile.VoiceProfile | None,
+    *,
+    model_caller: Callable[..., Any] | None = None,
+    model: str = "claude-haiku-4-5",
+) -> int | None:
+    """§28.11 Phase 10 — score the §28.11 10th dimension via Haiku.
+
+    Returns 0..3 on a clean parse; None on offline mode, API outage,
+    missing key, or model refusal / out-of-range / unparseable response.
+    None is the defensive default — a NULL screenshot score never
+    blocks publish per §28.11 design rule #4 ("never blocks") and the
+    composite_label gate tolerates NULL ("NULL passes through").
+
+    The ``model_caller`` parameter is an injection seam for tests: pass
+    a callable that returns a `(score, rationale)` tuple to skip the
+    Haiku round-trip. Production callers leave it None.
+
+    Honors ``LINT_OFFLINE=1`` env var: skips the API entirely and
+    returns None (offline mode produces no signal — same discipline as
+    the lint pass's offline-fallback contract).
+    """
+    if not draft_text or not draft_text.strip():
+        return None
+
+    if model_caller is not None:
+        # Test path: caller-supplied scoring. Validates the score is
+        # 0..3 here so test fixtures can't violate the schema.
+        try:
+            raw = model_caller(draft_text, voice_profile)
+        except Exception as exc:  # noqa: BLE001 — test seam must not raise
+            _LOG.warning("score_screenshot_test model_caller raised: %s", exc)
+            return None
+        return _validate_screenshot_score(raw)
+
+    # Offline mode — same discipline as lint.py: don't attempt the API.
+    if os.environ.get("LINT_OFFLINE") == "1":
+        return None
+
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        prompt_template = _read_screenshot_prompt()
+    except FileNotFoundError:
+        # Missing prompt file is a build-time problem, not a runtime
+        # one — degrade gracefully so a fresh checkout that hasn't
+        # synced config/ doesn't crash save_draft_*.
+        _LOG.warning(
+            "screenshot-test prompt missing at %s — returning NULL",
+            SCREENSHOT_TEST_PROMPT_PATH,
+        )
+        return None
+
+    voice_snapshot = _render_voice_profile_snapshot(voice_profile)
+    prompt = prompt_template.replace("{draft}", draft_text).replace(
+        "{voice_profile}", voice_snapshot
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        body = ""
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                body = block.text
+                break
+        if not body:
+            return None
+        body = body.strip()
+        if body.startswith("```"):
+            body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body, flags=re.DOTALL)
+        data = json.loads(body)
+        raw_score = data.get("score") if isinstance(data, dict) else None
+        return _validate_screenshot_score(raw_score)
+    except (json.JSONDecodeError, ValueError) as exc:
+        _LOG.warning(
+            "score_screenshot_test received unparseable response: %s", exc
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — broad catch matches lint.py
+        _LOG.warning(
+            "score_screenshot_test API call failed (%s): %s",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _validate_screenshot_score(raw: Any) -> int | None:
+    """Coerce a model-supplied score to int and clamp to 0..3 or NULL.
+
+    Out-of-range and non-numeric inputs return None — the §28.11 schema
+    CHECK rejects anything but NULL or 0..3, so the validator is the
+    last line of defense before the persisted row.
+    """
+    if raw is None:
+        return None
+    try:
+        candidate = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= candidate <= 3:
+        return candidate
+    return None
+
+
+def _read_screenshot_test_minimum_for_strong(
+    conn: sqlite3.Connection | None,
+) -> int:
+    """Pull the §28.11 Phase 10 gating floor from settings.
+
+    Falls back to the default ``2`` when conn is None (test contexts
+    that don't need a DB), the row is missing (fresh DB pre-seed), or
+    value_json is malformed.
+    """
+    if conn is None:
+        return _SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?",
+        ("screenshot_test_minimum_for_strong",),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return _SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT
+    try:
+        v = json.loads(row[0])
+        return int(v)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT
+
+
+# ---------------------------------------------------------------------------
 # Composite label derivation. Pure function — unit-tested explicitly.
 # ---------------------------------------------------------------------------
-def compute_composite_label(scores: dict[str, int | None]) -> str:
+def compute_composite_label(
+    scores: dict[str, int | None],
+    *,
+    screenshot_test_score: int | None = None,
+    screenshot_test_minimum_for_strong: int = (
+        _SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT
+    ),
+) -> str:
     """Derive `weak | viable | strong` per §10 prepublish_scores notes.
 
     Iterates only over scores that are not None — NULL dimensions
     (cta_strength_score when cta='none', voice_fit_score when no active
     profile, reply_substance_score on non-replies) are simply skipped.
+
+    Phase 10 / §28.11 — the screenshot_test gating:
+
+    * When ``screenshot_test_score`` is NULL → no gate applied (the
+      label is whatever the original ladder produces). This is the
+      calibration-period contract: a NULL signal never penalizes.
+    * When ``screenshot_test_score`` is non-NULL AND below
+      ``screenshot_test_minimum_for_strong`` → the label downgrades
+      from 'strong' to 'viable' (and 'viable'/'weak' stay as they
+      were). Intentionally soft: the spec calls for `strong → viable`,
+      not `viable → weak`, so a miscalibrated screenshot signal can't
+      cascade Daniel's whole pipeline into 'weak'.
+
+    The screenshot_test_score is NOT included in the dimension dict
+    iteration above — gating happens as a post-hoc adjustment so the
+    existing zero-count / two-plus / three-count ladder math stays
+    pinned to the original 9 dimensions.
     """
     vals = [v for v in scores.values() if v is not None]
     if not vals:
@@ -466,10 +693,22 @@ def compute_composite_label(scores: dict[str, int | None]) -> str:
     two_plus = sum(1 for v in vals if v >= 2)
     three_count = sum(1 for v in vals if v == 3)
     if zero_count == 0 and two_plus >= STRONG_MIN_TWOS and three_count >= STRONG_MIN_THREES:
-        return "strong"
-    if zero_count >= 1 or two_plus <= WEAK_MAX_TWOS:
-        return "weak"
-    return "viable"
+        base = "strong"
+    elif zero_count >= 1 or two_plus <= WEAK_MAX_TWOS:
+        base = "weak"
+    else:
+        base = "viable"
+
+    # Phase 10 / §28.11 — soft screenshot-test gate. Only `strong` can
+    # downgrade; `viable` and `weak` pass through unchanged so a
+    # mis-calibrated screenshot signal can't cascade.
+    if (
+        base == "strong"
+        and screenshot_test_score is not None
+        and screenshot_test_score < screenshot_test_minimum_for_strong
+    ):
+        return "viable"
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -483,12 +722,22 @@ def score(
     cta: str | None,
     target_post_text: str | None,
     active_voice_profile: _voice_profile.VoiceProfile | None,
+    conn: sqlite3.Connection | None = None,
+    screenshot_test_caller: Callable[..., Any] | None = None,
 ) -> ScoreRow:
-    """Score a draft. Pure function over its inputs.
+    """Score a draft. Pure function over its inputs (sans the optional
+    screenshot test, which fires a Haiku call when not stubbed).
 
     The orchestrator passes the active voice profile (looked up once at
-    the start of the save_draft_* call); we never read DB here so the
-    scorer stays testable without a fixture.
+    the start of the save_draft_* call); we never read DB for the nine
+    deterministic dimensions so the scorer stays testable without a
+    fixture.
+
+    Phase 10 / §28.11 — the screenshot test (10th dimension) is the
+    one model-dependent dimension. ``conn`` is read ONLY to fetch the
+    ``screenshot_test_minimum_for_strong`` floor; when None, the
+    default constant applies. ``screenshot_test_caller`` is the test
+    injection seam (see ``score_screenshot_test``).
 
     Note (P58R-11): a future `audience_fit_score` dimension is on the
     Phase 5.X roadmap. When it lands, add an `audience` kwarg here AND
@@ -511,6 +760,15 @@ def score(
     s_cta = cta_strength_score(draft_text, cta)
     s_voice = voice_fit_score(draft_text, active_voice_profile)
 
+    # Phase 10 / §28.11 — 10th dimension. None on offline mode / missing
+    # API key / Haiku unreachable — the composite_label gate tolerates
+    # NULL ("NULL passes through" per the soft-gate contract).
+    s_screenshot = score_screenshot_test(
+        draft_text,
+        active_voice_profile,
+        model_caller=screenshot_test_caller,
+    )
+
     scores: dict[str, int | None] = {
         "clarity": s_clarity,
         "hook_strength": s_hook,
@@ -522,7 +780,12 @@ def score(
         "cta_strength": s_cta,
         "voice_fit": s_voice,
     }
-    label = compute_composite_label(scores)
+    screenshot_floor = _read_screenshot_test_minimum_for_strong(conn)
+    label = compute_composite_label(
+        scores,
+        screenshot_test_score=s_screenshot,
+        screenshot_test_minimum_for_strong=screenshot_floor,
+    )
 
     warnings: list[str] = []
     if s_hook == 0:
@@ -539,6 +802,16 @@ def score(
         warnings.append("voice fit weak — phrases match the stop-phrase or LLM list")
     if s_reply == 0:
         warnings.append("reply leads with thin acknowledgment; address the target substantively first")
+    # Phase 10 / §28.11 — surface a warning when the screenshot gate
+    # actually downgraded the label (non-NULL + below floor). Silent
+    # otherwise: a NULL screenshot signal is not a warning, it's a gap.
+    if (
+        s_screenshot is not None
+        and s_screenshot < screenshot_floor
+    ):
+        warnings.append(
+            f"screenshot test score {s_screenshot} below minimum-for-strong {screenshot_floor} — peer-Daniel would scroll past"
+        )
 
     return ScoreRow(
         clarity_score=s_clarity,
@@ -552,6 +825,7 @@ def score(
         voice_fit_score=s_voice,
         composite_label=label,
         warnings_json=warnings,
+        screenshot_test_score=s_screenshot,
     )
 
 
@@ -573,8 +847,9 @@ def insert_score_row(
           (agent_draft_id, clarity_score, hook_strength_score,
            specificity_score, length_fit_score, format_fit_score,
            topic_fit_score, reply_substance_score, cta_strength_score,
-           voice_fit_score, composite_label, warnings_json, scorer_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           voice_fit_score, composite_label, warnings_json, scorer_version,
+           screenshot_test_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         row.as_db_tuple(agent_draft_id),
     )
@@ -594,7 +869,8 @@ def get_score_for_draft(conn: sqlite3.Connection, *, agent_draft_id: int) -> dic
                hook_strength_score, specificity_score, length_fit_score,
                format_fit_score, topic_fit_score, reply_substance_score,
                cta_strength_score, voice_fit_score, composite_label,
-               warnings_json, scorer_version, tokens_used
+               warnings_json, scorer_version, tokens_used,
+               screenshot_test_score
         FROM prepublish_scores
         WHERE agent_draft_id = ?
         """,

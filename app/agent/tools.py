@@ -1283,6 +1283,7 @@ def _save_draft_post(
             cta=cta,
             target_post_text=None,
             active_voice_profile=_voice_profile.get_active(conn),
+            conn=conn,  # Phase 10 / §28.11 — read screenshot floor from settings.
         )
         _prepublish_scorer.insert_score_row(
             conn, agent_draft_id=draft_id, row=score_row
@@ -1415,6 +1416,7 @@ def _save_draft_reply(
             cta=None,
             target_post_text=target_post_text,
             active_voice_profile=_voice_profile.get_active(conn),
+            conn=conn,  # Phase 10 / §28.11 — read screenshot floor from settings.
         )
         _prepublish_scorer.insert_score_row(
             conn, agent_draft_id=draft_id, row=score_row
