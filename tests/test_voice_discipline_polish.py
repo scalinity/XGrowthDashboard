@@ -17,6 +17,7 @@ End-to-end happy path lives in tests/test_phase10_end_to_end.py.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -1221,6 +1222,57 @@ def test_reply_intent_required_reads_setting_correctly(
         "DELETE FROM settings WHERE key = ?", ("reply_intent_required",)
     )
     assert _agent_client._read_reply_intent_required(db_conn) is True
+
+
+def test_phase10_defaults_agree_across_three_sources(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Phase 10 S9 — the two new Phase 10 settings defaults live in
+    THREE places:
+      1. Code constants: _agent_client._REPLY_INTENT_REQUIRED_DEFAULT
+         and ps._SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT.
+      2. scripts/seed_settings.py rows (used by init_db on fresh DB).
+      3. migrations/023 INSERT OR IGNORE (used by raw migrations
+         path on fresh OR upgraded DB).
+
+    Drift between any two surfaces means a fresh DB and a
+    migration-upgraded DB disagree on Daniel's defaults — silently.
+    Pin all three.
+    """
+    from scripts.seed_settings import _PHASE_1_SETTINGS
+
+    # Source 2: scripts/seed_settings.py
+    seed_dict = {k: v for k, v, _note in _PHASE_1_SETTINGS}
+    seed_reply_intent_required = seed_dict.get("reply_intent_required")
+    seed_screenshot_floor = seed_dict.get("screenshot_test_minimum_for_strong")
+
+    # Source 3: db_conn already had migration 023 applied (which seeds
+    # the rows via INSERT OR IGNORE).
+    schema_reply_intent_required = json.loads(db_conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?",
+        ("reply_intent_required",),
+    ).fetchone()[0])
+    schema_screenshot_floor = json.loads(db_conn.execute(
+        "SELECT value_json FROM settings WHERE key = ?",
+        ("screenshot_test_minimum_for_strong",),
+    ).fetchone()[0])
+
+    # Source 1: Python code constants.
+    code_reply_intent_required = (
+        _agent_client._REPLY_INTENT_REQUIRED_DEFAULT
+    )
+    code_screenshot_floor = ps._SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT
+
+    # All three must agree, value-wise.
+    assert seed_reply_intent_required == bool(schema_reply_intent_required) == code_reply_intent_required, (
+        f"reply_intent_required drift — seed={seed_reply_intent_required}, "
+        f"schema={schema_reply_intent_required}, code={code_reply_intent_required}"
+    )
+    assert seed_screenshot_floor == schema_screenshot_floor == code_screenshot_floor, (
+        f"screenshot_test_minimum_for_strong drift — "
+        f"seed={seed_screenshot_floor}, schema={schema_screenshot_floor}, "
+        f"code={code_screenshot_floor}"
+    )
 
 
 def test_reply_intent_drift_check_dispatcher_in_sync() -> None:
