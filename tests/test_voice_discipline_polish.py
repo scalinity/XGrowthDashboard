@@ -670,6 +670,33 @@ def test_offline_lint_passes_substantive_replies(substantive_text: str) -> None:
     assert result.failure_mode is None
 
 
+def test_reply_quality_lint_passed_failure_mode_cross_column_invariant(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Phase 10 S5 — runtime invariant: no agent_drafts row should ever
+    have (reply_quality_lint_passed = 1 AND reply_quality_lint_failure_mode
+    IS NOT NULL).
+
+    The schema CHECK doesn't enforce this cross-column rule (SQLite
+    requires a table-level CHECK for that, which forward-only
+    migrations make awkward). The handler's runtime invariant
+    (`rq_failure_mode_persist if rq_persist == 0 else None`) is the
+    canonical enforcement; this test pins the database-side
+    consequence. Any new row that violates the invariant is a bug.
+    """
+    bad_count = db_conn.execute(
+        """
+        SELECT COUNT(*) FROM agent_drafts
+         WHERE reply_quality_lint_passed = 1
+           AND reply_quality_lint_failure_mode IS NOT NULL
+        """,
+    ).fetchone()[0]
+    assert bad_count == 0, (
+        f"S5 invariant violated: {bad_count} rows have passed=1 + "
+        "failure_mode IS NOT NULL"
+    )
+
+
 def test_reply_quality_failure_mode_enum_matches_schema(
     db_conn: sqlite3.Connection,
 ) -> None:
