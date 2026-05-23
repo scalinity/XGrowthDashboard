@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 9 / §17 Phase 9 / §29.12 — Grok firehose discovery sweep.
+
+  Cadence: every 120 minutes (matches the
+  ``grok_discovery_sweep_interval_minutes`` settings row default
+  seeded by migration 021).
+
+  This plist is NOT auto-loaded. To enable:
+
+      cp launchd/com.scalinity.xgrowth.grok-sweep.plist \
+         ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+
+  To disable:
+
+      launchctl unload ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+
+  Requires XAI_API_KEY in the EnvironmentVariables dict below — launchd
+  does NOT inherit the dashboard's .env. The dashboard process reads
+  .env via python-dotenv on startup; the launchd context is a separate
+  process tree and needs the key explicitly. The block below is left
+  with a placeholder string — replace before ``launchctl load`` (and
+  rotate via Settings → Reply Targets → Grok queries after).
+
+  See docs/SCHEDULED_JOBS.md for the full per-job runbook, the
+  combined Anthropic + xAI cost ceiling (§28.6), and the §29.2
+  source-of-truth verification invariant Grok candidates respect.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scalinity.xgrowth.grok-sweep</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>app.jobs.grok_discovery_sweep</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard</string>
+
+    <!-- Every 120 minutes (7,200 seconds). Matches the
+         grok_discovery_sweep_interval_minutes settings default. -->
+    <key>StartInterval</key>
+    <integer>7200</integer>
+
+    <!-- Do NOT run on first load — that would publish API calls Daniel
+         didn't explicitly schedule. The first run happens at the next
+         interval tick after launchctl load. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- XAI_API_KEY is REQUIRED. Get a key at https://console.x.ai/
+             and paste the value below before `launchctl load`. The key
+             is also read by the dashboard process via .env when Daniel
+             clicks "Run sweep now" from Settings. -->
+        <key>XAI_API_KEY</key>
+        <string>REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD</string>
+        <!-- xurl reads its OAuth state from ~/.xurl/ which the launchd
+             user-context inherits; no extra env needed for the §29.2
+             X API verification call. -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/grok_discovery_sweep.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danny/Documents/Codez/Apps/XGrowthDashboard/data/logs/grok_discovery_sweep.err.log</string>
+
+    <!-- Per-job 5-minute hard timeout. The sweep itself has an internal
+         wall-clock guard at 240s so the audit-log row always lands
+         before the OS kills the process. -->
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
+</dict>
+</plist>

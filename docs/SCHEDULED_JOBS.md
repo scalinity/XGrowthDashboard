@@ -171,8 +171,95 @@ year suffices.
 
 ---
 
-## Forward-pointer: Phase 9 Grok sweep
+## Phase 9 Grok discovery sweep
 
-Phase 9 (migration 020) adds a fifth scheduled job at
-`launchd/com.scalinity.xgrowth.grok-sweep.plist`. Same no-auto-load
-discipline applies; see the Phase 9 docs when migration 020 lands.
+Phase 9 (migration **021**; the original spec said 020 but
+`020_force_drafted_reason_required.sql` had already shipped, so the
+Grok migration landed at 021) adds a fifth scheduled job:
+`launchd/com.scalinity.xgrowth.grok-sweep.plist`.
+
+It calls xAI Grok with `search_parameters.sources=[{"type":"x"}]` for
+firehose discovery (§29.12), then verifies every returned candidate
+against the X API via Phase 7's xurl wrapper (§29.2 source-of-truth
+invariant) before inserting into `reply_targets` with
+`discovered_via='grok_semantic'`.
+
+### Prerequisites
+
+1. **Migration 021 applied.** Re-run `uv run python -m scripts.init_db`
+   if you haven't, or `uv run pytest tests/test_schema.py -q` to verify.
+
+2. **`XAI_API_KEY` in `.env` AND in the plist.** The dashboard process
+   reads `.env`; launchd doesn't inherit it. Get a key at
+   https://console.x.ai/ and paste the value into both places:
+
+   - `.env` (next to `ANTHROPIC_API_KEY`).
+   - The `EnvironmentVariables` dict in the plist (replace
+     `REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD`).
+
+3. **Phase 7 prerequisite — `xurl` installed + authenticated.** The
+   §29.2 verification call uses Phase 7's xurl wrapper. If xurl isn't
+   ready, every Grok candidate gets rejected on the X API call and the
+   sweep produces noise without value.
+
+4. **`grok_query_list_json` populated.** Empty list = no Grok calls
+   happen even with `grok_api_enabled=TRUE`. Populate via Settings →
+   Reply Targets → Grok queries.
+
+### Enable
+
+```bash
+cp launchd/com.scalinity.xgrowth.grok-sweep.plist \
+   ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+```
+
+The first sweep happens at the next `StartInterval` tick (default 120
+minutes after `launchctl load`). To run immediately, use Settings →
+Reply Targets → Grok queries → "Run sweep now".
+
+### Disable
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+```
+
+Or flip `grok_api_enabled=FALSE` in Settings (the sweep code reads
+the flag at start and aborts if disabled, so the launchd cadence
+becomes a no-op without unloading the plist).
+
+### Failure modes
+
+| Mode | Behavior |
+|---|---|
+| `XAI_API_KEY` missing | `GrokUnavailable` raised; sweep aborts with the audit-log row recording the error. No Grok call fires; no row written to `grok_api_responses` (configuration failure, not API failure). |
+| Grok 429 | Sweep pauses, respects `Retry-After`, resumes. In-progress-but-unverified candidates dropped (re-discovered next sweep). Row written to `grok_api_responses` with `rejection_reason='rate_limit_429'`. |
+| Grok 5xx after retry | Sweep skips the affected query and continues. Row written with `rejection_reason='http_error_5xx'`. |
+| §28.6 combined ceiling hit | `GrokCostCeilingError` raised pre-call. Sweep aborts. Row written with `rejection_reason='cost_ceiling_hit'`. Settings banner displays "Grok paused: combined AI ceiling hit." Anthropic agent calls also pause per §28.6. |
+| §29.2 verification 404 | Candidate dropped (post deleted between Grok discovery and our verification). Row written with `rejection_reason='verification_404'`. No `reply_targets` insert. |
+| Dedupe: same `target_x_post_id` already in `reply_targets` | Silently dropped at insert via the `unique(target_x_post_id)` partial index. Sweep continues. Original `discovered_via` (manual / agent_score / earlier sweep) preserved. |
+
+### Cost ceiling — combined Anthropic + xAI
+
+The §28.6 ceiling is shared infrastructure: one setting
+(`combined_ai_monthly_cost_ceiling_usd`, default $30) gates BOTH the
+Anthropic agent calls AND the Grok sweep. At 100%:
+
+- `app/grok_client.py` refuses new calls (the preflight check raises
+  `GrokCostCeilingError`).
+- `app/agent/client.py` refuses new calls (the same check raises
+  `MonthlyCostCeilingExceeded`).
+
+Settings → Reply Targets → "Combined AI spend this month" shows the
+Anthropic + xAI split with a progress bar against the cap.
+
+### §29.2 verification invariant
+
+Grok is **never** the source of truth for any engagement metric. Every
+candidate Grok returns is verified against the X API
+(`xurl /2/tweets/{id}?tweet.fields=public_metrics,non_public_metrics`)
+before any score touches `engagement_surface_score`. On X API 404 the
+candidate is rejected; on X API 200 the candidate flows through §29.3
+scoring with X API metrics as the source of truth — NOT Grok's
+`observed_metrics`. The invariant lives in
+`app/agent/reply_targets.py::verify_grok_candidate_against_x_api`.
