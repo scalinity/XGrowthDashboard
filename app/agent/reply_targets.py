@@ -1,16 +1,26 @@
 """Reply-target scoring helpers — spec.md §29.
 
-Two pure-function surfaces live here so they can be exercised without a DB:
+Pure-function surfaces (exercised without a DB):
 
 * ``resolve_recommended_action`` — the deterministic resolver from §29.3.
   The dashboard never produces a composite "viability" score; the action
   label is derived from the four MVP dimensions by a fixed branch ladder.
-  The 256-combo test (tests/test_reply_target_resolver.py) exhausts this
-  function's input space.
+  The Phase 7 4⁶=4,096-combo test (tests/test_reply_target_resolver.py)
+  exhausts this function's input space composed with the velocity/timing
+  modifiers below.
 
 * ``engagement_surface_thresholds`` + ``engagement_surface_score`` — §29.4
   relative-threshold math. The thresholds scale with the *target* author's
   follower count, with the four configurable settings rows as floors.
+
+* ``velocity_score`` + ``timing_score`` + ``apply_velocity_timing_modifiers``
+  (Phase 7) — the two §29.3 trailing dimensions activated once
+  ``reply_target_metrics_refresh`` is running (§17 Phase 7 job #4).
+  velocity_score requires ≥2 snapshots so the differential rate exists;
+  timing_score is computable from post age + author tier alone.
+  The modifiers apply AFTER the base ladder per §29.3 trailing paragraph;
+  the modifier function is the single composition point used by both
+  ``score_reply_candidates`` and the resolver test.
 
 The orchestrator in ``app.agent.tools`` (#6 ``score_reply_candidates``)
 composes these helpers and writes the result onto a ``reply_targets`` row.
@@ -18,9 +28,10 @@ composes these helpers and writes the result onto a ``reply_targets`` row.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, Iterable, Literal
 
-Score = int | None  # 0..3 at MVP; NULL for V1.1+ dimensions not yet computed
+Score = int | None  # 0..3 dimensions; NULL when not yet computed
 
 RecommendedAction = Literal["reply_now", "reply_if_time", "consider", "skip"]
 
@@ -33,15 +44,20 @@ ACTION_TO_SCORE: dict[RecommendedAction, int] = {
 }
 
 
-# §29.3 explicitly omits velocity / timing / audience_quality from MVP. They
-# are accepted as parameters so the V1.1+ caller signature is stable, but they
-# never alter the resolver's output until §29.3 is amended.
+# §29.3: the base resolver consumes only the four MVP dimensions. velocity,
+# timing, and audience_quality are accepted in the signature so the call
+# site is stable across phases; they are IGNORED by this function. The
+# Phase 7 modifiers live in ``apply_velocity_timing_modifiers`` and are
+# applied AFTER the base ladder. audience_quality is V1.2+-deferred per
+# §29.1 and remains unused.
 def resolve_recommended_action(
     relevance: Score,
     engagement_surface: Score,
     saturation: Score,
     reply_opportunity: Score,
-    # V1.1+ — ignored at MVP per §29.3 trailing paragraph.
+    # The trailing three are accepted but never consumed here. Phase 7's
+    # velocity + timing affect the action via apply_velocity_timing_modifiers
+    # (composed by the caller); audience_quality remains V1.2+ deferred.
     velocity: Score = None,  # noqa: ARG001
     timing: Score = None,  # noqa: ARG001
     audience_quality: Score = None,  # noqa: ARG001
@@ -56,8 +72,8 @@ def resolve_recommended_action(
     4. Otherwise                        →  'consider'.
 
     NULL inputs are illegal for the four MVP dimensions — the caller MUST
-    have scored them before invoking this. NULL on a V1.1+ dimension is the
-    expected state at MVP and is ignored.
+    have scored them before invoking this. NULL on velocity/timing is the
+    pre-Phase-7 state (no metrics-refresh history yet) and is ignored.
     """
     mvp = (relevance, engagement_surface, saturation, reply_opportunity)
     if any(s is None for s in mvp):
@@ -214,3 +230,210 @@ STATUS_ENUM: tuple[str, ...] = (
     "expired",
     "target_deleted",
 )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — velocity + timing dimensions per §29.3 trailing block.
+# ---------------------------------------------------------------------------
+# The two new dimensions activate once the reply_target_metrics_refresh
+# job (§17 Phase 7 job #4) has been running long enough to have ≥2
+# snapshots per candidate. velocity is undefined (None) before then;
+# timing is computable from post age + author tier alone, so it's
+# defined on every candidate including a freshly-pasted URL.
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyTargetSnapshot:
+    """One row of ``reply_target_snapshots`` — the minimum surface
+    velocity_score needs.
+
+    The dataclass exists so velocity_score can be unit-tested without a
+    DB round-trip. The metrics-refresh job constructs these from
+    sqlite3.Row instances; tests construct them directly with literal
+    values.
+
+    Only the fields velocity_score reads are required; the schema has
+    additional columns (impressions, bookmarks, etc.) that aren't used
+    for the velocity differential.
+    """
+
+    checked_at_utc: str
+    computed_likes_per_hour: float | None
+    # computed_replies_per_hour is part of the schema but velocity_score
+    # currently keys off likes/hour only — the rubric in §29.3 is about
+    # engagement-pool growth, of which likes are the highest-volume
+    # signal. Replies-per-hour is captured for future calibration; if
+    # §29.3 is amended to include it, the rubric here is the single
+    # point to update.
+    computed_replies_per_hour: float | None = None
+
+
+def velocity_score(snapshots: Iterable[ReplyTargetSnapshot]) -> int | None:
+    """Map a candidate's snapshot history into the §29.3 velocity dimension.
+
+    Returns 0..3 per the §29.3 Velocity rubric:
+
+    * 0 — Decaying or stale. Latest rate ≤ 50% of the previous rate.
+    * 1 — Flat. |latest − previous| < ``_VELOCITY_FLAT_EPSILON`` likes/hour.
+    * 2 — Modest engagement gain over last hour. Within (0.5, 2.0)× previous.
+    * 3 — Accelerating. Latest rate ≥ 2.0× previous rate AND previous > 0.
+
+    Returns ``None`` when fewer than two snapshots exist for the candidate
+    — the differential rate is undefined. This is the pre-Phase-7-running
+    state and the state immediately after a fresh candidate is added; the
+    resolver's modifier path handles ``None`` as "no upgrade applied"
+    (engagement_surface unchanged).
+
+    Snapshots are sorted by ``checked_at_utc`` ascending so the two
+    most-recent rows are compared. NULL likes/hour values (the first
+    snapshot for a candidate carries NULL for the computed-delta columns)
+    are treated as 0.0 for comparison purposes; that yields 'flat' for
+    the second-snapshot-only case, which is what spec calls for ("modest
+    gain" needs a prior baseline to be modest *against*).
+    """
+    sorted_snaps = sorted(snapshots, key=lambda s: s.checked_at_utc)
+    if len(sorted_snaps) < 2:
+        return None
+    prev_rate = float(sorted_snaps[-2].computed_likes_per_hour or 0.0)
+    cur_rate = float(sorted_snaps[-1].computed_likes_per_hour or 0.0)
+
+    # Decay band — latest rate is ≤ 50% of previous, or both rates are
+    # zero (a thread that's gone cold).
+    if prev_rate > 0.0 and cur_rate <= prev_rate * 0.5:
+        return 0
+    if prev_rate == 0.0 and cur_rate == 0.0:
+        return 0
+
+    # Flat band — small absolute delta on likes/hour. The 1.0 threshold
+    # matches the §13 noise-floor discipline (rates are integers when
+    # the underlying counts are small).
+    if abs(cur_rate - prev_rate) < _VELOCITY_FLAT_EPSILON:
+        return 1
+
+    # Accelerating — latest rate is ≥ 2.0× previous AND previous > 0.
+    # The previous > 0 guard prevents "0 → 1 like/hour" from registering
+    # as accelerating; rate-from-zero is more often noise than a trend.
+    if prev_rate > 0.0 and cur_rate >= prev_rate * 2.0:
+        return 3
+
+    # Default to modest gain.
+    return 2
+
+
+_VELOCITY_FLAT_EPSILON: float = 1.0
+"""Below 1 like/hour absolute delta between consecutive snapshots, treat
+as flat. The §13 noise-floor discipline applies — small per-hour rates
+are not statistically distinguishable from zero on a single post."""
+
+
+# Timing tier boundaries from §29.3:
+#
+#   Early (3)      | within 30 min if author follower count ≥ _LARGE_AUTHOR_FLOOR
+#                  | within 6h    otherwise
+#   Within  (2)    | within 4h if large; within 24h if small-niche
+#   Late    (1)    | within 12h if large; within 72h if small-niche
+#   Past    (0)    | beyond
+#
+# These are deliberate, calibratable numbers; the spec gives the bookends
+# (first 30 min / first 6h) and leaves the in-between cell anchors as
+# implementation choices. Tightened during Phase 7 acceptance review if
+# §29.3 is amended.
+_LARGE_AUTHOR_FLOOR: int = 5_000
+
+_TIMING_BANDS_LARGE: tuple[tuple[int, int], ...] = (
+    (30, 3),       # ≤ 30 minutes → 3
+    (4 * 60, 2),   # ≤ 4 hours    → 2
+    (12 * 60, 1),  # ≤ 12 hours   → 1
+)
+_TIMING_BANDS_SMALL: tuple[tuple[int, int], ...] = (
+    (6 * 60, 3),    # ≤ 6 hours   → 3
+    (24 * 60, 2),   # ≤ 24 hours  → 2
+    (72 * 60, 1),   # ≤ 72 hours  → 1
+)
+
+
+def timing_score(
+    post_age_minutes: int,
+    target_author_follower_count: int | None,
+) -> int:
+    """Map post age + author tier into the §29.3 timing dimension.
+
+    Returns 0..3 per the §29.3 Timing rubric. Author tier determines the
+    relevant band table:
+
+    * Large account (follower_count >= 5,000) → tighter optimal window
+      (first 30 min for "early", within 4h for "within window").
+    * Small-niche account (follower_count < 5,000 OR NULL) → wider window
+      (first 6h for "early", within 24h for "within window").
+
+    Negative ``post_age_minutes`` is clamped to 0 (a freshly-posted
+    candidate registers as maximally early).
+    """
+    age = max(0, int(post_age_minutes or 0))
+    is_large = (
+        target_author_follower_count is not None
+        and int(target_author_follower_count) >= _LARGE_AUTHOR_FLOOR
+    )
+    bands = _TIMING_BANDS_LARGE if is_large else _TIMING_BANDS_SMALL
+    for cutoff_minutes, score in bands:
+        if age <= cutoff_minutes:
+            return score
+    return 0
+
+
+# Action downgrade ladder for the low-timing modifier. The 'skip' case is
+# a fixed point — already at floor.
+_DOWNGRADE_ONE_TIER: dict[RecommendedAction, RecommendedAction] = {
+    "reply_now": "reply_if_time",
+    "reply_if_time": "consider",
+    "consider": "skip",
+    "skip": "skip",
+}
+
+
+def apply_velocity_timing_modifiers(
+    base_engagement_surface: int,
+    base_recommended_action: RecommendedAction,
+    velocity: int | None,
+    timing: int | None,
+) -> tuple[int, RecommendedAction]:
+    """Apply the §29.3 trailing modifiers post-base-resolver.
+
+    Rules per §29.3:
+
+    * High velocity (velocity_score >= 2) upgrades engagement_surface_score
+      by one tier, capped at 3.
+    * Low timing (timing_score < 2) downgrades recommended_action by one
+      tier (reply_now → reply_if_time → consider → skip → skip).
+
+    The two modifiers compose independently — the upgraded
+    engagement_surface does NOT re-trigger the base ladder. Spec wording:
+    "The upgrade/downgrade applies AFTER the base four-dimension resolver
+    runs; the modifiers are deterministic and pure-function-testable."
+
+    ``velocity=None`` (pre-Phase-7-history) does NOT apply the upgrade —
+    a missing dimension cannot move a score. ``timing=None`` is the same
+    contract for the downgrade. In practice timing is always computable
+    from age + author tier so ``None`` arrives only via the resolver test
+    enumerating it as one of the four input states; the rule applies
+    consistently regardless of how it got there.
+    """
+    if base_engagement_surface < 0 or base_engagement_surface > 3:
+        raise ValueError(
+            f"base_engagement_surface must be in 0..3; got {base_engagement_surface!r}"
+        )
+    if base_recommended_action not in _DOWNGRADE_ONE_TIER:
+        raise ValueError(
+            f"base_recommended_action must be one of "
+            f"{sorted(_DOWNGRADE_ONE_TIER)}; got {base_recommended_action!r}"
+        )
+
+    adjusted_engagement = base_engagement_surface
+    if velocity is not None and velocity >= 2:
+        adjusted_engagement = min(base_engagement_surface + 1, 3)
+
+    adjusted_action: RecommendedAction = base_recommended_action
+    if timing is not None and timing < 2:
+        adjusted_action = _DOWNGRADE_ONE_TIER[base_recommended_action]
+
+    return adjusted_engagement, adjusted_action
