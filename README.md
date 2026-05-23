@@ -119,3 +119,33 @@ Settings worth knowing:
 - `blog_export_default_directory` (default `data/blog_exports/`) — prefill for the §14.15 Export dialog's target-path picker. Relative to repo root unless absolute.
 - `blog_repurposing_plagiarism_check_enabled` (default `true`) — when true, blog→X repurposing outputs run through the §28.29 deterministic plagiarism floor against the source blog body. **Disable only for testing.** Leaving the guard on is the point of having it.
 - `blog_agent_max_draft_iterations` (default `3`) — informational ceiling on consecutive `draft_blog` calls within a single editing session. UI surfaces a soft warning at this count; not enforced in code.
+
+## X API reads (Phase 7)
+
+Phase 7 wires the X API as the *read* path (`spec.md` §17 Phase 7, §25 Phase 7, §29.1 Phase 7 block). Account snapshots, recent-post imports, hourly metrics refresh, and reply-target metrics refresh now have a programmatic option. Manual entry remains the always-available fallback — every API path has a separately-tested manual-equivalent path that survives `data_collection_mode = 'manual'`.
+
+**What ships:**
+
+- **`app/x_client.py`** — shared subprocess wrapper around the `xurl` CLI. The dashboard never holds OAuth tokens; xurl stores them under `~/.xurl/` and attaches the bearer header on every invocation. Typed exceptions (`XApiRateLimited` / `XApiNotFound` / `XApiUnavailable`) so callers can branch on failure mode. Every call logs to `raw_api_responses` for audit + the Settings "Recent X API failures" panel. See `docs/X_API_SETUP.md` for install + `xurl auth login` scope rationale.
+- **Four scheduled jobs (`scripts/`, `app/jobs/`)** — `collect_account_snapshot.py` (daily 09:00 ET), `import_recent_posts.py` (daily 09:05 + one-shot `--backfill` with audit-row idempotency gate), `post_metrics_refresh.py` (hourly, staleness-tier priority queue), `reply_target_metrics_refresh.py` (hourly, 404 → `status='target_deleted'`, 429 keeps `last_checked_at_utc` stable). Each writes a `scheduled_job` audit-log row at run-end with row counts + rate-limit hits + runtime.
+- **launchd plists under `launchd/`** — **NOT auto-loaded.** Daniel runs `launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.<job>.plist` per job after consent. `docs/SCHEDULED_JOBS.md` has the runbook (prerequisites, exact invocations, failure-mode matrix, symmetric unload).
+- **Six-dimension resolver (§29.3)** — `velocity_score(snapshots)` + `timing_score(post_age_minutes, follower_count)` + `apply_velocity_timing_modifiers` compose with the base 4-dim resolver. High velocity bumps `engagement_surface_score` +1 (cap 3); low timing downgrades `recommended_action` by one tier. Base ladder runs FIRST, modifiers AFTER. The pure-function 4⁶ = **4,096-combo test** in `tests/test_reply_target_resolver.py` enumerates every cell against an independent oracle.
+- **Thread-classifier lint (§29.10) — NEW** — `thread_classifier_lint` in `app/agent/lint.py`. **Distinct from** the Phase 5.9 §28.18 `reply_quality_lint` (draft-side; untouched). The new lint categorizes the *target post's thread quality* before drafting: `ragebait` OR `hijacking_required_to_mention_stir` → `lint_blocked=true`; `meme_with_no_serious_reply_path` + `low_quality_reply_thread` are signals (each subtracts 1 from `reply_opportunity_score`). Gated by `reply_target_lint_enabled` setting.
+- **Force-draft override UI (§29.7)** — when `lint_blocked=1`, the Reply Target Queue dims the row and disables "Draft reply"; a "Force-draft (overrides lint)" affordance prompts for a **mandatory** reason. Submit writes `reply_targets.force_drafted=1 + force_drafted_reason`, logs an `audit_logs` row (`category='data'`, `event_type='lint_force_drafted'`), then hands off to Agent Chat.
+- **Q1 programmatic auto-pulls (§28.20 / §28.24 / §28.25)** — `score_replier_pool(auto_scan=True)` calls `/2/tweets/search/recent?query=conversation_id:<id>`; `_analyze_account_to_dict(auto_pull=True)` chains the user + recent-tweets endpoints; `_audit_profile_to_dict(auto_pull_bio=True)` pulls Daniel's bio. All three: manual paste is the always-available fallback (auto_* = False); X API failure returns `status='failed'` with a rationale so the caller can prompt for paste.
+- **Settings panel** — `app/pages/7_Settings.py` gains a "Data sources & X API health" section above the Audit log: mode echo, per-job last-refresh timestamps, "Recent X API failures (last 7 days)" reading `raw_api_responses` filtered by `status_code >= 400`.
+
+### One-time setup (Phase 7)
+
+1. `brew install xurl`, then `xurl auth login` with scopes `tweet.read users.read offline.access`. See `docs/X_API_SETUP.md`.
+2. `uv run python -m scripts.init_db` — applies migration 018; `data_collection_mode` flips to `'api'` and the five new settings rows seed.
+3. `mkdir -p data/logs && uv run python -m scripts.import_recent_posts --backfill` — one-shot post-history import. Re-runs are idempotent (audit gate).
+4. Per job you want active: `cp launchd/com.scalinity.xgrowth.<job>.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.<job>.plist`. None of the four plists are loaded automatically.
+
+Settings worth knowing:
+
+- `data_collection_mode` (default `'api'` post-Phase-7) — `'manual'` disables scheduled jobs (jobs no-op cleanly). Manual paths always remain available regardless.
+- `reply_target_metrics_refresh_interval_minutes` / `post_metrics_refresh_interval_minutes` (default `60`) — paired with `StartInterval` in the matching launchd plist. Change both in lockstep.
+- `combined_ai_monthly_cost_ceiling_usd` (default `30.0`) — supersedes the historical $25 Anthropic-only ceiling. Phase 9 Grok spend accumulates into the same row.
+- `x_api_rate_limit_window_minutes` (default `15`) / `x_api_recent_failures_visible_days` (default `7`) — Settings panel lookback bounds.
+- `reply_target_lint_enabled` (default `true`) — flip to `false` to skip the §29.10 thread-classifier lint (cost-saving toggle; not recommended for normal use).
