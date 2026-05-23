@@ -240,7 +240,8 @@ _EMOJI_CLASS = "[\\U0001F300-\\U0001FAFF\\u2700-\\u27BF\\u2764]"
 # as "forced". Carrying the enum explicitly in the third slot eliminates
 # the fallback risk; the offline matcher reads field [2] directly.
 _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str, str], ...] = (
-    # ---- Phase 5.9 original three categories ----
+    # ---- Phase 5.9 original three categories (selfishly_self_promoting,
+    # ----  ai_tasting, single-word forced) ----
     (
         # RV2-26: bounded character class instead of .* — adversarial inputs.
         r"\bgreat\s+(post|thread|take)!?\s*" + _EMOJI_CLASS + r"[^.\n]{0,200}\b(check|stop\s+by|visit|see)\b",
@@ -253,11 +254,6 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str, str], ...] = (
         "selfishly_self_promoting",
     ),
     (
-        r"\b(amazing|incredible|love\s+this|fire|absolute\s+banger)!?\s*" + _EMOJI_CLASS + r"+\s*$",
-        "forced: emoji-led affirmation with no substantive content",
-        "forced",
-    ),
-    (
         r"^\s*(this|that|so\s+true|exactly|💯|🔥)\.?\s*$",
         "forced: single-word affirmation with no substance",
         "forced",
@@ -266,6 +262,27 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str, str], ...] = (
         r"\b(as\s+an\s+ai|i\s+am\s+an\s+ai|let\s+me\s+know\s+if\s+you'd\s+like\s+me\s+to)\b",
         "AI-tasting: explicit LLM-template phrasing",
         "ai_tasting",
+    ),
+    # ---- Phase 10 W6 — emoji_as_personality moved BEFORE the legacy
+    # "emoji-led affirmation" forced pattern so the more-specific Phase 10
+    # label catches "Absolute banger 🔥🔥" / "Love this 🔥✨💯" first.
+    # The legacy forced pattern below now only fires on hits that
+    # emoji_as_personality didn't already claim (e.g. "Amazing!" with a
+    # single emoji at end-of-line).
+    (
+        # 2+ consecutive decorative emoji used for tone rather than
+        # literal meaning. The §29.10 _EMOJI_CLASS captures the
+        # codepoints; this rule fires on chains of them.
+        r"(?:" + _EMOJI_CLASS + r"\s*){2,}",
+        "emoji_as_personality: decorative emoji chain (2+ in a row) used for tone",
+        "emoji_as_personality",
+    ),
+    # Legacy "amazing! 🔥" forced pattern — fires only when
+    # emoji_as_personality already missed (1 emoji at end-of-line).
+    (
+        r"\b(amazing|incredible|love\s+this|fire|absolute\s+banger)!?\s*" + _EMOJI_CLASS + r"+\s*$",
+        "forced: emoji-led affirmation with no substantive content",
+        "forced",
     ),
     # ---- Phase 10 — eight new categories from Daniel's voice anchor ----
     # engagement_bait: curiosity gap framings that promise a payoff the
@@ -348,14 +365,10 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str, str], ...] = (
         "diving_preamble: throat-clearing opener instead of a concrete first sentence",
         "diving_preamble",
     ),
-    # emoji_as_personality: 2+ consecutive decorative emoji (not a
-    # thumbs-up on a real artifact). The §29.10 _EMOJI_CLASS captures
-    # the codepoints; this rule fires on chains of them.
-    (
-        r"(?:" + _EMOJI_CLASS + r"\s*){2,}",
-        "emoji_as_personality: decorative emoji chain (2+ in a row) used for tone",
-        "emoji_as_personality",
-    ),
+    # emoji_as_personality: moved EARLIER in the table (above the
+    # legacy "emoji-led affirmation" forced pattern) so the
+    # more-specific Phase 10 label catches multi-emoji decoration first.
+    # See the W6 comment block above for the rationale.
     # hedging_that_erases: confidence-eroding strings. Two or more
     # hedges in close proximity is the tell (a single "maybe" alone
     # is honest; "kind of, sort of, maybe, no expert but…" is the

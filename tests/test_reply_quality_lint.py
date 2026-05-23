@@ -43,7 +43,10 @@ from app.agent.tools import _save_draft_reply
     [
         ("Great post! 🔥 Check out my stuff at example.com", "selfishly_self_promoting"),
         ("Stop by my site for more thoughts on this.", "selfishly_self_promoting"),
-        ("Absolute banger! 🔥🔥", "forced"),
+        # Phase 10 W6 — multi-emoji decoration is now caught by the
+        # more-specific emoji_as_personality category (it used to fall
+        # through to the legacy "emoji-led affirmation" forced pattern).
+        ("Absolute banger! 🔥🔥", "emoji_as_personality"),
         ("This.", "forced"),
         ("As an AI, I think this is interesting.", "ai_tasting"),
         ("Let me know if you'd like me to expand on that.", "ai_tasting"),

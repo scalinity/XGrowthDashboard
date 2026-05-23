@@ -504,6 +504,33 @@ def test_reply_quality_failure_mode_enum_matches_schema(
     assert len(schema_values) == 11
 
 
+@pytest.mark.parametrize(
+    ("text", "expected_mode"),
+    [
+        # Phase 10 W6 — these MUST resolve to emoji_as_personality,
+        # not the legacy "forced" pattern. Two-or-more decorative
+        # emoji is the W6 fix's reachability case.
+        ("Absolute banger 🔥🔥", "emoji_as_personality"),
+        ("Love this 🔥✨💯", "emoji_as_personality"),
+        ("Amazing! 🔥🔥🔥", "emoji_as_personality"),
+        # The legacy "single emoji at end-of-line" still routes to
+        # forced (the W6 fix only reordered for multi-emoji cases).
+        ("Amazing! 🔥", "forced"),
+    ],
+)
+def test_emoji_as_personality_reachable_before_legacy_forced(
+    text: str, expected_mode: str
+) -> None:
+    """W6 regression — multi-emoji decoration must reach the more-specific
+    emoji_as_personality label rather than fall through to the legacy
+    forced pattern."""
+    result = lint._offline_reply_quality(text)
+    assert result.passed is False, f"expected failure for: {text!r}"
+    assert result.failure_mode == expected_mode, (
+        f"text={text!r}: expected {expected_mode}, got {result.failure_mode}"
+    )
+
+
 def test_failure_mode_enum_has_eleven_canonical_values() -> None:
     """REPLY_QUALITY_FAILURE_MODES is the single source of truth."""
     assert len(lint.REPLY_QUALITY_FAILURE_MODES) == 11
