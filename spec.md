@@ -619,7 +619,7 @@ reason = "Manual correction from X profile screenshot"
 
 ### `raw_api_responses`
 
-Preserves raw responses for auditability. Empty until V1.1 (xurl/API).
+Preserves raw responses for auditability. Empty until Phase 7 (xurl/X API reads); see §29.12 for the parallel `grok_api_responses` audit table introduced by Phase 9.
 
 | Column                  | Type                | Notes                                                              |
 | ----------------------- | ------------------- | ------------------------------------------------------------------ |
@@ -2266,7 +2266,7 @@ not `0`.
 
 9. **Raw response preservation**
 
-   * Preserve raw API responses where feasible. (Empty until V1.1.)
+   * Preserve raw API responses where feasible. (Empty until Phase 7.)
 
 10. **Manual correction support**
 
