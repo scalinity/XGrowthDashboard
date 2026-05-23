@@ -103,6 +103,12 @@ def _transition_status_cb(*, blog_id: int) -> None:
         st.session_state["editor_save_error"] = None
     except _blogs.BlogError as exc:
         st.session_state["editor_save_error"] = str(exc)
+    # P6R-12: clear the persisted selectbox value so it re-initializes
+    # from the legal-next-statuses list on the next render. Without
+    # this, navigating to a different blog whose legal next-status list
+    # doesn't include the persisted value raises StreamlitAPIException.
+    if f"editor_status_{blog_id}" in st.session_state:
+        del st.session_state[f"editor_status_{blog_id}"]
 
 
 def _agent_outline_cb(*, blog_id: int) -> None:
