@@ -551,25 +551,46 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = connect(args.db_path) if args.db_path else connect()
     started = time.perf_counter()
+    # P9R-7: pre-allocate a "did-not-start" summary so the finally
+    # block can ALWAYS write the scheduled_job audit row even if run()
+    # raises an unexpected exception. Defeats the §28.30 audit-invariant
+    # gap where a hard crash inside run() left no audit_log row at all.
+    summary: dict[str, Any] = {
+        "queries_run": 0,
+        "candidates_discovered": 0,
+        "error": "did_not_start",
+        "elapsed_seconds": 0.0,
+    }
+    unhandled_exc: BaseException | None = None
     try:
         summary = run(conn, max_results_per_query=args.max_results)
-        success = summary["error"] is None
-        audit_log.log(
-            conn,
-            event_category="scheduled_job",
-            event_type="grok_discovery_sweep",
-            target_type="job",
-            target_id="grok_discovery_sweep",
-            details=summary,
-            success=success,
-            error_message=summary.get("error"),
-        )
-        _log.info("grok_discovery_sweep summary: %s", summary)
-        return 0 if success else 1
+    except BaseException as exc:  # noqa: BLE001 — catch-all for audit safety
+        unhandled_exc = exc
+        summary["error"] = f"unhandled exception in run(): {exc!r}"[:500]
+        summary["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        _log.exception("grok_discovery_sweep: unhandled exception in run()")
     finally:
+        try:
+            success = summary.get("error") is None
+            audit_log.log(
+                conn,
+                event_category="scheduled_job",
+                event_type="grok_discovery_sweep",
+                target_type="job",
+                target_id="grok_discovery_sweep",
+                details=summary,
+                success=success,
+                error_message=summary.get("error"),
+            )
+            _log.info("grok_discovery_sweep summary: %s", summary)
+        except Exception:  # noqa: BLE001 — audit-write best-effort
+            _log.exception("grok_discovery_sweep: failed to write audit row")
         elapsed = round(time.perf_counter() - started, 3)
         _log.info("grok_discovery_sweep completed in %ss", elapsed)
         conn.close()
+    if unhandled_exc is not None:
+        raise unhandled_exc
+    return 0 if summary.get("error") is None else 1
 
 
 if __name__ == "__main__":
