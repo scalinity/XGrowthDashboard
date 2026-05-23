@@ -6807,7 +6807,8 @@ target_text text                            -- nullable at MVP if Daniel pastes 
 target_created_at_utc text                  -- approximate; backfilled on API enrichment
 post_age_minutes integer                    -- computed at last_checked_at
 
--- Engagement snapshot (latest known; copied from snapshots in V1.1+)
+-- Engagement snapshot (latest known; copied from reply_target_snapshots by the
+-- metrics-refresh job in Phase 7+)
 last_checked_at_utc text not null
 like_count integer
 reply_count integer
@@ -6821,9 +6822,9 @@ relevance_score integer
 engagement_surface_score integer
 saturation_score integer
 reply_opportunity_score integer
-velocity_score integer                      -- V1.1+; NULL until metrics-refresh runs
-timing_score integer                        -- V1.1+; NULL until metrics-refresh runs
-audience_quality_score integer              -- V1.2+; NULL until classifier runs
+velocity_score integer                      -- populated by Phase 7 metrics-refresh
+timing_score integer                        -- populated by Phase 7 metrics-refresh
+audience_quality_score integer              -- V1.2+ deferred; NULL until classifier ships
 
 recommended_action_label text
   -- 'reply_now' | 'reply_if_time' | 'consider' | 'skip'
@@ -6836,12 +6837,22 @@ audience text                               -- v1: icp / other (thread's audienc
 reply_intent text                           -- v1 enum, see §29.5
 topic_tags_json text                        -- free-form tags
 
--- Lint pass output (V1.1+; mirrors §28.2 rule #12 pattern)
+-- Thread-classifier lint output (Phase 7; mirrors §28.2 rule #12 pattern)
+-- NOTE: distinct from the §28.18 draft-side reply_quality_lint shipped in 5.9.
+-- This lint categorizes the TARGET post's thread quality before drafting begins;
+-- §28.18 categorizes the DRAFT's reply quality.
 lint_thread_classification_json text
   -- { ragebait: bool, meme_with_no_serious_reply_path: bool,
   --   low_quality_reply_thread: bool, hijacking_required: bool,
   --   rationale: string }
+lint_category text                          -- denormalized primary lint category for fast filter:
+                                            -- NULL | 'ragebait' | 'meme_with_no_serious_reply_path' |
+                                            -- 'low_quality_reply_thread' | 'hijacking_required_to_mention_stir'
 lint_blocked boolean default false
+
+-- Force-draft override (Phase 7; when lint_blocked=true, Daniel can override)
+force_drafted boolean default false
+force_drafted_reason text                   -- mandatory when force_drafted=true; logged to audit_logs
 
 -- Status lifecycle
 status text not null default 'candidate'
@@ -6867,7 +6878,7 @@ index(status, recommended_action_score desc, last_checked_at_utc desc)
 index(reply_intent) where status = 'posted'
 ```
 
-#### `reply_target_snapshots` (V1.1+)
+#### `reply_target_snapshots` (Phase 7, migration 018)
 
 ```text
 id integer primary key
@@ -6894,7 +6905,7 @@ in_reply_to_reply_target_id integer
 reply_intent text                           -- v1 enum, see §29.5; only meaningful when type='reply'
 ```
 
-Manually-posted replies that bypass the queue leave `in_reply_to_reply_target_id` NULL. The Queue's "Mark posted" action sets it; the V1.2+ publish-flow click-handler sets it as part of the §28.10 atomic transaction.
+Manually-posted replies that bypass the queue leave `in_reply_to_reply_target_id` NULL. The Queue's "Mark posted" action sets it; the Phase 8 publish-flow click-handler sets it as part of the §28.10 atomic transaction.
 
 #### `reply_sessions` additions (one new column)
 
@@ -6905,6 +6916,7 @@ target_reply_target_ids_json text           -- JSON array of reply_target_id wor
 #### `settings` additions (§10.2)
 
 ```text
+-- Phase 5.6 MVP
 engagement_surface_floor_likes integer default 15
 engagement_surface_pct_of_author real default 0.001
 engagement_surface_high_floor_likes integer default 50
@@ -6913,7 +6925,32 @@ reply_candidate_review_daily_target integer default 15
 reply_high_engagement_mix_pct real default 0.5
   -- target fraction of shipped replies with engagement_surface_score >= 2
 reply_target_expiry_hours integer default 24
-reply_target_lint_enabled boolean default true   -- V1.1+; can be disabled to save cost
+reply_target_lint_enabled boolean default true
+  -- gates §29.10 thread-classifier lint; can be disabled to save cost
+
+-- Phase 7 (migration 018) — X API reads
+data_collection_mode text default 'api'
+  -- 'manual' | 'api'; default flips to 'api' with this migration
+reply_target_metrics_refresh_interval_minutes integer default 60
+post_metrics_refresh_interval_minutes integer default 60
+combined_ai_monthly_cost_ceiling_usd real default 30.0
+  -- shared infrastructure; both Phase 7 read-job spend and Phase 9 Grok spend
+  -- accumulate into this single ceiling (§28.6)
+x_api_rate_limit_window_minutes integer default 15
+x_api_recent_failures_visible_days integer default 7
+
+-- Phase 8 (migration 019) — X API writes
+publish_via_api_enabled boolean default true
+  -- TRUE: §28.10 publish flow takes the real POST /2/tweets branch.
+  -- FALSE: §28.10 takes the manual-clipboard fallback branch.
+x_write_rate_limit_per_15min integer default 50
+x_write_rate_limit_per_24h integer default 1000
+
+-- Phase 9 (migration 020) — Grok integration
+grok_api_enabled boolean default true
+grok_query_list_json text default '[]'
+  -- JSON array of natural-language queries Daniel maintains via Settings
+grok_discovery_sweep_interval_minutes integer default 120
 ```
 
 ### 29.7 Reply Target Queue — UI
