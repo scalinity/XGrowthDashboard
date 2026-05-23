@@ -7004,9 +7004,11 @@ Filters: status · pillar · reply_intent · recommended_action · author
 | Draft reply | Opens Agent Chat (§14.8) with `score_reply_candidates([this])` and `save_draft_reply` pre-armed. On save: sets `reply_targets.agent_draft_id`, transitions status to `drafted`. |
 | Skip | `status='skipped'`, captures `skip_reason` from a dropdown: `off_topic` / `ragebait` / `saturation` / `cant_add_value` / `target_deleted` / `blocked_by_author` / `other`. |
 | Mark posted (manual mode) | Daniel pastes the posted reply URL. Click-handler parses `x_post_id`, inserts/updates the `posts` row with `type='reply'`, sets `posts.in_reply_to_reply_target_id` and `posts.reply_intent`, transitions `reply_targets.status` to `posted` and sets `posted_reply_post_id`. |
-| Mark posted (V1.2+ API mode) | Goes through the §28.10 publish-flow contract (token-gated, atomic, auditable). On success, all the above happens inside the publish transaction. |
+| Mark posted (Phase 8 API mode) | Goes through the §28.10 publish-flow contract (token-gated, atomic, auditable). On success, all the above happens inside the publish transaction. Manual-clipboard mode is the Settings-selectable fallback (`publish_via_api_enabled = FALSE`). |
 | Expire (auto) | App-boot job + once-daily job: any `status='candidate'` with `last_checked_at_utc + reply_target_expiry_hours < now()` → `status='expired'`. |
-| Target deleted | V1.1+: metrics-refresh detects 404 on `target_x_post_id` → `status='target_deleted'`. If a draft exists, surface "draft orphaned" banner per §29.11. MVP: Daniel uses Skip with reason `target_deleted` when he encounters a dead URL. |
+| Target deleted | Phase 7+: `reply_target_metrics_refresh` job detects 404 on `target_x_post_id` → `status='target_deleted'`. If a draft exists, surface "draft orphaned" banner per §29.11. Pre-Phase-7: Daniel uses Skip with reason `target_deleted` when he encounters a dead URL. |
+| Force-draft (Phase 7+, overrides §29.10 lint_blocked) | When `lint_blocked=true`, the row dims and "Draft reply" disables. "Force-draft (overrides lint)" affordance prompts for mandatory `force_drafted_reason`; on submit, sets `force_drafted=true`, writes the reason to `reply_targets.force_drafted_reason`, logs a `data`-category `audit_logs` row with the reason, and proceeds with the normal draft flow. |
+| Grok badge (Phase 9+) | Rows where `discovered_via='grok_semantic'` render a small `grok_semantic` badge next to the candidate text. The Queue filter dropdown gains a `discovered_via` filter with options `manual` / `agent_curated_account` / `replier_under_thread` / `grok_semantic` / (all). |
 
 §14.2 Next Rep continues to show the top 3–5 `reply_now` candidates inline; the dedicated Queue is the deep view.
 
@@ -7014,10 +7016,10 @@ Filters: status · pillar · reply_intent · recommended_action · author
 
 The two existing agent tools (§28.4) extend rather than duplicate:
 
-* **#6 `score_reply_candidates`** — input now optionally accepts either a candidate dict (URL + text + observed metrics) or an existing `reply_target_id`. Returns the four MVP scores, `recommended_action_label`, and `score_rationale`. Side effect: persists the scoring on the `reply_targets` row, creating the row if the input was a fresh candidate. V1.1+: also persists the lint classification and may set `lint_blocked=true`.
+* **#6 `score_reply_candidates`** — input now optionally accepts either a candidate dict (URL + text + observed metrics) or an existing `reply_target_id`. Returns the four MVP scores, `recommended_action_label`, and `score_rationale`. Side effect: persists the scoring on the `reply_targets` row, creating the row if the input was a fresh candidate. Phase 7+: also persists the §29.10 thread-classifier lint classification and may set `lint_blocked=true`; populates `velocity_score` + `timing_score` when snapshot history exists.
 * **#7 `record_reply_target`** — signature unchanged; now writes to the expanded schema. New columns default per the schema above.
 
-**No new agent tools are added for §29.** The agent never gets a tool that posts a reply directly — same contract as §28.4 #10/#11. The post-reply path (V1.2+) goes through the publish-flow click-handler.
+**No new agent tools are added for §29.** The agent never gets a tool that posts a reply directly — same contract as §28.4 #10/#11. The post-reply path (Phase 8) goes through the publish-flow click-handler.
 
 **System prompt changes (§28.3):**
 
@@ -7058,7 +7060,7 @@ The 60/30/10 mix from the original Reply-Target-Finder draft is replaced by a si
 
 ### 29.10 Lint pass — skip / prioritize as enforceable logic, not prose
 
-The skip/prioritize rules from the original draft become an enforcement layer in V1.1+ when an Anthropic client is available for small-model calls. Same pattern as §28.2 rule #12's dark-pattern lint.
+The skip/prioritize rules from the original draft become an enforcement layer in Phase 7 (migration 018) via a small-model call (Haiku, mirroring §28.2 rule #12's dark-pattern lint pattern). This is the **thread-classifier lint** — it categorizes the *target post's thread quality* before Daniel even starts drafting; it is **distinct from** the §28.18 reply-quality lint (shipped Phase 5.9) which categorizes the *draft Daniel writes*. Both lints can run on the same candidate: §29.10 at scoring time decides whether the thread is worth replying into; §28.18 at draft time decides whether Daniel's specific reply is worth posting.
 
 The lint runs once per candidate when it is first scored:
 
@@ -7084,17 +7086,20 @@ The lint runs on a small model (Haiku per §28.2 rule #12 convention), bounded b
 
 | Edge case | Required behavior |
 | --- | --- |
-| Target post deleted between candidate creation and reply post | **V1.1+:** metrics-refresh detects 404 → `status='target_deleted'`. If a `drafted` row exists, surface banner: "target deleted — draft orphaned; choose: delete draft / repurpose as standalone post". **MVP:** no automatic detection; Daniel sees the dead URL when clicking "Open original" and uses Skip with `skip_reason='target_deleted'`. |
-| Target author blocks or restricts replies | **Manual mode:** Daniel discovers at post time; uses Skip with `skip_reason='blocked_by_author'`. **V1.2+ API publish:** X API returns the relevant 403; the publish-flow tool surfaces it the same as any X API auth/permission error per §28.10 step 6. |
+| Target post deleted between candidate creation and reply post | **Phase 7+:** `reply_target_metrics_refresh` job detects 404 → `status='target_deleted'`. If a `drafted` row exists, surface banner: "target deleted — draft orphaned; choose: delete draft / repurpose as standalone post". **Pre-Phase-7:** no automatic detection; Daniel sees the dead URL when clicking "Open original" and uses Skip with `skip_reason='target_deleted'`. |
+| Target author blocks or restricts replies | **Manual mode:** Daniel discovers at post time; uses Skip with `skip_reason='blocked_by_author'`. **Phase 8 API publish:** X API returns the relevant 403; the publish-flow tool surfaces it the same as any X API auth/permission error per §28.10 step 6, with the cold-reply UX (§22) suggesting either prior engagement with the author or the manual-clipboard fallback. |
 | Reply posted manually but Daniel forgets to record URL | The candidate stays `status='drafted'` indefinitely. App-boot job: any `reply_targets` row with `status='drafted'` and `agent_draft_id` older than 24h surfaces a "Did you post this? Record URL or close as skipped" banner in the Queue. |
 | Candidate goes stale (older than `reply_target_expiry_hours`) | App-boot job + once-daily job: `status='candidate' AND last_checked_at_utc + reply_target_expiry_hours < now()` → `status='expired'`, `expired_at_utc=now()`. Expired rows remain queryable for postmortem analysis (e.g., "did skipping expired candidates correlate with missed growth?"). |
-| `reply_targets` table growth unbounded | Daily VACUUM job (extension to §17 V1.1 scheduling) deletes rows where `status IN ('skipped','expired','target_deleted') AND discovered_at_utc < now() - 90 days`. Posted candidates stay (joined via `posted_reply_post_id` for postmortem audit). |
+| `reply_targets` table growth unbounded | Daily VACUUM job (extension to §17 Phase 7 scheduling) deletes rows where `status IN ('skipped','expired','target_deleted') AND discovered_at_utc < now() - 90 days`. Posted candidates stay (joined via `posted_reply_post_id` for postmortem audit). |
 | Daniel drafts a reply, then deletes the candidate | Treat the draft as a standalone-reply orphan: the `posts` row stays; `posts.in_reply_to_reply_target_id` becomes NULL by the ON DELETE SET NULL rule. Daniel can re-link via the Queue or repurpose the draft. |
 | Two candidates added for the same target URL | The `unique(target_post_url)` index rejects the second insert. The "Add candidate" UI surfaces "already in queue — open existing row" instead of creating a duplicate. |
 | Agent attempts to draft a reply against a candidate Daniel has not added | The agent's `save_draft_reply` (§28.4 #5) requires `target_post_url`. If the URL doesn't match an existing `reply_targets` row, the orchestrator first auto-creates the candidate (calling tool #7 internally), scores it (tool #6), then proceeds with `save_draft_reply`. Visible to Daniel as three tool-call blocks in the chat. |
 | Lint pass false-positive blocks a relevant candidate | Daniel's "Force-draft (overrides lint)" proceeds; the override is logged. Day-21 calibration view surfaces all lint blocks and overrides for review: if Daniel is overriding the lint more than 20% of the time, the lint prompt or `reply_target_lint_enabled` setting is the wrong calibration. |
 | Engagement-surface thresholds misfire as Daniel's follower count grows | The day-21 calibration (and every subsequent calibration window from §14.7) re-shows the four threshold settings alongside the actual distribution of `engagement_surface_score` on Daniel's posted replies and a prompt: "is this still the right floor?" |
-| V1.1+ metrics-refresh hits X API rate limit while updating candidates | Refresh job logs the rate-limit hit and skips that candidate's update for this cycle. `last_checked_at_utc` stays at its previous value. No silent score drift. |
+| Phase 7+ metrics-refresh hits X API rate limit while updating candidates | Refresh job logs the rate-limit hit (`raw_api_responses` + `scheduled_job` audit row) and skips that candidate's update for this cycle. `last_checked_at_utc` stays at its previous value. No silent score drift. Respects `Retry-After` header for backoff. |
+| Phase 9 Grok-discovered candidate fails §29.2 X-API verification | Grok returns a candidate; verification call `xurl /2/tweets/{id}` returns 404 (post deleted between Grok discovery and verification). Candidate rejected; logged to `grok_api_responses.rejection_reason='verification_404'`; never inserted into `reply_targets`. Sweep continues with next candidate. |
+| Phase 9 Grok and X API search surface the same candidate in separate sweeps | The existing `unique(target_x_post_id)` index on `reply_targets` rejects the second insert. First insert wins; `discovered_via` reflects whichever path landed first. Sweep's per-candidate exception handler logs the dedupe and continues. |
+| Phase 9 Grok monthly cost ceiling hit | `combined_ai_monthly_cost_ceiling_usd` reached → `app/grok_client.py` refuses next call; sweep aborts mid-sweep with in-progress-but-unverified candidates dropped (re-discovered next sweep). Settings banner: "Grok paused: combined AI ceiling hit". Anthropic agent calls also pause per §28.6. Manual + X API search paths still work. |
 | Candidate has `target_author_follower_count = NULL` | Engagement-surface formula falls back to floor values. UI labels the score with a footnote: "no author size — using floor thresholds". Score is not penalized, only labeled. |
 | Daniel imports a list of candidates via CSV (V1.5+ "Reply session planner") | CSV import follows the §16 CSV import contract (preview, validate, dedupe by `target_post_url`, rollback). Each row scored on insert via tool #6. |
 
