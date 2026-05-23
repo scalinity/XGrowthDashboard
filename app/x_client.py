@@ -651,6 +651,7 @@ def publish_post_to_x_via_api(
     in_reply_to_x_post_id: str | None = None,
     conn: sqlite3.Connection | None = None,
     retry_attempts: int | None = None,
+    retry_sleep_seconds: float | None = None,
     xurl_bin: str | None = None,
 ) -> dict[str, Any]:
     """POST ``/2/tweets`` via xurl. Return the parsed ``data`` body on success.
@@ -726,7 +727,15 @@ def publish_post_to_x_via_api(
                 attempt += 1
                 if attempt > retry_attempts:
                     break
-                time.sleep(_DEFAULT_WRITE_RETRY_SLEEP_SECONDS)
+                # P8R-13: sleep duration is injectable via kwarg so
+                # tests don't have to patch module state. Default keeps
+                # production behavior unchanged.
+                _sleep_seconds = (
+                    retry_sleep_seconds
+                    if retry_sleep_seconds is not None
+                    else _DEFAULT_WRITE_RETRY_SLEEP_SECONDS
+                )
+                time.sleep(_sleep_seconds)
                 continue
             # Other 4xx (excluding 401 / 403 / 404 / 429 already handled
             # inside `request()`) — surface unchanged.
