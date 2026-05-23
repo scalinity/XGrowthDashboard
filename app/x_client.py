@@ -85,6 +85,31 @@ HttpMethod = Literal["GET", "POST", "PUT", "DELETE"]
 _X_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 
+def _read_timeout_setting(conn: sqlite3.Connection) -> float:
+    """RV2-30: optional setting override for the subprocess timeout.
+
+    Returns the configured value or the module default. Surfaced in
+    Settings → Growth Agent so Daniel can raise the timeout for
+    flaky-network scenarios without code changes.
+    """
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM settings WHERE key = 'x_api_subprocess_timeout_seconds'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return _DEFAULT_TIMEOUT_SECONDS
+    if row is None or row[0] is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    try:
+        val = float(json.loads(row[0]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _DEFAULT_TIMEOUT_SECONDS
+    # Sanity: must be a positive number; cap at 300s (launchd ExitTimeOut).
+    if val <= 0 or val > 300:
+        return _DEFAULT_TIMEOUT_SECONDS
+    return val
+
+
 def validate_x_handle(handle: str) -> str:
     """Return the normalized handle (no @, stripped) or raise ValueError.
 
@@ -247,6 +272,12 @@ def request(
             f"xurl binary {binary!r} not found on PATH; "
             "see docs/X_API_SETUP.md to install + authenticate."
         )
+
+    # RV2-30: honor the optional `x_api_subprocess_timeout_seconds` setting
+    # when the caller didn't pass an explicit override. Daniel can tune
+    # this from Settings for flaky-network scenarios without redeploying.
+    if timeout_seconds == _DEFAULT_TIMEOUT_SECONDS and conn is not None:
+        timeout_seconds = _read_timeout_setting(conn)
 
     # Build the subprocess argv. xurl's CLI: `xurl [--method M] [--data D] <endpoint>`.
     argv: list[str] = [binary]
