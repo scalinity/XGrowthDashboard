@@ -4162,6 +4162,13 @@ See §25 Phases 7, 8, 9 for the full per-phase checklists; the §0 sixth revisio
 | Link has no UTM                                | Store `utm_* = null`; do not infer campaign unless manually annotated |
 | Shortened URL                                  | Preserve original and expanded URL if available                       |
 | Download source unknown                        | Store `attribution_method = unknown`; do not attribute to X           |
+| X API 429 mid-publish (Phase 8)                | Publish flow aborts before §28.10 transaction begins; modal shows "rate-limited until {reset_time}"; the confirmation token stays unconsumed; Daniel retries after the reset. Manual-clipboard fallback always available. |
+| X API 403 on cold reply (Phase 8)              | Publish flow surfaces "X API refused this reply (403). Engage with this author's posts first, or use the manual fallback." Token consumed (X side considers it a real attempt); no `posts` row created. |
+| X API write timeout mid-§28.10 transaction (Phase 8) | Bounded retry per `x_posting_publish_retry_attempts_per_token`; on exhaustion ROLLBACK, set `publish_last_error`, leave token unconsumed if expiry allows. §28.10 crash-recovery scan reconciles on next app boot. |
+| Grok rate-limit mid-sweep (Phase 9)            | Sweep pauses, logs the 429 to `grok_api_responses`, resumes after Retry-After. In-progress candidates already verified are committed; in-progress candidates not yet verified are dropped (re-discovered on next sweep). |
+| Grok candidate fails §29.2 verification (Phase 9) | X API returns 404 when verifying a Grok-discovered candidate's `target_x_post_id` (post deleted between Grok discovery and verification). Candidate rejected, logged to `grok_api_responses.rejection_reason='verification_404'`, never inserted into `reply_targets`. |
+| Grok + X API search surface the same candidate (Phase 9) | Deduplicated at insert via the existing `(target_x_post_id) UNIQUE` constraint on `reply_targets`. First insert wins; second attempt silently drops. `discovered_via` reflects whichever path landed first. |
+| Grok monthly cost ceiling hit (Phase 9)        | `combined_ai_monthly_cost_ceiling_usd` reached → sweep refuses new Grok calls; Settings banner surfaces "Grok paused: combined AI ceiling hit. Raise ceiling or wait for month rollover." Manual + X API search paths still work. |
 | ICP status unclear                             | Leave `is_likely_icp` null; do not infer                              |
 | Builder downloads Stir                         | Count as download; not automatically ICP validation                   |
 | Working parent gives feedback without download | Count qualitative validation separately                               |
