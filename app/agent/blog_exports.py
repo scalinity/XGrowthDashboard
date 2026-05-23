@@ -275,12 +275,22 @@ def _escape_html(text: str) -> str:
 
 
 def _render_inline(text: str) -> str:
-    """Apply inline transforms after the line/block layer has escaped."""
-    out = _INLINE_CODE_RE.sub(lambda m: f"<code>{_escape_html(m.group(1))}</code>", text)
+    """Apply inline transforms after the line/block layer has escaped.
+
+    P6R-4: input is ALREADY HTML-escaped by ``_markdown_to_html_body``
+    (see line that calls ``_render_inline(_escape_html(...))``). Do NOT
+    re-escape captured groups — that produced
+    ``href="...?a=1&amp;amp;b=2"`` (visible literal ``&amp;`` in the
+    browser, broken URL) and ``<code>&amp;lt;foo&amp;gt;</code>``
+    (visible ``&lt;``) for any inline code containing reserved chars.
+    The captured groups are already safe; just splice them into the
+    tag without a second escape pass.
+    """
+    out = _INLINE_CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", text)
     out = _BOLD_RE.sub(lambda m: f"<strong>{m.group(1)}</strong>", out)
     out = _ITALIC_RE.sub(lambda m: f"<em>{m.group(1)}</em>", out)
     out = _LINK_RE.sub(
-        lambda m: f'<a href="{_escape_html(m.group(2))}">{m.group(1)}</a>', out
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', out
     )
     return out
 

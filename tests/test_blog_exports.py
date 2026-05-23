@@ -394,6 +394,51 @@ def test_export_rejects_extension_mismatch(
     ).fetchone()[0] == 0
 
 
+def test_html_export_does_not_double_escape_link_url(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """P6R-4: previously _render_inline re-escaped captured groups
+    that were already HTML-escaped by _markdown_to_html_body. URLs
+    containing & became ?a=1&amp;amp;b=2 in the rendered href —
+    browsers displayed literal &amp; and the link broke."""
+    b = bm.create_blog(db_conn, title="link-test")
+    bm.save_blog(
+        db_conn, b.id,
+        body_markdown="See [docs](https://example.com?a=1&b=2) for more.",
+        created_by="daniel",
+    )
+    for s in ("outlining", "drafting", "editing", "ready"):
+        bm.transition_status(db_conn, b.id, s)
+    target = tmp_path / "link.html"
+    be.export(db_conn, blog_id=b.id, format="html", target_path=target)
+    html = target.read_text(encoding="utf-8")
+    # The href must carry a SINGLE-escaped & (i.e. &amp;), not the
+    # double-escaped &amp;amp;.
+    assert 'href="https://example.com?a=1&amp;b=2"' in html
+    assert "&amp;amp;" not in html
+
+
+def test_html_export_does_not_double_escape_inline_code(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """P6R-4: inline code spans containing reserved chars previously
+    rendered as <code>&amp;lt;foo&amp;gt;</code> (visible &lt; in
+    browser) instead of <code>&lt;foo&gt;</code>."""
+    b = bm.create_blog(db_conn, title="code-test")
+    bm.save_blog(
+        db_conn, b.id,
+        body_markdown="Use the `<Foo>` tag carefully.",
+        created_by="daniel",
+    )
+    for s in ("outlining", "drafting", "editing", "ready"):
+        bm.transition_status(db_conn, b.id, s)
+    target = tmp_path / "code.html"
+    be.export(db_conn, blog_id=b.id, format="html", target_path=target)
+    html = target.read_text(encoding="utf-8")
+    assert "<code>&lt;Foo&gt;</code>" in html
+    assert "&amp;lt;" not in html
+
+
 def test_export_accepts_relative_path_inside_root(
     db_conn: sqlite3.Connection, tmp_path: Path,
 ) -> None:
