@@ -61,6 +61,7 @@ run; Anthropic agent calls also pause per the same combined ceiling
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -108,8 +109,15 @@ _MAX_RATE_LIMIT_WAIT_SECONDS: float = 90.0
 # Projected per-call cost guess for the §28.6 preflight. Grok-4.3 is
 # $1.25/$2.50 per million tokens; a typical search call costs <$0.01.
 # We use $0.02 as a defensive guess that won't slip past the cap by a
-# rounding error.
-PROJECTED_CALL_COST_GUESS_USD: float = 0.02
+# rounding error. P9R-13: prefixed with GROK_ so it doesn't shadow
+# app.agent.cost.PROJECTED_CALL_COST_GUESS_USD (Anthropic side, $0.05)
+# — same name, different value pre-fix.
+GROK_PROJECTED_CALL_COST_GUESS_USD: float = 0.02
+
+# Kept as a name alias for backward compatibility with any external
+# caller that imported the bare name. Internal Phase 9 code now uses
+# GROK_PROJECTED_CALL_COST_GUESS_USD exclusively.
+PROJECTED_CALL_COST_GUESS_USD: float = GROK_PROJECTED_CALL_COST_GUESS_USD
 
 # Status-code based rejection_reason categorization (matches the CHECK
 # constraint in migration 021 on grok_api_responses.rejection_reason).
@@ -120,11 +128,13 @@ _REJECTION_OTHER: str = "http_error_other"
 
 # X post URL → (handle, post_id) extraction. Matches both x.com and
 # twitter.com hostnames (Grok cites either). Used to parse the
-# citations array into typed candidates.
+# citations array into typed candidates. P9R-15: trailing alternation
+# now also accepts '#' so fragment-anchored URLs (e.g.
+# https://x.com/foo/status/123#m) don't silently drop.
 _X_URL_RE = re.compile(
     r"^https?://(?:www\.)?(?:x|twitter)\.com/"
     r"(?P<handle>[A-Za-z0-9_]{1,15})/status/(?P<post_id>\d+)"
-    r"(?:/|$|\?)"
+    r"(?:/|$|\?|#)"
 )
 
 
@@ -153,12 +163,18 @@ class GrokRateLimitError(GrokError):
         self.retry_after_seconds = retry_after_seconds
 
 
-class GrokCostCeilingError(GrokError):
+class GrokCostCeilingError(GrokError, cost.MonthlyCostCeilingExceeded):
     """§28.6 combined Anthropic + xAI ceiling reached — refuse new call.
 
     Raised by the preflight check before the HTTP request fires. No
     Grok call is made; the audit row is logged with
     ``rejection_reason='cost_ceiling_hit'`` and zero token usage.
+
+    P9R-44: multiple-inherits BOTH ``GrokError`` (so the sweep's
+    ``except grok_client.GrokError`` ladder still routes it) AND
+    ``cost.MonthlyCostCeilingExceeded`` (so a caller that uses the
+    Anthropic-side ceiling-exception name catches the cross-provider
+    invariant uniformly). Pure marker — no new fields.
     """
 
 
@@ -178,6 +194,19 @@ class GrokCandidate:
     ``app/jobs/grok_discovery_sweep.py``. ``observed_metrics`` here is
     deliberately empty — included only for forward-compat with the
     spec text shape.
+
+    P9R-55 — DO NOT CONSUME ``observed_metrics`` IN ANY SCORE PATH.
+    The field exists ONLY because the §29.12 spec text named it as
+    part of the candidate-dict shape. Grok is discovery, not
+    measurement — every metric on a reply_targets row MUST come from
+    the X API verification step (§29.2). A future maintainer who
+    looks at the empty dict and thinks "I'll just trust Grok's
+    numbers this once" defeats the load-bearing source-of-truth
+    invariant. The Phase 9 happy-path test (
+    test_happy_path_grok_candidate_ingestion) deliberately passes
+    ``observed_metrics={"like_count": 99}`` and asserts the stored
+    value is the X API's (42) — that test will fail loudly if
+    anyone wires observed_metrics into the score path.
     """
 
     target_x_post_id: str
@@ -306,8 +335,16 @@ def search(
     # spend would breach the cap. The audit row records the refusal so
     # Settings → Recent Grok failures shows it (Daniel can disambiguate
     # ceiling-hit from rate-limit / 5xx without checking another panel).
-    if conn is not None and cost.is_combined_ceiling_breached(
-        conn, projected_call_cost_usd=PROJECTED_CALL_COST_GUESS_USD
+    if conn is None:
+        # P9R-26: make conn=None bypass loud. Production callers always
+        # pass a conn so the ceiling check fires; this branch covers
+        # narrow unit tests + future-misuse defense.
+        _LOG.warning(
+            "grok_client.search called with conn=None — §28.6 ceiling "
+            "preflight skipped. Production callers MUST pass a conn."
+        )
+    elif cost.is_combined_ceiling_breached(
+        conn, projected_call_cost_usd=GROK_PROJECTED_CALL_COST_GUESS_USD
     ):
         _log_grok_response(
             conn,
@@ -494,6 +531,30 @@ def search(
             rejection_reason=None,
             duration_ms=duration_ms,
         )
+        # P9R-19 (TOCTOU mitigation): the §28.6 preflight ran milliseconds
+        # before urlopen; a concurrent Anthropic call could have crossed
+        # 100% in the interval. Re-check AFTER the audit-row write so the
+        # newly-recorded usage is included. If the cap is now breached,
+        # raise GrokCostCeilingError so the sweep's outer loop logs +
+        # surfaces "ceiling crossed mid-sweep" instead of returning
+        # silently. The candidates we just spent tokens on are still
+        # returned for the audit, but the caller knows the next call
+        # must refuse.
+        if conn is not None and cost.is_combined_ceiling_breached(conn):
+            _log_grok_response(
+                conn,
+                query=query,
+                request_payload={"phase": "postcall_ceiling_recheck"},
+                response_status_code=None,
+                response_body=None,
+                rate_snapshot=None,
+                rejection_reason=_REJECTION_COST_CEILING,
+                duration_ms=0,
+            )
+            _LOG.warning(
+                "grok_client.search: ceiling crossed mid-call (TOCTOU) — "
+                "this call's tokens were spent, future calls refused."
+            )
         _LOG.info(
             "grok_client.search query=%r candidates=%d duration_ms=%d",
             query[:80],
@@ -517,13 +578,17 @@ def _http_post_json(
     payload: dict[str, Any],
     api_key: str,
     timeout_seconds: float,
-) -> tuple[int | None, dict[str, Any] | None, float | None]:
+) -> tuple[int, dict[str, Any] | None, float | None]:
     """POST JSON to ``url`` with Bearer auth. Return (status, body, retry_after).
 
     Raises ``GrokUnavailable`` only on connection-level failures (DNS,
     refused, timeout, non-JSON body). HTTP-level errors (4xx/5xx) are
     returned with the parsed body so the caller can decide whether to
     retry.
+
+    P9R-56: return type tightened — ``status`` is guaranteed ``int``
+    because the only ``None`` path used to be connection-level failure,
+    which now raises ``GrokUnavailable`` instead.
     """
     body_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -542,13 +607,15 @@ def _http_post_json(
             raw = resp.read()
             retry_after = _parse_retry_after(resp.headers)
     except urllib.error.HTTPError as http_err:
-        # Server reachable; non-2xx response.
+        # Server reachable; non-2xx response. P9R-24: contextlib.closing
+        # so the underlying socket releases promptly, not at GC time.
         status = http_err.code
+        retry_after = _parse_retry_after(http_err.headers)
         try:
-            raw = http_err.read() or b""
+            with contextlib.closing(http_err):
+                raw = http_err.read() or b""
         except Exception:  # noqa: BLE001 — pragma: covers .read() oddities
             raw = b""
-        retry_after = _parse_retry_after(http_err.headers)
     except urllib.error.URLError as url_err:
         raise GrokUnavailable(
             f"xAI Grok call failed at network layer: {url_err.reason!r}"
@@ -585,11 +652,14 @@ def _parse_retry_after(headers: Any) -> float | None:
     """
     if headers is None:
         return None
-    raw = (
-        headers.get("Retry-After")
-        or headers.get("retry-after")
-        or headers.get("X-RateLimit-Reset")
-    )
+    # P9R-28: dropped the X-RateLimit-Reset fallback. By convention
+    # that header carries an absolute epoch timestamp, not delta-
+    # seconds; conflating it with Retry-After made a future xAI
+    # behavior change produce nonsense "retry_after=1716440000s"
+    # errors. xAI doesn't emit that header today anyway. If they
+    # ever do, treat the epoch shape explicitly via a separate
+    # parser — don't bolt it onto this one.
+    raw = headers.get("Retry-After") or headers.get("retry-after")
     if raw is None:
         return None
     try:
@@ -780,7 +850,11 @@ def _log_grok_response(
         )
         row = cur.fetchone()
         return int(row[0]) if row else None
-    except sqlite3.OperationalError as exc:
+    except sqlite3.DatabaseError as exc:
+        # P9R-11: catch DatabaseError (parent of OperationalError +
+        # IntegrityError + ProgrammingError) so a future CHECK violation
+        # on rejection_reason doesn't escape and break the upstream
+        # call. Audit-row insert is documented as "logging never raises".
         _LOG.warning("grok_api_responses insert failed (suppressed): %s", exc)
         return None
 
