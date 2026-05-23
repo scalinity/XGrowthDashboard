@@ -1,22 +1,28 @@
 """Cost tracking and monthly ceiling enforcement (§28.6).
 
-Per §28.6 + Phase 7 install (RV2-3):
+Per §28.6 + Phase 7 install (RV2-3) + Phase 9 (Grok):
 
-* Per-call cost is estimated from token counts and a per-model rate snapshot
-  taken at call time (so retroactive auditing isn't broken if Anthropic
-  pricing changes).
+* Per-call cost is estimated from token counts and a per-provider rate
+  snapshot taken at call time (so retroactive auditing isn't broken if
+  pricing changes). Anthropic spend is reconstructed from
+  ``agent_messages.input_tokens/output_tokens × rate_snapshot_json``; xAI
+  Grok spend is reconstructed from ``grok_api_responses.rate_snapshot_json``
+  (Phase 9, migration 021).
 * Monthly cap is the COMBINED Anthropic + xAI ceiling — read from
   ``combined_ai_monthly_cost_ceiling_usd`` (Phase 7 default $30) with a
   fallback to the legacy ``agent_monthly_cost_cap_usd`` key (default $25)
   for pre-migration-018 databases.
-* At 80% → yellow banner. At 100% → red banner; agent disabled.
+* At 80% → yellow banner. At 100% → red banner; agent AND Grok sweep
+  disabled (both providers refuse new calls).
 * Enforcement at the client layer — ``check_ceiling_or_raise`` is called
-  before any ``messages.create`` round trip in ``app.agent.client``.
+  before any ``messages.create`` round trip in ``app.agent.client`` AND
+  before any ``POST /v1/chat/completions`` call in ``app.grok_client``.
 
-The rate table here is a snapshot of public Anthropic prices as of
-2025-01 (USD per million tokens). It is versioned via ``RATE_TABLE_VERSION``;
-``agent_messages.rate_snapshot_json`` should record the entry used at call
-time so cost audits remain accurate after future repricing.
+The rate table here is a snapshot of public Anthropic + xAI prices as of
+2026-05-23 (USD per million tokens). It is versioned via
+``RATE_TABLE_VERSION``; ``agent_messages.rate_snapshot_json`` and
+``grok_api_responses.rate_snapshot_json`` should record the entry used at
+call time so cost audits remain accurate after future repricing.
 """
 
 from __future__ import annotations
@@ -27,18 +33,25 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 # Per-million-token pricing snapshot. Update RATE_TABLE_VERSION when refreshed.
-RATE_TABLE_VERSION = "2025-01-snapshot"
+RATE_TABLE_VERSION = "2026-05-snapshot"
 
 # input_per_million_usd, output_per_million_usd
 _MODEL_RATES: dict[str, tuple[float, float]] = {
-    # Opus tier
+    # Opus tier (Anthropic)
     "claude-opus-4-7": (15.0, 75.0),
     "claude-opus-4-6": (15.0, 75.0),
-    # Sonnet tier
+    # Sonnet tier (Anthropic)
     "claude-sonnet-4-6": (3.0, 15.0),
-    # Haiku tier (used by lint pass)
+    # Haiku tier (Anthropic; used by lint pass)
     "claude-haiku-4-5-20251001": (1.0, 5.0),
     "claude-haiku-4-5": (1.0, 5.0),
+    # xAI Grok — Phase 9. Pricing per https://docs.x.ai/docs/models
+    # (verified 2026-05-23): grok-4.3 = $1.25 input / $2.50 output per
+    # million tokens, 1M-token context window. Grok-4.3 is the
+    # recommended general-purpose model and supports Live Search with
+    # source type "x" for X firehose discovery (§29.12).
+    "grok-4.3": (1.25, 2.50),
+    "grok-4": (1.25, 2.50),
 }
 
 # RV2-3: Phase 7 raised the historical Anthropic-only ceiling ($25) to a
@@ -111,7 +124,7 @@ def estimate_cost(
 def month_to_date_spend_usd(
     conn: sqlite3.Connection, *, now: datetime | None = None
 ) -> float:
-    """Sum per-message reconstructed cost for the current month.
+    """Sum per-message reconstructed Anthropic cost for the current month.
 
     Single source of truth: agent_messages.input_tokens/output_tokens ×
     rate_snapshot_json. Rows without a snapshot fall back to model
@@ -124,6 +137,10 @@ def month_to_date_spend_usd(
     it here would silently double-count any future caller that anchors
     a tool call to the same message that already recorded the round-
     trip cost on agent_messages.
+
+    Anthropic-only by design. Phase 9 Grok spend is summed by
+    ``xai_month_to_date_spend_usd``; the §28.6 combined cap reads both
+    via ``combined_month_to_date_spend_usd``.
     """
     now = now or datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -186,27 +203,120 @@ def get_monthly_ceiling_usd(conn: sqlite3.Connection) -> float:
     return DEFAULT_MONTHLY_CEILING_USD
 
 
+def xai_month_to_date_spend_usd(
+    conn: sqlite3.Connection, *, now: datetime | None = None
+) -> float:
+    """Sum per-Grok-call reconstructed cost for the current month (§29.12).
+
+    Source of truth: ``grok_api_responses.rate_snapshot_json``. Each
+    successful call writes a JSON blob with ``input_tokens``,
+    ``output_tokens``, ``input_per_million_usd``, and
+    ``output_per_million_usd``. Rate-limited / cost-ceiling-hit /
+    verification-rejected rows have NO token counts to bill for and
+    contribute $0 to spend.
+
+    Returns 0.0 when the table doesn't exist (pre-migration-021
+    databases — defensive against running on an older DB).
+    """
+    now = now or datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_start_iso = month_start.strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT rate_snapshot_json
+              FROM grok_api_responses
+             WHERE created_at_utc >= ?
+               AND rate_snapshot_json IS NOT NULL
+            """,
+            (month_start_iso,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Table missing — pre-migration-021 DB. Treat as zero spend.
+        return 0.0
+
+    spend = 0.0
+    for row in rows:
+        raw = row["rate_snapshot_json"] if isinstance(row, sqlite3.Row) else row[0]
+        if not raw:
+            continue
+        try:
+            snap = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(snap, dict):
+            continue
+        in_tok = int(snap.get("input_tokens") or 0)
+        out_tok = int(snap.get("output_tokens") or 0)
+        rate_in = float(snap.get("input_per_million_usd") or 0.0)
+        rate_out = float(snap.get("output_per_million_usd") or 0.0)
+        spend += (in_tok / 1_000_000.0) * rate_in
+        spend += (out_tok / 1_000_000.0) * rate_out
+    return spend
+
+
+def combined_month_to_date_spend_usd(
+    conn: sqlite3.Connection, *, now: datetime | None = None
+) -> float:
+    """Combined Anthropic + xAI spend for the current month (§28.6 / §29.12).
+
+    The §28.6 ceiling is one number across both providers; this helper
+    is the single source for "what's been spent so far this month
+    against the combined cap." Both ``app/agent/client.py`` and
+    ``app/grok_client.py`` route their preflight check through here.
+    """
+    return month_to_date_spend_usd(conn, now=now) + xai_month_to_date_spend_usd(
+        conn, now=now
+    )
+
+
+def is_combined_ceiling_breached(
+    conn: sqlite3.Connection,
+    *,
+    projected_call_cost_usd: float = 0.0,
+    now: datetime | None = None,
+) -> bool:
+    """Return True if next call (projected USD) would reach or exceed the cap.
+
+    Cheap predicate used by the §28.6 100%-ceiling banner and by the
+    pre-call gates in both Anthropic + xAI clients. Mirrors the strict
+    ``>=`` comparison in ``check_ceiling_or_raise`` (W21 wording).
+    """
+    combined = combined_month_to_date_spend_usd(conn, now=now)
+    cap = get_monthly_ceiling_usd(conn)
+    return combined + projected_call_cost_usd >= cap
+
+
 def check_ceiling_or_raise(
     conn: sqlite3.Connection,
     *,
     projected_call_cost_usd: float = 0.0,
     now: datetime | None = None,
 ) -> None:
-    """Raise ``MonthlyCostCeilingExceeded`` if MTD + projected exceeds cap.
+    """Raise ``MonthlyCostCeilingExceeded`` if combined MTD + projected exceeds cap.
 
     Callers pass an estimate of what THIS call will add; the check is
     pessimistic (cap considered breached if even one more call would push
     past). The agent client estimates the upcoming call's cost from the
     most recent message's token shape; lint passes pass a small constant
     (Haiku cost is rounding).
+
+    Phase 9 change: enforces the COMBINED Anthropic + xAI ceiling per
+    §28.6. Pre-Phase-9 this read Anthropic spend only; now both providers
+    accumulate into one number and both refuse calls at 100%.
     """
-    mtd = month_to_date_spend_usd(conn, now=now)
+    anthropic_mtd = month_to_date_spend_usd(conn, now=now)
+    xai_mtd = xai_month_to_date_spend_usd(conn, now=now)
+    combined = anthropic_mtd + xai_mtd
     cap = get_monthly_ceiling_usd(conn)
-    if mtd + projected_call_cost_usd >= cap:
+    if combined + projected_call_cost_usd >= cap:
         # W21: wording clarified — `>=` refuses at the cap exactly, not
         # only over it. "would reach or exceed" matches the comparison.
         raise MonthlyCostCeilingExceeded(
-            f"month-to-date spend ${mtd:.2f} + projected ${projected_call_cost_usd:.4f} "
-            f"would reach or exceed cap ${cap:.2f}. Raise the cap in "
-            f"Settings → Growth Agent or wait until the next month."
+            f"month-to-date combined AI spend ${combined:.2f} "
+            f"(Anthropic ${anthropic_mtd:.2f} + xAI ${xai_mtd:.2f}) "
+            f"+ projected ${projected_call_cost_usd:.4f} would reach or "
+            f"exceed cap ${cap:.2f}. Raise the cap in Settings → Growth "
+            f"Agent or wait until the next month."
         )
