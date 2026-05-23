@@ -794,13 +794,18 @@ def check_write_rate_capacity(conn: sqlite3.Connection) -> WriteRateCapacity:
     window_15min_start = now - timedelta(minutes=15)
     window_24h_start = now - timedelta(hours=24)
 
-    count_15min = _count_recent_publishes(conn, since=window_15min_start)
-    count_24h = _count_recent_publishes(conn, since=window_24h_start)
+    # P8R-17: single CTE returns (count, oldest) per window in one
+    # round-trip instead of two separate scans. 4 queries → 2.
+    count_15min, oldest_15min = _count_and_oldest_publish_in_window(
+        conn, since=window_15min_start
+    )
+    count_24h, oldest_24h = _count_and_oldest_publish_in_window(
+        conn, since=window_24h_start
+    )
 
     if count_15min >= limit_15min:
-        oldest_in_window = _oldest_publish_since(conn, since=window_15min_start)
         reset_at = (
-            (oldest_in_window + timedelta(minutes=15)) if oldest_in_window else None
+            (oldest_15min + timedelta(minutes=15)) if oldest_15min else None
         )
         reason = (
             f"rate-limited until {reset_at.isoformat() if reset_at else 'window rolls over'} "
@@ -817,9 +822,8 @@ def check_write_rate_capacity(conn: sqlite3.Connection) -> WriteRateCapacity:
         )
 
     if count_24h >= limit_24h:
-        oldest_in_window = _oldest_publish_since(conn, since=window_24h_start)
         reset_at = (
-            (oldest_in_window + timedelta(hours=24)) if oldest_in_window else None
+            (oldest_24h + timedelta(hours=24)) if oldest_24h else None
         )
         reason = (
             f"rate-limited until {reset_at.isoformat() if reset_at else 'window rolls over'} "
@@ -940,6 +944,46 @@ def _read_write_retry_attempts(conn: sqlite3.Connection | None) -> int:
         "x_posting_publish_retry_attempts_per_token",
         default=_DEFAULT_WRITE_RETRY_ATTEMPTS,
     )
+
+
+def _count_and_oldest_publish_in_window(
+    conn: sqlite3.Connection, *, since: datetime
+) -> tuple[int, datetime | None]:
+    """Return (count, oldest_published_to_x_at) for the window since ``since``.
+
+    P8R-17: replaces the two-helper, two-scan pattern in
+    ``check_write_rate_capacity`` with a single SELECT that does both
+    aggregates. Same x_post_id IS NOT NULL filter as RV2-6 and same
+    epoch-cast compare as P8R-6 so semantics are identical — just
+    fewer round-trips. The legacy ``_count_recent_publishes`` and
+    ``_oldest_publish_since`` helpers are kept for test-suite
+    backward compat; they each delegate to this combined helper.
+    """
+    since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n, MIN(published_to_x_at) AS oldest
+          FROM posts
+         WHERE published_to_x_at IS NOT NULL
+           AND x_post_id IS NOT NULL
+           AND CAST(strftime('%s', published_to_x_at) AS INTEGER)
+               >= CAST(strftime('%s', ?) AS INTEGER)
+        """,
+        (since_iso,),
+    ).fetchone()
+    if row is None:
+        return (0, None)
+    n = int(row["n"]) if row["n"] is not None else 0
+    oldest_raw = row["oldest"]
+    if oldest_raw is None:
+        return (n, None)
+    try:
+        oldest_dt = datetime.strptime(oldest_raw, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        oldest_dt = None
+    return (n, oldest_dt)
 
 
 def _count_recent_publishes(

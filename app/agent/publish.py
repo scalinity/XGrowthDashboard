@@ -746,6 +746,26 @@ def publish_post_atomic(
                 arguments=arguments,
                 tool_name=tool_name,
             )
+        except x_client.XApiNotFound as exc:
+            # RV2-18: 404 from POST /2/tweets typically means the
+            # in_reply_to_x_post_id target was deleted between draft and
+            # publish (§22 "target deleted between candidate creation and
+            # reply post"). Token stays UN-consumed — X did NOT process
+            # anything; nothing to reconcile via crash-recovery. Distinct
+            # error_kind='target_deleted' so the UI can surface a "target
+            # deleted; choose: discard draft / repurpose" banner instead
+            # of the generic 'failed' message.
+            return _emit_api_failure(
+                conn,
+                post_id,
+                exc,
+                kind="target_deleted",
+                consume_token=False,
+                raw_token=raw_token,
+                message_id=message_id,
+                arguments=arguments,
+                tool_name=tool_name,
+            )
         except x_client.XApiUnavailable as exc:
             # xurl missing / 401 / non-JSON output. Treat as runtime
             # failure — token stays UN-consumed (no X-side state change).
