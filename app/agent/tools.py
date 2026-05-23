@@ -470,33 +470,42 @@ def _compute_and_persist_scores_locked(
     # starts drafting. Gated by reply_target_lint_enabled (default true).
     # Distinct from §28.18 reply_quality_lint which fires at draft-save
     # time on Daniel's reply text. The two lints don't see each other.
-    lint_setting_row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = 'reply_target_lint_enabled'"
-    ).fetchone()
-    lint_enabled = is_thread_classifier_lint_enabled(
-        lint_setting_row[0] if lint_setting_row else None
-    )
-    niche_row = conn.execute(
-        "SELECT value_json FROM settings WHERE key = 'niche_problem'"
-    ).fetchone()
-    niche_problem = None
-    if niche_row and niche_row[0]:
-        try:
-            niche_problem = json.loads(niche_row[0])
-        except (TypeError, json.JSONDecodeError):
-            niche_problem = None
-    observed_metrics = {
-        "like_count": row["like_count"],
-        "reply_count": row["reply_count"],
-        "repost_count": row["repost_count"],
-    }
+    #
     # RV2-20: prefer the caller-precomputed lint result so the Haiku
     # round-trip (typical ~500ms) happens OUTSIDE the transaction.
     # Falling back to inline computation preserves backward compatibility
     # for callers that haven't been refactored.
+    #
+    # Phase 10 follow-up — when precomputed_lint is supplied, skip the
+    # settings reads + metrics-dict build entirely. The local
+    # lint_enabled / niche_problem / observed_metrics are ONLY used as
+    # arguments to thread_classifier_lint, which is bypassed on the
+    # precompute path. Pre-fix this was O(N) settings reads per
+    # candidate in _score_reply_candidates' batch-scoring loop even
+    # though every candidate already had a precomputed lint result.
     if precomputed_lint is not None:
         lint = precomputed_lint
     else:
+        lint_setting_row = conn.execute(
+            "SELECT value_json FROM settings WHERE key = 'reply_target_lint_enabled'"
+        ).fetchone()
+        lint_enabled = is_thread_classifier_lint_enabled(
+            lint_setting_row[0] if lint_setting_row else None
+        )
+        niche_row = conn.execute(
+            "SELECT value_json FROM settings WHERE key = 'niche_problem'"
+        ).fetchone()
+        niche_problem = None
+        if niche_row and niche_row[0]:
+            try:
+                niche_problem = json.loads(niche_row[0])
+            except (TypeError, json.JSONDecodeError):
+                niche_problem = None
+        observed_metrics = {
+            "like_count": row["like_count"],
+            "reply_count": row["reply_count"],
+            "repost_count": row["repost_count"],
+        }
         lint = thread_classifier_lint(
             target_post_text=row["target_text"] or "",
             target_author_handle=row["target_author_handle"] or "",
