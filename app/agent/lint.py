@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.agent.spec_drift import SpecDriftError as _SpecDriftError
 from app.db import PROJECT_ROOT
 
 _LOG = logging.getLogger(__name__)
@@ -473,18 +474,22 @@ def _load_reply_quality_prompt_cached(mtime_ns: int) -> str:  # noqa: ARG001 —
     return REPLY_QUALITY_LINT_PROMPT_PATH.read_text(encoding="utf-8")
 
 
-class ReplyQualityLintPromptMissingError(RuntimeError):
+# Phase 10 S10 follow-up — SpecDriftError lives in app.agent.spec_drift
+# (a zero-dependency module that breaks the prior
+# lint → prompt_builder → tools → lint cycle). Inheriting here means
+# the unified-catch contract finally covers every drift error in the
+# codebase: `except SpecDriftError` catches this too. Import lives at
+# the top of the file with the other module imports.
+class ReplyQualityLintPromptMissingError(_SpecDriftError):
     """Drift-check error: the §28.18 reply-quality lint prompt file is
     missing or empty. Same severity as Section4AnchorMissingError —
     the live Haiku path has no inline fallback, so a missing file means
     the gate silently runs only the offline regex matcher in production.
 
-    Phase 10 S10 — could not inherit from prompt_builder.SpecDriftError
-    because the cross-module import chain
-    (lint → prompt_builder → tools → lint) is a circle. Callers who
-    want to catch every drift error should do
-    ``except (prompt_builder.SpecDriftError,
-              lint.ReplyQualityLintPromptMissingError):``.
+    Phase 10 S10 follow-up — inherits from
+    ``app.agent.spec_drift.SpecDriftError`` so a single
+    ``except SpecDriftError:`` catches every drift error in the
+    codebase.
     """
 
 

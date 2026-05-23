@@ -131,24 +131,26 @@ def test_reply_quality_lint_failure_mode_rejects_unknown_value(
 # ===========================================================================
 # 2. Prescriptive voice layer — drift + splice.
 # ===========================================================================
-def test_spec_drift_error_unifies_prompt_builder_drift_errors() -> None:
-    """Phase 10 S10 — every drift error in the prompt_builder module
-    inherits from SpecDriftError so a single `except SpecDriftError`
-    catches them all. The lint module's
-    ReplyQualityLintPromptMissingError stays as RuntimeError because
-    the cross-module import path (lint → prompt_builder → tools →
-    lint) is a circle; callers wanting to catch all drift errors
-    across modules use a 2-tuple in their except clause."""
-    assert issubclass(
-        prompt_builder.SpecRuleExtractionError, prompt_builder.SpecDriftError,
-    )
-    assert issubclass(
+def test_spec_drift_error_unifies_all_drift_errors() -> None:
+    """Phase 10 S10 (post-cycle-break) — every drift error across the
+    codebase inherits from SpecDriftError. The base was extracted to
+    app.agent.spec_drift (a zero-dependency module) so lint.py can
+    inherit without inducing the prior
+    lint → prompt_builder → tools → lint import cycle."""
+    from app.agent.spec_drift import SpecDriftError as _Canonical
+
+    # prompt_builder re-exports the same object — pin object identity.
+    assert prompt_builder.SpecDriftError is _Canonical
+
+    for drift_cls in (
+        prompt_builder.SpecRuleExtractionError,
         prompt_builder.VoiceProfilePrescriptiveMissingError,
-        prompt_builder.SpecDriftError,
-    )
-    assert issubclass(
-        prompt_builder.Section4AnchorMissingError, prompt_builder.SpecDriftError,
-    )
+        prompt_builder.Section4AnchorMissingError,
+        lint.ReplyQualityLintPromptMissingError,
+    ):
+        assert issubclass(drift_cls, _Canonical), (
+            f"{drift_cls.__name__} does not inherit from SpecDriftError"
+        )
 
 
 def test_prescriptive_voice_file_present_and_nonempty() -> None:

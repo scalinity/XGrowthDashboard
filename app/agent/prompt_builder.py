@@ -24,6 +24,7 @@ import sqlite3
 from pathlib import Path
 
 from app.agent import niche, personality_lore, tools, voice, voice_profile
+from app.agent.spec_drift import SpecDriftError as SpecDriftError  # noqa: PLC0414 — explicit re-export so callers using prompt_builder.SpecDriftError keep working after the S10 follow-up cycle-break.
 from app.db import PROJECT_ROOT  # P6R-37: centralized in app.db.
 
 PROMPT_TEMPLATE_PATH: Path = PROJECT_ROOT / "config" / "agent_system_prompt.md"
@@ -67,23 +68,12 @@ def _read_template() -> str:
     return PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
-# Phase 10 S10 — unified base class for every drift/extraction error
-# raised by this module. Lets callers catch the whole category with a
-# single `except SpecDriftError`. Inherits from RuntimeError so the
-# existing public-API contract (everything is a RuntimeError subclass)
-# is preserved.
-class SpecDriftError(RuntimeError):
-    """Base class for all spec / prompt / migration drift errors raised
-    by app.agent.prompt_builder and adjacent modules.
-
-    Phase 10 S10 — consolidates the prior trio of independent
-    RuntimeError subclasses (SpecRuleExtractionError,
-    VoiceProfilePrescriptiveMissingError, Section4AnchorMissingError)
-    under one umbrella so a single `except SpecDriftError` catches
-    everything CI / pre-commit cares about. Each leaf class still
-    exists and is still raised by its specific check; they now inherit
-    from this base.
-    """
+# Phase 10 S10 — SpecDriftError is the unified base class for every
+# drift/extraction error. Defined in app.agent.spec_drift so
+# app.agent.lint can also subclass it without inducing the prior
+# prompt_builder → tools → lint import cycle. Re-exported via the
+# top-of-file import above so existing callers using
+# `prompt_builder.SpecDriftError` continue to work without churn.
 
 
 class SpecRuleExtractionError(SpecDriftError):
