@@ -223,13 +223,17 @@ SKIP_REASON_ENUM: tuple[str, ...] = (
     "other",
 )
 
-# §29.6 discovered_via — MVP set only; 'grok_semantic' is V1.2-deferred per
-# §29.1 and explicitly NOT included in the CHECK constraint at this phase.
+# §29.6 discovered_via — MVP set + Phase 9 'grok_semantic' (added by
+# migration 021 per §29.12). 'grok_semantic' is reserved for the
+# Phase 9 firehose-discovery path; the candidate goes through §29.2
+# verification (verify_grok_candidate_against_x_api below) before any
+# score touches engagement_surface_score.
 DISCOVERED_VIA_ENUM: tuple[str, ...] = (
     "manual",
     "agent_score",
     "next_rep_seed",
     "v1.1_api_search",
+    "grok_semantic",
 )
 
 # §29.6 status lifecycle.
@@ -461,3 +465,120 @@ def apply_velocity_timing_modifiers(
         adjusted_action = _DOWNGRADE_ONE_TIER[base_recommended_action]
 
     return adjusted_engagement, adjusted_action
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — §29.2 source-of-truth verification for Grok candidates.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class GrokVerificationResult:
+    """Outcome of a §29.2 X API verification call against a Grok candidate.
+
+    Per §29.2 (Phase 9 extension): Grok is NEVER the source of truth
+    for any engagement metric. Every Grok-discovered candidate calls
+    this helper before any score affects ``engagement_surface_score``.
+
+    * ``verified=True`` → the X API returned 200; ``tweet`` holds the
+      ``data`` object (public_metrics, created_at, text, etc.) and the
+      sweep continues with X API metrics as source of truth.
+    * ``verified=False`` and ``status_code=404`` → the post was
+      deleted between Grok discovery and our verification; the sweep
+      rejects the candidate and logs to
+      ``grok_api_responses.rejection_reason='verification_404'``.
+    """
+
+    verified: bool
+    status_code: int | None
+    tweet: dict[str, Any] | None
+    error: str | None
+
+
+def verify_grok_candidate_against_x_api(
+    target_x_post_id: str,
+    *,
+    conn: Any = None,
+    xurl_bin: str | None = None,
+) -> GrokVerificationResult:
+    """Verify a Grok-discovered candidate against the X API.
+
+    Per §29.2: ``Grok is never the source of truth for any engagement
+    metric``. This helper is the single chokepoint where Grok-discovered
+    candidates earn the right to enter the §29.3 scoring pipeline.
+
+    Returns a ``GrokVerificationResult``:
+
+    * ``verified=True`` on X API 200 — ``tweet`` is the parsed ``data``
+      object (the caller pulls ``public_metrics``, ``created_at``,
+      ``text``, ``author_id``, etc.).
+    * ``verified=False`` + ``status_code=404`` on X API 404 — the post
+      no longer exists. The caller logs to
+      ``grok_api_responses.rejection_reason='verification_404'`` and
+      drops the candidate.
+
+    Rate-limit (429), 5xx, and process-level failures from the xurl
+    wrapper propagate AS-IS — the sweep's outer loop pauses, retries,
+    or aborts depending on the exception type. This helper does not
+    swallow them because rate-limit handling is the sweep's
+    responsibility (it bookkeeps "in-progress candidates" per §29.11).
+
+    The call shape — ``/2/tweets/{id}?tweet.fields=public_metrics,
+    non_public_metrics`` — matches §29.12 verbatim. Imports happen
+    inside the function so the resolver tests in this module don't
+    need to pay the x_client import cost.
+    """
+    # Lazy import: x_client pulls in subprocess + sqlite3 + dataclasses
+    # at module import, none of which the pure-function resolver tests
+    # care about.
+    from app import x_client
+
+    # /2/tweets/{id} is the single-resource read endpoint for Phase 7+
+    # verification. tweet.fields requests public_metrics for §29.3
+    # scoring + non_public_metrics (impression_count) when available
+    # (X API only returns non_public for tweets the authenticated user
+    # owns; for third-party posts this field is omitted, which is fine
+    # — the candidate scores off public_metrics alone).
+    endpoint = (
+        f"/2/tweets/{target_x_post_id}"
+        f"?tweet.fields=public_metrics,non_public_metrics,created_at,author_id"
+    )
+    try:
+        response = x_client.request(
+            endpoint,
+            method="GET",
+            conn=conn,
+            xurl_bin=xurl_bin,
+            log_source="xurl",
+            log_notes=f"verify_grok_candidate_against_x_api id={target_x_post_id}",
+        )
+    except x_client.XApiNotFound as exc:
+        return GrokVerificationResult(
+            verified=False,
+            status_code=404,
+            tweet=None,
+            error=str(exc),
+        )
+
+    body = response.body
+    if not isinstance(body, dict):
+        return GrokVerificationResult(
+            verified=False,
+            status_code=response.status_code,
+            tweet=None,
+            error=f"unexpected X API body shape: {type(body).__name__}",
+        )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        # 2xx without a data object — X API edge case (e.g. unauthorized
+        # field set). Treat as a verification failure but not a 404.
+        return GrokVerificationResult(
+            verified=False,
+            status_code=response.status_code,
+            tweet=None,
+            error="X API response missing 'data' object",
+        )
+    return GrokVerificationResult(
+        verified=True,
+        status_code=response.status_code,
+        tweet=data,
+        error=None,
+    )
