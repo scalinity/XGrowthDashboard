@@ -61,8 +61,10 @@ _PHASE_1_SETTINGS: list[tuple[str, object, str]] = [
     ),
     (
         "data_collection_mode",
-        "manual",
-        "manual | xurl | api — MVP default per §17",
+        "api",
+        "manual | api — Phase 7 default flipped to 'api' per §29.1 / §17. "
+        "Toggle to 'manual' in Settings to disable scheduled jobs; manual "
+        "fallback paths remain available regardless of the toggle.",
     ),
     # Sample-size thresholds used by v_lane_performance.
     # Stored here so the UI can expose them; the view's CASE expression hard-

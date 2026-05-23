@@ -67,11 +67,18 @@ from typing import Any, Iterable, Literal, Mapping
 _log = logging.getLogger(__name__)
 
 EventCategory = Literal[
-    "auth", "x_op", "publish", "settings", "export", "data", "admin", "migration"
+    "auth", "x_op", "publish", "settings", "export", "data", "admin", "migration",
+    "scheduled_job",
 ]
 
+# 'scheduled_job' admitted at Phase 7 (migration 018) per §28.30 —
+# distinct from 'admin' so the Settings audit-log viewer can filter
+# job-health rows separately from manual ops like backup/vacuum runs.
 ALLOWED_CATEGORIES: frozenset[str] = frozenset(
-    {"auth", "x_op", "publish", "settings", "export", "data", "admin", "migration"}
+    {
+        "auth", "x_op", "publish", "settings", "export", "data", "admin",
+        "migration", "scheduled_job",
+    }
 )
 
 

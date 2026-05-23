@@ -79,6 +79,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "015_growth_layer_qol.sql",
     "016_blogs.sql",
     "017_blog_agent_action_x_to_blog.sql",
+    "018_x_api_reads.sql",
 )
 
 
@@ -228,7 +229,11 @@ def test_baseline_settings_have_expected_values(db_conn: sqlite3.Connection) -> 
     assert get("long_arc_reminder") == 500000
     assert get("daily_reply_target") == 12
     assert get("daily_post_target") == 1
-    assert get("data_collection_mode") == "manual"
+    # Phase 7 (migration 018) flipped the default from 'manual' to 'api'.
+    # The migration's INSERT … ON CONFLICT DO UPDATE applies even on fresh
+    # DBs because migrations run before seed_settings; the seed's INSERT
+    # OR IGNORE no-ops when the row already exists.
+    assert get("data_collection_mode") == "api"
 
 
 def test_milestones_seed_distribution_and_validation_counts(
