@@ -242,10 +242,18 @@ def _mdx_frontmatter(seo: dict, exported_at_utc: str) -> str:
 
 
 def _repurposing_footer(linked: list[dict]) -> str:
-    """Markdown footer summarizing blog_to_post_links rows."""
+    """Markdown footer summarizing blog_to_post_links rows.
+
+    P6R-26: render each linked-post entry as a separate Markdown
+    PARAGRAPH (blank-line separated) rather than a `-` bullet list.
+    The minimal Markdown→HTML converter doesn't render `<ul>`/`<li>`,
+    so a bullet list previously collapsed into a single `<p>` blob in
+    HTML/JSON exports — visually inconsistent with the Markdown/MDX
+    exports. Paragraphs render identically across all four formats.
+    """
     if not linked:
         return ""
-    lines = ["", "---", "**Repurposing notes (excluded from public publish):**"]
+    lines = ["", "---", "", "**Repurposing notes (excluded from public publish):**", ""]
     for row in linked:
         direction = row["direction"].replace("_", " ")
         kind = row["relationship_kind"].replace("_", " ")
@@ -253,10 +261,11 @@ def _repurposing_footer(linked: list[dict]) -> str:
         x_id = row["x_post_id"]
         if x_id:
             url = f"https://x.com/i/web/status/{x_id}"
-            lines.append(f"- {direction} ({kind}): [post {row['post_id']}]({url}) — {excerpt}")
+            entry = f"{direction} ({kind}): [post {row['post_id']}]({url}) — {excerpt}"
         else:
-            lines.append(f"- {direction} ({kind}): post #{row['post_id']} — {excerpt}")
-    lines.append("")
+            entry = f"{direction} ({kind}): post #{row['post_id']} — {excerpt}"
+        lines.append(entry)
+        lines.append("")
     return "\n".join(lines)
 
 
