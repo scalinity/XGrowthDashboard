@@ -875,13 +875,22 @@ def _count_recent_publishes(
 
     The combined filter (NOT NULL on both columns) covers both paths.
     """
+    # P8R-6: compare via strftime('%s', ...) cast on both sides instead
+    # of a lexicographic string compare. The legacy compare worked only
+    # because every writer used the same fixed-width "%Y-%m-%d %H:%M:%S"
+    # format — but confirmation._parse_db_timestamp tolerates ISO-T on
+    # the READ side, so one stray .isoformat() write would silently
+    # under-count publishes in the rate-limit window (Daniel's quota
+    # would silently inflate). SQLite's strftime('%s', ...) parses both
+    # forms identically and the comparison is numeric, not lexicographic.
     since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
     row = conn.execute(
         """
         SELECT COUNT(*) AS n FROM posts
         WHERE published_to_x_at IS NOT NULL
           AND x_post_id IS NOT NULL
-          AND published_to_x_at >= ?
+          AND CAST(strftime('%s', published_to_x_at) AS INTEGER)
+              >= CAST(strftime('%s', ?) AS INTEGER)
         """,
         (since_iso,),
     ).fetchone()
@@ -897,13 +906,15 @@ def _oldest_publish_since(
     so the reset-time hint Daniel sees in the publish modal reflects only
     publishes that actually landed on X.
     """
+    # P8R-6: epoch-cast compare; matches _count_recent_publishes.
     since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
     row = conn.execute(
         """
         SELECT MIN(published_to_x_at) AS oldest FROM posts
         WHERE published_to_x_at IS NOT NULL
           AND x_post_id IS NOT NULL
-          AND published_to_x_at >= ?
+          AND CAST(strftime('%s', published_to_x_at) AS INTEGER)
+              >= CAST(strftime('%s', ?) AS INTEGER)
         """,
         (since_iso,),
     ).fetchone()
