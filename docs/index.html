@@ -1606,10 +1606,10 @@
         </header>
 
         <div class="score-bank" aria-label="Phase 6 counters">
-          <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number">01</div><div class="tile-bar" aria-hidden="true"><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
-          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">832</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number">02</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">865</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
           <div class="tile"><p class="tile-kicker">Acceptance gates</p><div class="tile-number">12</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-          <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number">35</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
         </div>
 
         <details class="subsection" id="phase-6-completed" data-section-type="completed" open>
@@ -1675,8 +1675,62 @@
           </div>
         </details>
 
+        <details class="subsection" id="phase-6-remediation" data-section-type="remediation">
+          <summary><span class="caret"></span><span class="label-kicker">05 / Remediation</span><span class="label-title">/review-2 sweep — 33 review findings + 5 follow-ups, all addressed</span></summary>
+          <div class="subsection-body">
+            <p>After Phase 6 shipped, a <code>/review-2</code> pass surfaced 4 🔴 critical findings, 14 🟡 warnings, and 15 🔵 suggestions. Each landed as its own commit on <code>main</code>; the parent <strong>P6R-* sweep</strong> covers 35 fix commits in total (33 from the review + 2 follow-ups: stabilizing 5 pre-existing flaky date-sensitive tests and sweeping <code>PROJECT_ROOT</code> centralization across all agent modules).</p>
+            <p><strong>🔴 Critical fixes (4):</strong></p>
+            <ul>
+              <li><strong>P6R-1</strong> — <code>transition_status</code> + <code>revert_to_version</code> are now atomic. Extracted <code>_save_blog_in_tx</code> so the version row + audit row + <code>external_url</code> update commit or roll back together. The §28.30 audit-contract no longer leaks under partial failure.</li>
+              <li><strong>P6R-2</strong> — Stored XSS via <code>unsafe_allow_html</code> closed across both Phase 6 pages. Every user/agent-controlled field (blog title, post text excerpts, suggestion anchor/rationale, plagiarism-blocked excerpt, niche fields, voice-profile description) is now wrapped in <code>html.escape</code> before HTML interpolation. CWE-79.</li>
+              <li><strong>P6R-3</strong> — <code>blog_exports.export</code> constrains <code>target_path</code> to the configured export root via <code>Path.resolve().relative_to(allowed_root)</code>. Path traversal, absolute paths outside the root, and extension mismatches all raise BEFORE any filesystem op. CWE-22 / CWE-73.</li>
+              <li><strong>P6R-4</strong> — HTML export's <code>_render_inline</code> no longer double-escapes link URLs / inline-code captured groups. Pre-fix, <code>?a=1&amp;amp;b=2</code> was visible in browsers; post-fix, single-escape semantics hold.</li>
+            </ul>
+            <p><strong>🟡 Warning fixes (14):</strong></p>
+            <ul>
+              <li><strong>P6R-5</strong> — <code>repurpose_x_to_blog_idea</code> non-atomicity narrowed: niche snapshots fold into <code>create_blog</code>'s signature so they land in the same transaction as the row insert.</li>
+              <li><strong>P6R-6</strong> — HTML export link branch refuses <code>javascript:</code>/<code>data:</code>/<code>file:</code> schemes; allows http(s) + mailto + relative paths only (CWE-79, mirrors §P511R-19).</li>
+              <li><strong>P6R-7</strong> — <code>transition_status</code> rejects non-http(s) <code>external_url</code> values.</li>
+              <li><strong>P6R-8</strong> — <code>BlogExport.status_transitioned</code> field surfaces ready→exported transition failure; editor displays a yellow warning.</li>
+              <li><strong>P6R-9</strong> — <code>_accept_suggestion_cb</code> rejects ambiguous anchors (more than one body match) instead of silently rewriting the first.</li>
+              <li><strong>P6R-10</strong> — Dead no-op <code>updated_at_utc</code> UPDATE dropped from <code>save_blog</code>.</li>
+              <li><strong>P6R-11</strong> — <code>save_blog</code> no-op detection distinguishes empty-string outline from None.</li>
+              <li><strong>P6R-12</strong> — Status selectbox clears its session-state value after a transition so navigating between blogs doesn't trip Streamlit's options-mismatch raise.</li>
+              <li><strong>P6R-13</strong> — Editor's repurpose banners (error / blocked / result) consistently cleared across all three callback branches.</li>
+              <li><strong>P6R-14</strong> — <code>+ new blog</code> form uses <code>clear_on_submit=True</code>; redundant <code>del</code>-on-widget-key loop dropped.</li>
+              <li><strong>P6R-15</strong> — <code>_count_h2_headings</code> tightened to require non-whitespace after the heading marker.</li>
+              <li><strong>P6R-16</strong> — Per-row Export button on the Blogs index now sets a one-shot session-state intent flag the editor reads to auto-open the export expander.</li>
+              <li><strong>P6R-17</strong> — Migration 017 extends <code>blog_versions.agent_action</code> CHECK with <code>'x_to_blog_idea_outline'</code>; <code>repurpose_x_to_blog_idea</code> emits the new value so analytics can disambiguate the seed-outline provenance.</li>
+              <li><strong>P6R-24</strong> (folded into migration 017) — <code>v_blog_pipeline.days_in_current_status</code> switched from MIN(entry) to MAX(entry) so repeated re-entry into a status no longer overstates staleness.</li>
+            </ul>
+            <p><strong>🔵 Suggestion fixes (15):</strong></p>
+            <ul>
+              <li><strong>P6R-18</strong> — Shared scaffolding extracted to <code>app/agent/_blog_agent_helpers.py</code>: <code>make_default_caller</code>, <code>render_identity_context</code>, <code>parse_json_response</code>, <code>require_confidence</code>. Drafting vs repurposing flavors are explicit parameters now rather than implicit code drift.</li>
+              <li><strong>P6R-19</strong> — <code>_is_guard_enabled</code> parses strictly (only an explicit JSON <code>false</code> disables; everything else keeps the plagiarism guard ON). Fail-closed by design.</li>
+              <li><strong>P6R-20</strong> — <code>_render_export_dialog</code> type-checks <code>default_dir</code> after <code>json.loads</code>.</li>
+              <li><strong>P6R-21</strong> — <code>set_seo_metadata</code> coerces tag list elements to strings on write.</li>
+              <li><strong>P6R-22</strong> — <code>agent_assisted</code> stickiness inline-documented (intentional epistemic disclosure).</li>
+              <li><strong>P6R-23</strong> — <code>_normalize_slug</code> NFKD-transliterates accented Latin titles to ASCII slugs (<code>Café résumé</code> → <code>cafe-resume</code>).</li>
+              <li><strong>P6R-25</strong> — <code>_count_words</code> strips Markdown syntax before splitting.</li>
+              <li><strong>P6R-26</strong> — Repurposing footer renders as paragraphs, not bullets — consistent rendering across all four export formats.</li>
+              <li><strong>P6R-27</strong> — <code>list_blogs</code> / <code>list_versions</code> paginate with explicit <code>limit</code>/<code>offset</code>.</li>
+              <li><strong>P6R-28</strong> — HTML export head gains <code>&lt;html lang="en"&gt;</code> + viewport meta.</li>
+              <li><strong>P6R-29</strong> — <code>finalize_blog_to_post_link</code> raises on unknown mode (no silent defaulting).</li>
+              <li><strong>P6R-30</strong> + <strong>P6R-37</strong> — <code>PROJECT_ROOT</code> centralized on <code>app.db</code> across <em>all</em> agent modules (Phase 6 + the seven pre-existing ones).</li>
+              <li><strong>P6R-32</strong> — Export-dialog checkbox renamed to cover both Markdown footer + JSON payload.</li>
+              <li><strong>P6R-38</strong> — Regression test pins the <code>agent_assisted</code> stickiness invariant.</li>
+            </ul>
+            <p><strong>Follow-ups beyond the review (2):</strong></p>
+            <ul>
+              <li><strong>P6R-35</strong> — Five pre-existing flaky date-sensitive tests (<code>test_voice_profile</code> + <code>test_v_daily_reps_extension</code>) stabilized. Root cause: <code>date.today()</code> returns LOCAL date but the queries used SQLite's <code>date('now')</code> which is UTC — at certain wall-clock times the two clocks disagreed by a day. Fix: anchor seed dates to SQLite's <code>date('now')</code>.</li>
+              <li><strong>P6R-37</strong> — Centralized <code>PROJECT_ROOT</code> import covers all seven pre-existing agent modules (not just Phase 6).</li>
+            </ul>
+            <p>Three new acceptance tests pin the highest-stakes invariants: transition-atomicity under audit failure, path-traversal rejection on export, and XSS-escape coverage across the page-rendering surface.</p>
+          </div>
+        </details>
+
         <details class="subsection" id="phase-6-next" data-section-type="next">
-          <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Next phase pointer</span></summary>
+          <summary><span class="caret"></span><span class="label-kicker">06 / Forward</span><span class="label-title">Next phase pointer</span></summary>
           <div class="subsection-body">
             <p>Phase 6 closes the consolidation gap with CreatorOS — XGrowth now subsumes the entire functional surface. CreatorOS can be retired or kept frozen as historical archive. Phase 6's deferred polish items (full Phase 5.8 pipeline integration for blog → X drafts, linked-posts add-link UI, optional richer Markdown renderer) are independent and can land between Phase 6 and Phase 7. <strong>Phase 7</strong> (formerly the deferred-from-MVP V1.1 Data Collection, renumbered after the Phase 6 Blogs rename) is the next major milestone — programmatic X API access for account snapshots, recent-post import, post-metrics refresh, direct posting via <code>submit_post</code>, and X API search inside <code>find_reply_targets</code>.</p>
             <p>Consider a project rename to something like "Distribution Dashboard" or "Personal Distribution OS" — the name no longer fully captures the surface, but the implementation doesn't depend on the name. One-line spec edit at Daniel's discretion.</p>
