@@ -375,6 +375,34 @@ def test_grok_client_missing_api_key_raises_unavailable(
         grok_client.search("test", conn=db_conn)
 
 
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD",
+        "YOUR_XAI_API_KEY_HERE",
+        "your-xai-key",
+        "REPLACE_WITH_FOO",  # general prefix
+        "YOUR_KEY",          # general prefix
+        "PUT_PLACEHOLDER_HERE",  # general infix
+    ],
+)
+def test_is_configured_rejects_documented_placeholder(
+    monkeypatch: pytest.MonkeyPatch, placeholder: str
+) -> None:
+    """P9R-5: launchd plist placeholder must not pass is_configured()."""
+    monkeypatch.setenv("XAI_API_KEY", placeholder)
+    assert grok_client.is_configured() is False
+
+
+def test_search_raises_unavailable_on_placeholder_key(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P9R-5: search() refuses to call xAI when the key is a placeholder."""
+    monkeypatch.setenv("XAI_API_KEY", "REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD")
+    with pytest.raises(grok_client.GrokUnavailable, match="placeholder"):
+        grok_client.search("test", conn=db_conn)
+
+
 def test_sweep_catches_bare_grok_error_and_writes_audit_row(
     db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

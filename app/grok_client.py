@@ -191,13 +191,49 @@ class GrokCandidate:
 # ---------------------------------------------------------------------------
 # Public API.
 # ---------------------------------------------------------------------------
+# P9R-5: placeholder strings the launchd plist + docs use as
+# substitutions Daniel must replace before `launchctl load`. is_configured
+# returns False (and search() raises GrokUnavailable) when any of these
+# are observed in XAI_API_KEY — otherwise the launchd job would silently
+# 401 forever and the Settings status would show green "configured".
+_PLACEHOLDER_API_KEY_VALUES: frozenset[str] = frozenset({
+    "REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD",
+    "YOUR_XAI_API_KEY_HERE",
+    "your-xai-key",
+})
+
+
+def _is_placeholder_key(key: str) -> bool:
+    """True if ``key`` looks like a documented placeholder, not a real key."""
+    if not key:
+        return True
+    stripped = key.strip()
+    if stripped in _PLACEHOLDER_API_KEY_VALUES:
+        return True
+    upper = stripped.upper()
+    return (
+        upper.startswith("REPLACE_WITH_")
+        or upper.startswith("YOUR_")
+        or "PLACEHOLDER" in upper
+    )
+
+
 def is_configured() -> bool:
-    """Return True if ``XAI_API_KEY`` is set in the process environment.
+    """Return True if ``XAI_API_KEY`` is set AND not a placeholder string.
 
     Used by the Settings UI to render a "configured / not set" status
     indicator WITHOUT exposing the key value (§29.12 + §18 item 19).
+
+    P9R-5: the launchd plist ships with the placeholder
+    ``REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD`` so Daniel can `cp` it into
+    `~/Library/LaunchAgents/` and only then paste the real key. A naive
+    `bool(env.strip())` check would mark the placeholder as "configured"
+    and the launchd job would silently 401 forever. We reject the
+    documented placeholders (and the `REPLACE_WITH_…` / `YOUR_…` /
+    `…PLACEHOLDER…` shapes more generally) so the UI tells the truth.
     """
-    return bool(os.environ.get("XAI_API_KEY", "").strip())
+    raw = os.environ.get("XAI_API_KEY", "")
+    return bool(raw.strip()) and not _is_placeholder_key(raw)
 
 
 def search(
@@ -254,6 +290,16 @@ def search(
         raise GrokUnavailable(
             "XAI_API_KEY is not set in .env — see .env.example for the line "
             "and https://console.x.ai/ to mint a key."
+        )
+    # P9R-5: reject the launchd plist placeholder explicitly so the sweep
+    # doesn't quietly 401-spam grok_api_responses with 50+ rows before
+    # Daniel notices.
+    if _is_placeholder_key(key):
+        raise GrokUnavailable(
+            "XAI_API_KEY looks like the documented placeholder "
+            f"({key!r:.40}…). Replace it with a real key in .env AND "
+            "in launchd/com.scalinity.xgrowth.grok-sweep.plist before "
+            "`launchctl load`."
         )
 
     # §28.6 preflight — refuse the call if combined Anthropic + xAI

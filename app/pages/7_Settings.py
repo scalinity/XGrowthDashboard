@@ -2009,9 +2009,14 @@ _phase9_settings: dict[str, str | None] = {
 }
 
 # ----- XAI_API_KEY status indicator (never displays the key value) -----
-import os as _os_for_grok  # noqa: E402
+# P9R-60: route through grok_client.is_configured() so the placeholder-
+# detection hardening (P9R-5) applies uniformly to both the runtime
+# call site AND the Settings UI indicator. Otherwise the launchd
+# plist placeholder shows green "configured" here while the sweep
+# refuses to call.
+from app import grok_client as _grok_client_for_settings  # noqa: E402
 
-_xai_key_configured = bool(_os_for_grok.environ.get("XAI_API_KEY", "").strip())
+_xai_key_configured = _grok_client_for_settings.is_configured()
 _xai_key_color = "#7ec97e" if _xai_key_configured else "#d9a86b"
 _xai_key_label = "configured" if _xai_key_configured else "not set"
 st.markdown(
