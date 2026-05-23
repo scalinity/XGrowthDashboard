@@ -92,8 +92,15 @@ def _query_rows(
     reply_intent: str | None,
     recommended_action: str | None,
     author: str | None,
+    discovered_via: str | None = None,
 ) -> list[sqlite3.Row]:
-    """Apply the filter bar — every filter is optional."""
+    """Apply the filter bar — every filter is optional.
+
+    Phase 9 adds ``discovered_via`` so Daniel can filter the Queue by
+    discovery source (manual / agent_score / next_rep_seed /
+    v1.1_api_search / grok_semantic). Composes cumulatively with the
+    other filters.
+    """
     sql = "SELECT * FROM reply_targets WHERE 1=1"
     params: list[object] = []
     if status and status != "all":
@@ -112,6 +119,9 @@ def _query_rows(
     if recommended_action:
         sql += " AND recommended_action_label = ?"
         params.append(recommended_action)
+    if discovered_via:
+        sql += " AND discovered_via = ?"
+        params.append(discovered_via)
     if author:
         # /review-2 🟡 #6 — user-typed `%` and `_` would otherwise become LIKE
         # wildcards (`100_users` matches `100Xusers`). Escape them. The value
@@ -217,7 +227,7 @@ st.markdown(
     "<div class='kicker' style='margin-top:0.4rem;'>FILTERS</div>",
     unsafe_allow_html=True,
 )
-f1, f2, f3, f4, f5 = st.columns(5)
+f1, f2, f3, f4, f5, f6 = st.columns(6)
 status_options = ["all", "candidate", "drafted", "posted", "skipped", "expired", "target_deleted"]
 flt_status = f1.selectbox(
     "status", status_options, index=1, key="rtq_filter_status", label_visibility="visible"
@@ -234,11 +244,24 @@ action_options = [UNSELECTED, "reply_now", "reply_if_time", "consider", "skip"]
 flt_action_raw = f4.selectbox(
     "recommended action", action_options, index=0, key="rtq_filter_action"
 )
-flt_author = f5.text_input("author handle", "", placeholder="@handle", key="rtq_filter_author")
+# Phase 9: discovered_via filter per §29.7. Options match the
+# reply_targets.discovered_via CHECK constraint (migration 021 added
+# 'grok_semantic'). UNSELECTED is the "(all)" default per §29.12.
+discovered_via_options = [
+    UNSELECTED, "manual", "agent_score", "next_rep_seed",
+    "v1.1_api_search", "grok_semantic",
+]
+flt_discovered_via_raw = f5.selectbox(
+    "discovered via", discovered_via_options, index=0, key="rtq_filter_discovered_via"
+)
+flt_author = f6.text_input("author handle", "", placeholder="@handle", key="rtq_filter_author")
 
 flt_pillar = None if flt_pillar_raw == UNSELECTED else flt_pillar_raw
 flt_intent = None if flt_intent_raw == UNSELECTED else flt_intent_raw
 flt_action = None if flt_action_raw == UNSELECTED else flt_action_raw
+flt_discovered_via = (
+    None if flt_discovered_via_raw == UNSELECTED else flt_discovered_via_raw
+)
 
 # ---------------------------------------------------------------------------
 # Add candidate — collapsible expander; the Queue is for review, not capture.
@@ -399,6 +422,7 @@ rows = _query_rows(
     reply_intent=flt_intent,
     recommended_action=flt_action,
     author=flt_author,
+    discovered_via=flt_discovered_via,
 )
 
 if not rows:
@@ -413,6 +437,29 @@ for row in rows:
     age = _row_age(conn, row)
     handle = (row["target_author_handle"] or "unknown").lstrip("@")
     keyline = recommended_action_keyline_color(row["recommended_action_label"])
+    # Phase 9 §29.7 grok_semantic badge — surfaces when Grok firehose
+    # discovery (§29.12) inserted this row. Daniel can audit
+    # provenance at a glance and the discovered_via filter above lets
+    # him zoom into just-Grok or just-manual sets.
+    _row_discovered_via = (row["discovered_via"] or "").strip()
+    _grok_badge_html = ""
+    if _row_discovered_via == "grok_semantic":
+        _grok_badge_html = (
+            "<span style='display:inline-block;"
+            "background:rgba(126,201,126,0.12);"
+            "color:#7ec97e;"
+            "font-family:\"JetBrains Mono\", monospace;"
+            "font-size:0.65rem;"
+            "letter-spacing:0.04em;"
+            "text-transform:uppercase;"
+            "padding:0.08rem 0.4rem;"
+            "border:1px solid rgba(126,201,126,0.28);"
+            "border-radius:2px;"
+            "margin-left:0.45rem;"
+            "vertical-align:middle;'>"
+            "grok_semantic"
+            "</span>"
+        )
     # /review-2 🟡 #1 — also label when the absolute floor (rather than the
     # %-of-followers calc) is the binding threshold; a 200-follower author's
     # pct calc rounds below the 15-likes floor, so the floor wins silently.
@@ -431,7 +478,7 @@ for row in rows:
                         border-radius:2px;'>
             <div style='display:flex; justify-content:space-between; align-items:baseline;'>
                 <span style='color:{PALETTE['bone']}; font-weight:500;
-                              font-family: "IBM Plex Sans", sans-serif;'>@{handle}</span>
+                              font-family: "IBM Plex Sans", sans-serif;'>@{handle}{_grok_badge_html}</span>
                 <span class='numeric' style='font-size:0.75rem; color:{PALETTE['bone_faint']};'>
                     {age} · #{rt_id}
                 </span>
