@@ -91,7 +91,9 @@ def validate_x_handle(handle: str) -> str:
     separators so the handle is safe to interpolate into a URL path
     component.
     """
-    clean = (handle or "").lstrip("@").strip()
+    # Strip whitespace first, then '@', then whitespace again — handles
+    # the '  @user_15  ' shape Daniel sometimes pastes from X mobile.
+    clean = (handle or "").strip().lstrip("@").strip()
     if not _X_HANDLE_RE.match(clean):
         raise ValueError(
             f"invalid X handle: {handle!r} "
