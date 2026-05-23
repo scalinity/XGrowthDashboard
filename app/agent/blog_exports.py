@@ -131,6 +131,13 @@ class BlogExport:
     seo_metadata_included: bool
     repurposing_links_included: bool
     exported_at_utc: str
+    # P6R-8: True when the export wrote a ready→exported transition
+    # (success path). False when the blog wasn't 'ready' to begin with
+    # (re-exports leave status untouched). None when the transition was
+    # attempted but failed AFTER the export row landed — the editor
+    # surfaces a yellow banner in that case so Daniel can manually
+    # re-trigger the transition.
+    status_transitioned: bool | None = False
 
 
 # ---------------------------------------------------------------------------
@@ -743,18 +750,24 @@ def export(
         raise ExportRecordFailedError(str(target.resolve()), original=exc) from exc
 
     # Auto-transition ready → exported, but ONLY ready → exported.
-    # Subsequent re-exports leave status untouched.
+    # Subsequent re-exports leave status untouched. P6R-8: surface the
+    # outcome via BlogExport.status_transitioned so the editor can show
+    # a banner when the transition failed (the export itself landed).
+    status_transitioned: bool | None = False
     if blog_row["status"] == "ready":
         try:
             _blogs.transition_status(conn, blog_id, "exported")
+            status_transitioned = True
         except _blogs.BlogError:
             # The export row + audit row already landed; a transition
-            # failure shouldn't roll those back. Log and continue.
+            # failure shouldn't roll those back. Surface to caller via
+            # status_transitioned=None and log for the operator.
             _LOG.warning(
                 "blog #%d: export succeeded but ready→exported transition failed",
                 blog_id,
                 exc_info=True,
             )
+            status_transitioned = None
 
     return BlogExport(
         id=export_id,
@@ -767,6 +780,7 @@ def export(
         seo_metadata_included=include_seo_metadata,
         repurposing_links_included=include_repurposing_links,
         exported_at_utc=exported_at_utc,
+        status_transitioned=status_transitioned,
     )
 
 

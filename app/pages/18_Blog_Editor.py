@@ -53,6 +53,7 @@ def _init_session_state() -> None:
         "editor_pending_suggestions": [],
         "editor_export_error": None,
         "editor_export_success": None,
+        "editor_export_warning": None,
         "editor_repurpose_error": None,
         "editor_repurpose_result": None,
         "editor_repurpose_blocked": None,
@@ -216,6 +217,19 @@ def _export_cb(*, blog_id: int) -> None:
         st.session_state["editor_export_success"] = (
             f"exported to {result.target_path} ({result.file_size_bytes} bytes)"
         )
+        # P6R-8: surface ready→exported transition failure as a yellow
+        # warning. status_transitioned is None ONLY when the transition
+        # was attempted (blog was 'ready') AND it failed AFTER the
+        # export row landed. The export itself is good; the status just
+        # didn't move — Daniel can re-trigger from the status selector.
+        if result.status_transitioned is None:
+            st.session_state["editor_export_warning"] = (
+                f"export succeeded but the ready→exported status transition "
+                f"failed. The file at {result.target_path} is valid; "
+                "re-trigger the transition manually from the status selector."
+            )
+        else:
+            st.session_state["editor_export_warning"] = None
     except _be.ExportRecordFailedError as exc:
         st.session_state["editor_export_error"] = (
             f"file written to {exc.target_path} BUT export record failed: "
@@ -690,6 +704,8 @@ def _render_export_dialog(blog_id: int) -> None:
 
     if st.session_state.get("editor_export_error"):
         st.error(st.session_state["editor_export_error"])
+    if st.session_state.get("editor_export_warning"):
+        st.warning(st.session_state["editor_export_warning"])
     if st.session_state.get("editor_export_success"):
         st.success(st.session_state["editor_export_success"])
 

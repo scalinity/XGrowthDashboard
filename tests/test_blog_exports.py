@@ -187,6 +187,58 @@ def test_export_auto_transitions_ready_to_exported(
     assert bm.get_blog(db_conn, blog_id).status == "exported"
 
 
+def test_export_surfaces_failed_status_transition_via_status_transitioned_flag(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """P6R-8: when the ready→exported transition fails AFTER the export
+    row landed, BlogExport.status_transitioned must be None so the
+    editor can surface a warning banner. (The export itself succeeded.)"""
+    from unittest.mock import patch
+    blog_id = _seed_blog_with_body(db_conn, status="ready")
+    # Patch transition_status to raise.
+    with patch(
+        "app.agent.blog_exports._blogs.transition_status",
+        side_effect=bm.BlogError("simulated transition failure"),
+    ):
+        result = be.export(
+            db_conn, blog_id=blog_id, format="markdown",
+            target_path=tmp_path / "transition_fail.md",
+        )
+    # Export row landed AND file written — only the transition failed.
+    assert result.id is not None
+    assert (tmp_path / "transition_fail.md").exists()
+    assert result.status_transitioned is None, (
+        "transition failure must be surfaced as None, not silently treated as success"
+    )
+    # blogs.status did NOT move.
+    assert bm.get_blog(db_conn, blog_id).status == "ready"
+
+
+def test_export_status_transitioned_true_on_happy_path(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """Happy path: ready→exported transition fires; flag is True."""
+    blog_id = _seed_blog_with_body(db_conn, status="ready")
+    result = be.export(
+        db_conn, blog_id=blog_id, format="markdown",
+        target_path=tmp_path / "happy.md",
+    )
+    assert result.status_transitioned is True
+
+
+def test_export_status_transitioned_false_on_re_export(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """Re-export of an already-'exported' blog leaves status untouched
+    and reports status_transitioned=False (no transition attempted)."""
+    blog_id = _seed_blog_with_body(db_conn, status="exported")
+    result = be.export(
+        db_conn, blog_id=blog_id, format="markdown",
+        target_path=tmp_path / "reexp.md",
+    )
+    assert result.status_transitioned is False
+
+
 def test_re_export_does_not_change_status_back(
     db_conn: sqlite3.Connection, tmp_path: Path,
 ) -> None:
