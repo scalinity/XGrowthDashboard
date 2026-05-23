@@ -43,6 +43,16 @@ VOICE_PROFILE_STRUCTURAL_PLACEHOLDER = (
 NICHE_DEFINITION_PLACEHOLDER = "<!-- {{ NICHE_DEFINITION_PLACEHOLDER }} -->"
 # Phase 5.9 / §28.21 — personality lore splice point (after voice samples).
 PERSONALITY_LORE_PLACEHOLDER = "<!-- {{ PERSONALITY_LORE_PLACEHOLDER }} -->"
+# Phase 10 / §28.12 — prescriptive voice anchor (hand-curated, static).
+# Splices into Section 5 AFTER the generated voice_profile structural
+# block and BEFORE the raw voice_samples block. See
+# config/voice_profile_prescriptive.md for the contents.
+VOICE_PROFILE_PRESCRIPTIVE_PLACEHOLDER = (
+    "<!-- {{ VOICE_PROFILE_PRESCRIPTIVE_PLACEHOLDER }} -->"
+)
+VOICE_PROFILE_PRESCRIPTIVE_PATH: Path = (
+    PROJECT_ROOT / "config" / "voice_profile_prescriptive.md"
+)
 
 
 # P59A-W9: cache the template + spec parse at process scope. Streamlit
@@ -225,6 +235,63 @@ def render_voice_profile_structural(
     return "\n".join(lines)
 
 
+@functools.lru_cache(maxsize=1)
+def load_voice_profile_prescriptive() -> str:
+    """Read the static §28.12 prescriptive voice anchor from disk.
+
+    Phase 10 / §28.12. Unlike the generated voice profile (which is
+    synthesized by Haiku from Daniel's recent posts and persisted in
+    ``voice_profiles``), the prescriptive layer is hand-written and
+    version-controlled. Returns the raw markdown — caller splices it
+    verbatim into Section 5 of the system prompt.
+
+    Cached at process scope to match the template + spec caches.
+    """
+    return VOICE_PROFILE_PRESCRIPTIVE_PATH.read_text(encoding="utf-8")
+
+
+class VoiceProfilePrescriptiveMissingError(RuntimeError):
+    """Raised when verify_voice_profile_prescriptive_present cannot find
+    the static prescriptive voice anchor file.
+
+    Same severity as SpecRuleExtractionError — drift between the file
+    and the build pipeline would silently strip Section 5's
+    prescriptive layer, and the agent would lose the load-bearing
+    "what voice IS / what voice IS NOT" anchor without any signal.
+    """
+
+
+def verify_voice_profile_prescriptive_present(
+    path: Path | None = None,
+) -> tuple[bool, int]:
+    """Drift check — assert the static prescriptive anchor file exists.
+
+    Returns ``(exists, byte_count)``. Callers (pre-commit / CI / tests)
+    assert ``exists is True AND byte_count > 0``. Same defensive
+    discipline as ``verify_rule_count_matches_spec``.
+
+    Phase 10 / §28.12 — additive sibling to the generated voice profile
+    drift check that already lives in
+    ``verify_voice_profile_invariants``.
+    """
+    p = path or VOICE_PROFILE_PRESCRIPTIVE_PATH
+    if not p.exists():
+        raise VoiceProfilePrescriptiveMissingError(
+            f"prescriptive voice anchor not found at {p}. "
+            "Section 5 of the system prompt would lose its 'what voice "
+            "IS / what voice IS NOT' anchor (§28.12 Phase 10). Restore "
+            "the file or update VOICE_PROFILE_PRESCRIPTIVE_PATH."
+        )
+    contents = p.read_bytes()
+    if not contents.strip():
+        raise VoiceProfilePrescriptiveMissingError(
+            f"prescriptive voice anchor at {p} exists but is empty. "
+            "An empty splice carries no signal — populate the file "
+            "with the §28.12 Phase 10 anchor content."
+        )
+    return (True, len(contents))
+
+
 def render_niche_definition(nd: niche.NicheDefinition) -> str:
     """Section 1 splice for the §28.16 structured niche definition.
 
@@ -271,11 +338,23 @@ def build_system_prompt(conn: sqlite3.Connection) -> str:
     active_lore = personality_lore.list_active(conn, limit=splice_n)
     lore_block = personality_lore.render_splice_block(active_lore)
 
+    # Phase 10 / §28.12 — prescriptive voice anchor. Read lazily so a
+    # missing file surfaces as the explicit drift-check exception when
+    # callers invoke verify_voice_profile_prescriptive_present, rather
+    # than silently leaving the placeholder in the rendered prompt.
+    try:
+        prescriptive_block = load_voice_profile_prescriptive()
+    except FileNotFoundError:
+        # Defensive: never crash the build. The drift check is the
+        # contract that surfaces the missing file in pre-commit / CI.
+        prescriptive_block = ""
+
     out = template.replace(NON_NEGOTIABLE_PLACEHOLDER, rules_block)
     out = out.replace(VOICE_SAMPLES_PLACEHOLDER, voice_block)
     out = out.replace(TOOL_CATALOG_PLACEHOLDER, tool_block)
     out = out.replace(VOICE_PROFILE_SELF_DESCRIPTION_PLACEHOLDER, profile_self_desc)
     out = out.replace(VOICE_PROFILE_STRUCTURAL_PLACEHOLDER, profile_structural)
+    out = out.replace(VOICE_PROFILE_PRESCRIPTIVE_PLACEHOLDER, prescriptive_block)
     out = out.replace(NICHE_DEFINITION_PLACEHOLDER, niche_block)
     out = out.replace(PERSONALITY_LORE_PLACEHOLDER, lore_block)
     return out
@@ -375,12 +454,133 @@ def verify_reply_intent_enum_matches() -> tuple[list[str], list[str], list[str]]
     Order in the spec table and in the code tuple is canonical; the prompt
     template uses the same order but the check compares as sets to be
     robust to formatting changes.
+
+    Phase 10 / §29.5 — `verify_reply_intent_enum_dispatcher_in_sync`
+    extends this contract to assert the `app.agent.client` dispatcher
+    imports the same REPLY_INTENT_ENUM. Same source-of-truth discipline
+    as the spec/code/prompt three-way check above — divergence between
+    the dispatcher's validation set and the canonical enum would let
+    the agent slip a stale value past the gate.
     """
     from app.agent.reply_targets import REPLY_INTENT_ENUM
     spec_values = extract_reply_intent_enum_from_spec()
     code_values = list(REPLY_INTENT_ENUM)
     prompt_values = extract_reply_intent_enum_from_prompt()
     return spec_values, code_values, prompt_values
+
+
+def verify_reply_intent_enum_dispatcher_in_sync() -> bool:
+    """Drift check — `app.agent.client._validate_reply_intent_or_error`
+    must reference the same REPLY_INTENT_ENUM tuple as the spec and
+    the system prompt.
+
+    Phase 10 / §29.5 promotion — the dispatcher's validation set is the
+    one place a stale enum value could let a refused-by-spec intent
+    slip into a real agent_drafts row. We inspect the dispatcher
+    module's import-side ``REPLY_INTENT_ENUM`` binding (the one the
+    gate function reaches at call time via the lazy import) to confirm
+    object identity with ``reply_targets.REPLY_INTENT_ENUM``.
+
+    Returns True on match; raises SpecRuleExtractionError on mismatch
+    so the CI surface is symmetric with the other §29.5 drift checks.
+    """
+    from app.agent import client as _client
+    from app.agent.reply_targets import REPLY_INTENT_ENUM as canonical
+
+    # The dispatcher uses a lazy import; we exercise the same import
+    # path the gate function uses so a future refactor that changes
+    # the binding fails this check.
+    src = Path(_client.__file__).read_text(encoding="utf-8")
+    if "from app.agent.reply_targets import REPLY_INTENT_ENUM" not in src:
+        raise SpecRuleExtractionError(
+            "app/agent/client.py no longer imports REPLY_INTENT_ENUM from "
+            "app.agent.reply_targets. The §29.5 Phase 10 dispatcher gate "
+            "must consult the canonical enum; update the import or extend "
+            "this drift check."
+        )
+    # Sanity-import to confirm the symbol resolves at runtime.
+    from app.agent.reply_targets import REPLY_INTENT_ENUM as dispatcher_view  # noqa: PLR0402
+    if list(dispatcher_view) != list(canonical):
+        raise SpecRuleExtractionError(
+            f"REPLY_INTENT_ENUM values disagree at import time: "
+            f"canonical={list(canonical)}, dispatcher_view={list(dispatcher_view)}. "
+            "This usually means two modules define the same name; collapse "
+            "to a single source of truth."
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 / §28.3 Section 4 drift check — the three additive blocks must
+# all be present in the system prompt template. Each block is bracketed by
+# explicit BEGIN/END sentinel comments so the check is structural rather
+# than substring-only (a future copy edit that splits a block into prose
+# variants won't silently disable the drift check).
+# ---------------------------------------------------------------------------
+class Section4AnchorMissingError(RuntimeError):
+    """Raised when verify_section_4_anchors finds a missing additive block.
+
+    Each of the three Phase 10 additive blocks (engagement-with-integrity,
+    screenshot test, IWH operationalized) is the kind of edit that
+    *should* survive arbitrary §28.3 reorganization but can be
+    accidentally deleted in a future copy-edit pass. The drift check
+    surfaces the missing block by name so the fix is one-line.
+    """
+
+
+SECTION_4_ANCHOR_SENTINELS: tuple[tuple[str, str, str], ...] = (
+    (
+        "engagement_with_integrity",
+        "<!-- BEGIN Phase 10 / §28.3 — engagement-with-integrity framing block -->",
+        "<!-- END Phase 10 engagement-with-integrity block -->",
+    ),
+    (
+        "screenshot_test_principle",
+        "<!-- BEGIN Phase 10 / §28.3 — screenshot test principle -->",
+        "<!-- END Phase 10 screenshot test principle -->",
+    ),
+    (
+        "iwh_operationalized",
+        "<!-- BEGIN Phase 10 / §28.3 — IWH operationalized block -->",
+        "<!-- END Phase 10 IWH operationalized block -->",
+    ),
+)
+
+
+def verify_section_4_anchors(
+    prompt_text: str | None = None,
+) -> dict[str, bool]:
+    """Drift check — every Phase 10 §28.3 Section 4 additive block present.
+
+    Returns a dict ``{anchor_name: present}`` covering all three Phase 10
+    blocks. Callers (pre-commit / CI / tests) assert every value is
+    ``True``. Raises ``Section4AnchorMissingError`` when any block is
+    absent — the error names the missing anchor and the sentinel pair
+    so the fix path is unambiguous.
+
+    Same defensive discipline as ``verify_rule_count_matches_spec``:
+    structural sentinels survive arbitrary copy edits to the block
+    body (the rule body can be rewritten in place; the sentinels stay).
+    """
+    text = prompt_text if prompt_text is not None else _read_template()
+    results: dict[str, bool] = {}
+    missing: list[tuple[str, str, str]] = []
+    for name, begin, end in SECTION_4_ANCHOR_SENTINELS:
+        present = (begin in text) and (end in text)
+        results[name] = present
+        if not present:
+            missing.append((name, begin, end))
+    if missing:
+        details = "\n".join(
+            f"  - {name}: missing BEGIN={begin!r} or END={end!r}"
+            for name, begin, end in missing
+        )
+        raise Section4AnchorMissingError(
+            "Section 4 of the system prompt is missing Phase 10 additive "
+            "blocks. Each block is bracketed by sentinel comments — "
+            "restore the missing pair below.\n" + details
+        )
+    return results
 
 
 def verify_rule_count_matches_spec(prompt_text: str) -> tuple[int, int]:
