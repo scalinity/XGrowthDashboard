@@ -1820,16 +1820,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# RV2-29: batch the three Phase-7-panel settings reads into one SQL call
+# to cut per-rerun round-trips. Streamlit reruns on every interaction;
+# 3 round-trips → 1 keeps the panel responsive.
+_phase7_settings_rows = conn.execute(
+    "SELECT key, value_json FROM settings WHERE key IN (?, ?, ?)",
+    ("data_collection_mode", "x_handle", "x_api_recent_failures_visible_days"),
+).fetchall()
+_phase7_settings: dict[str, str | None] = {
+    row["key"]: row["value_json"] for row in _phase7_settings_rows
+}
+
 # Mode toggle — the load-bearing flag the four jobs check before any
 # API call. The existing _SETTING_ROWS["Data sources"] panel above is
 # the canonical write surface; this is a read-only echo for visibility.
-_mode_row = conn.execute(
-    "SELECT value_json FROM settings WHERE key = 'data_collection_mode'"
-).fetchone()
 _mode_value = "(unset)"
-if _mode_row and _mode_row[0]:
+_mode_raw = _phase7_settings.get("data_collection_mode")
+if _mode_raw:
     try:
-        _mode_value = str(json.loads(_mode_row[0]) or "")
+        _mode_value = str(json.loads(_mode_raw) or "")
     except (TypeError, json.JSONDecodeError):
         _mode_value = "(unparseable)"
 _mode_color = "#7ec97e" if _mode_value == "api" else "#d9a86b"
@@ -1848,14 +1857,12 @@ st.markdown(
 # doesn't surface another account's snapshot timestamp as "Daniel's".
 # Matches the discipline of _already_have_manual_snapshot_today in
 # scripts/collect_account_snapshot.py.
-_x_handle_row = conn.execute(
-    "SELECT value_json FROM settings WHERE key = 'x_handle'"
-).fetchone()
 _daniel_handle = "dannyscalant"
-if _x_handle_row and _x_handle_row[0]:
+_handle_raw = _phase7_settings.get("x_handle")  # RV2-29 batched read
+if _handle_raw:
     try:
         _daniel_handle = str(
-            json.loads(_x_handle_row[0]) or _daniel_handle
+            json.loads(_handle_raw) or _daniel_handle
         ).lstrip("@").strip()
     except (TypeError, json.JSONDecodeError):
         pass
@@ -1912,13 +1919,12 @@ for _job_name, _ts in _last_refresh_rows:
     )
 
 # ----- Recent X API failures -----
-_failures_window_days_row = conn.execute(
-    "SELECT value_json FROM settings WHERE key = 'x_api_recent_failures_visible_days'"
-).fetchone()
+# RV2-29: read from the batched _phase7_settings dict instead of a 4th SELECT.
+_failures_window_raw = _phase7_settings.get("x_api_recent_failures_visible_days")
 _failures_window_days = 7
-if _failures_window_days_row and _failures_window_days_row[0]:
+if _failures_window_raw:
     try:
-        _failures_window_days = int(json.loads(_failures_window_days_row[0]))
+        _failures_window_days = int(json.loads(_failures_window_raw))
     except (TypeError, json.JSONDecodeError, ValueError):
         pass
 
