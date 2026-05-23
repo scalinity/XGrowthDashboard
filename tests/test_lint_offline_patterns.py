@@ -21,21 +21,24 @@ import pytest
 from app.agent import lint
 
 
-@pytest.mark.parametrize("tuple_name,patterns", [
-    ("ENGAGEMENT_BAIT_PATTERNS", lint.ENGAGEMENT_BAIT_PATTERNS),
-    ("REPLY_QUALITY_PATTERNS", lint.REPLY_QUALITY_PATTERNS),
-    ("RAGEBAIT_PATTERNS", lint.RAGEBAIT_PATTERNS),
-    ("MEME_PATTERNS", lint.MEME_PATTERNS),
-    ("LOW_QUALITY_THREAD_PATTERNS", lint.LOW_QUALITY_THREAD_PATTERNS),
+@pytest.mark.parametrize("tuple_name,patterns,arity", [
+    ("ENGAGEMENT_BAIT_PATTERNS", lint.ENGAGEMENT_BAIT_PATTERNS, 2),
+    # Phase 10 W5 — REPLY_QUALITY_PATTERNS grew a third slot carrying
+    # the canonical enum value, eliminating the prior substring-fallback
+    # _label_to_failure_mode helper.
+    ("REPLY_QUALITY_PATTERNS", lint.REPLY_QUALITY_PATTERNS, 3),
+    ("RAGEBAIT_PATTERNS", lint.RAGEBAIT_PATTERNS, 2),
+    ("MEME_PATTERNS", lint.MEME_PATTERNS, 2),
+    ("LOW_QUALITY_THREAD_PATTERNS", lint.LOW_QUALITY_THREAD_PATTERNS, 2),
 ])
-def test_pattern_tuples_compile_and_have_labels(tuple_name, patterns):
-    """RV2-27: every pattern compiles as a regex AND has a non-empty label."""
+def test_pattern_tuples_compile_and_have_labels(tuple_name, patterns, arity):
+    """RV2-27 + Phase 10 W5: every pattern compiles AND has the right arity."""
     assert patterns, f"{tuple_name} must be non-empty"
     for i, entry in enumerate(patterns):
-        assert isinstance(entry, tuple) and len(entry) == 2, (
-            f"{tuple_name}[{i}] must be a (pattern, label) tuple"
+        assert isinstance(entry, tuple) and len(entry) == arity, (
+            f"{tuple_name}[{i}] must be a {arity}-tuple"
         )
-        pattern, label = entry
+        pattern, label = entry[0], entry[1]
         assert isinstance(pattern, str) and pattern, (
             f"{tuple_name}[{i}] pattern must be non-empty string"
         )
@@ -47,6 +50,13 @@ def test_pattern_tuples_compile_and_have_labels(tuple_name, patterns):
         except re.error as exc:
             pytest.fail(
                 f"{tuple_name}[{i}] pattern {pattern!r} does not compile: {exc}"
+            )
+        # Phase 10 W5 — when the arity is 3, the third slot must be a
+        # canonical enum value in REPLY_QUALITY_FAILURE_MODES.
+        if arity == 3:
+            assert entry[2] in lint.REPLY_QUALITY_FAILURE_MODES, (
+                f"{tuple_name}[{i}] enum={entry[2]!r} not in "
+                f"REPLY_QUALITY_FAILURE_MODES"
             )
 
 
@@ -69,11 +79,12 @@ def test_engagement_bait_unpopular_opinion_not_in_dark_pattern():
 
 
 def test_reply_quality_self_promo_pattern_fires():
-    """Pin the §28.18 'check out my stuff' detection."""
+    """Pin the §28.18 'check out my stuff' detection.
+    Phase 10 W5: REPLY_QUALITY_PATTERNS entries are 3-tuples now."""
     sample = "Great post! Check out my product."
     assert any(
-        re.search(p, sample, re.IGNORECASE)
-        for p, _ in lint.REPLY_QUALITY_PATTERNS
+        re.search(entry[0], sample, re.IGNORECASE)
+        for entry in lint.REPLY_QUALITY_PATTERNS
     )
 
 
