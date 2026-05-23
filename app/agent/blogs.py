@@ -915,7 +915,14 @@ def set_seo_metadata(
     import json as _json
 
     _fetch_blog_row(conn, blog_id)
-    tags_json = _json.dumps(seo_tags) if seo_tags is not None else None
+    # P6R-21: coerce list elements to strings so a model that emits
+    # mixed types (numbers, dicts) doesn't poison the stored JSON —
+    # the read-side _seo_data_for_blog already calls str(t) on each
+    # tag for safety, but coercing on write keeps the stored value
+    # itself uniform and prevents future readers from being surprised.
+    tags_json = (
+        _json.dumps([str(t) for t in seo_tags]) if seo_tags is not None else None
+    )
     with transaction(conn):
         conn.execute(
             """
