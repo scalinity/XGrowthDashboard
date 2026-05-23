@@ -319,7 +319,10 @@ def _require_confidence(payload: dict[str, Any], key: str = "confidence_label") 
     return v
 
 
-_H2_RE = re.compile(r"^##\s+", re.MULTILINE)
+# P6R-15: require at least one non-whitespace character after the H2
+# marker so `"## \n"` (heading marker with no body) does not count as
+# a real heading and inflate the cross-check.
+_H2_RE = re.compile(r"^##\s+\S", re.MULTILINE)
 
 
 def _count_h2_headings(markdown: str) -> int:
