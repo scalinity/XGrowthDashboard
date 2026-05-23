@@ -166,11 +166,24 @@ def _accept_suggestion_cb(*, blog_id: int, index: int) -> None:
             anchor = sug["anchor"]
             replacement = sug["replacement"]
             # Substring replace on the anchor — UI surfaces the
-            # suggestion with the exact anchor the model emitted; if
-            # it doesn't match (rare), surface an error.
-            if anchor not in body:
+            # suggestion with the exact anchor the model emitted.
+            occurrences = body.count(anchor)
+            if occurrences == 0:
                 st.session_state["editor_save_error"] = (
                     f"suggestion anchor not found in body: {anchor[:40]}…"
+                )
+                return
+            # P6R-9: if the anchor matches multiple paragraphs (common
+            # when headings repeat across sections), reject rather than
+            # silently rewriting the FIRST occurrence and surprising
+            # Daniel. Surface the ambiguity so he can manually pick
+            # which paragraph to rewrite (or re-prompt for a more
+            # specific anchor).
+            if occurrences > 1:
+                st.session_state["editor_save_error"] = (
+                    f"suggestion anchor matches {occurrences} paragraphs in the body — "
+                    "ambiguous; rewrite the matching paragraph manually or re-prompt "
+                    "the agent for a more-specific anchor."
                 )
                 return
             new_body = body.replace(anchor, replacement, 1)
