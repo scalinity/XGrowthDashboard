@@ -76,6 +76,25 @@ class ReplierExcerpt:
     text: str | None = None
 
 
+_X_STATUS_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_x_post_id_from_url(url: str) -> str | None:
+    """Pull the numeric tweet ID out of an X status URL. None on failure.
+
+    Used by the Phase 7 ``auto_scan`` path to derive ``conversation_id``
+    for the ``/2/tweets/search/recent`` query. Lenient — accepts both
+    ``x.com`` and ``twitter.com`` hosts and trailing query strings.
+    """
+    if not url:
+        return None
+    m = _X_STATUS_URL_RE.search(url)
+    return m.group(1) if m else None
+
+
 def parse_replier_paste(payload: str) -> list[ReplierExcerpt]:
     """Parse Daniel's paste into per-replier records.
 
@@ -300,15 +319,32 @@ def score_replier_pool(
     conn: sqlite3.Connection,
     *,
     thread_url: str,
-    replier_handles_or_excerpts: str,
+    replier_handles_or_excerpts: str = "",
     lookback_minutes: int = 60,  # noqa: ARG001 — V1.1+ uses this
+    auto_scan: bool = False,
 ) -> dict:
-    """Score every pasted replier + land each as a reply_targets row.
+    """Score every replier + land each as a reply_targets row.
+
+    Two ingestion paths share the same scoring pipeline:
+
+    * Manual paste (``auto_scan=False``, the always-available fallback) —
+      ``replier_handles_or_excerpts`` is Daniel's pasted text.
+    * Programmatic scan (``auto_scan=True``, Phase 7) — calls
+      ``xurl /2/tweets/search/recent?query=conversation_id:<id>`` via
+      the shared xurl wrapper. Replier handles + first-line excerpts
+      are extracted from the X API response.
 
     Returns a dict with the candidates list + counts. Each row gets
     ``source='replier_under_thread'``. Idempotent on
-    (thread_url, handle): re-pasting the same combo refreshes the
+    (thread_url, handle): re-running on the same combo refreshes the
     existing row's scores in place.
+
+    Manual fallback contract: if ``auto_scan=True`` and the X API call
+    fails (rate-limit, auth missing, transient error), the function
+    returns an error dict so the caller can prompt Daniel to paste the
+    replier list manually. No silent fall-back to the paste path —
+    callers explicitly retry with ``auto_scan=False`` once Daniel
+    pastes.
     """
     nd = _niche.get_niche(conn)
     if not nd.is_defined():
@@ -321,6 +357,90 @@ def score_replier_pool(
             "created_count": 0,
             "updated_count": 0,
         }
+
+    if auto_scan:
+        # Phase 7 programmatic path. Extract conversation_id from the
+        # thread URL, call /2/tweets/search/recent?query=conversation_id:<id>,
+        # then synthesize a paste-shaped string that parse_replier_paste
+        # consumes. This keeps the scoring pipeline single-sourced and
+        # the manual paste flow remains the always-available fallback.
+        from app import x_client  # local import — Phase 7-only dependency
+
+        conversation_id = _extract_x_post_id_from_url(thread_url)
+        if not conversation_id:
+            return {
+                "error": (
+                    "auto_scan requires a parseable X status URL "
+                    f"(could not extract conversation_id from {thread_url!r}); "
+                    "fall back to manual paste."
+                ),
+                "candidates": [],
+                "created_count": 0,
+                "updated_count": 0,
+            }
+        endpoint = (
+            f"/2/tweets/search/recent?query=conversation_id:{conversation_id}"
+            f"&max_results=100&tweet.fields=author_id,text"
+            f"&expansions=author_id&user.fields=username"
+        )
+        try:
+            resp = x_client.request(
+                endpoint,
+                method="GET",
+                conn=conn,
+                log_source="xurl",
+                log_notes="score_replier_pool auto_scan",
+            )
+        except x_client.XApiError as exc:
+            return {
+                "error": (
+                    f"auto_scan X API call failed ({type(exc).__name__}: {exc}); "
+                    "fall back to manual paste."
+                ),
+                "candidates": [],
+                "created_count": 0,
+                "updated_count": 0,
+            }
+
+        body = resp.body if isinstance(resp.body, dict) else {}
+        tweets = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(tweets, list):
+            tweets = []
+        includes = body.get("includes") if isinstance(body, dict) else None
+        users = includes.get("users", []) if isinstance(includes, dict) else []
+        username_by_id: dict[str, str] = {}
+        if isinstance(users, list):
+            for u in users:
+                if isinstance(u, dict) and u.get("id"):
+                    username_by_id[str(u["id"])] = str(u.get("username") or "")
+
+        # Synthesize the paste-shaped string. parse_replier_paste already
+        # handles '@handle: excerpt' and bare '@handle' formats.
+        lines: list[str] = []
+        for tweet in tweets:
+            if not isinstance(tweet, dict):
+                continue
+            text = (tweet.get("text") or "").strip().replace("\n", " ")
+            if not text:
+                continue
+            author_id = str(tweet.get("author_id") or "")
+            username = username_by_id.get(author_id, "").strip()
+            handle_prefix = f"@{username}: " if username else ""
+            # Truncate the excerpt for the paste-shaped string; full text
+            # would dwarf the score_replier excerpt-length heuristic.
+            lines.append(f"{handle_prefix}{text[:240]}")
+        replier_handles_or_excerpts = "\n\n".join(lines)
+        if not replier_handles_or_excerpts:
+            return {
+                "error": (
+                    "auto_scan returned no repliers; the thread may be empty "
+                    "or the conversation_id was wrong. Falling back to manual "
+                    "paste."
+                ),
+                "candidates": [],
+                "created_count": 0,
+                "updated_count": 0,
+            }
 
     parsed = parse_replier_paste(replier_handles_or_excerpts)
     if not parsed:
