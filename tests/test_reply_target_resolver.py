@@ -338,6 +338,36 @@ def test_modifiers_skip_none_inputs_for_unscored_history():
     assert (adj_eng, adj_action) == (2, "reply_now")
 
 
+# RV2-32: pin the velocity=None + timing=None fixed-point identity as a
+# named test so the pre-Phase-7-history state is legible. The same
+# assertion runs as 1 cell of the 4,096-combo test but a named test
+# documents the contract.
+@pytest.mark.parametrize("base_eng,base_action", [
+    (0, "skip"),
+    (1, "consider"),
+    (2, "reply_if_time"),
+    (3, "reply_now"),
+])
+def test_rv2_32_modifiers_velocity_none_timing_none_is_identity(
+    base_eng: int, base_action: str,
+) -> None:
+    """RV2-32: when no snapshot history exists (velocity=None) AND
+    timing isn't supplied (timing=None), apply_velocity_timing_modifiers
+    must be the identity function on (engagement_surface, action). This
+    is the pre-Phase-7-metrics-refresh-running state and the freshly-
+    added-candidate state."""
+    result = apply_velocity_timing_modifiers(
+        base_engagement_surface=base_eng,
+        base_recommended_action=base_action,
+        velocity=None,
+        timing=None,
+    )
+    assert result == (base_eng, base_action), (
+        f"Modifier identity violated for ({base_eng}, {base_action!r}): "
+        f"got {result}"
+    )
+
+
 def test_modifiers_reject_out_of_range_engagement():
     """The function asserts its preconditions explicitly."""
     with pytest.raises(ValueError):
