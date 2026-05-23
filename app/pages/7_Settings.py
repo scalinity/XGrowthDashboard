@@ -1973,6 +1973,306 @@ else:
         )
 
 # ---------------------------------------------------------------------------
+# Phase 9 — Grok firehose discovery (§29.12).
+# ---------------------------------------------------------------------------
+# Three panels under one hairline:
+#
+#   1. Grok queries panel: CRUD over grok_query_list_json + the kill
+#      switch + cadence + "Run sweep now" affordance.
+#   2. Combined AI spend this month (§28.6) — Anthropic + xAI split
+#      with progress bar against combined_ai_monthly_cost_ceiling_usd.
+#   3. Recent Grok failures (last 7 days) — joined from grok_api_responses.
+hairline()
+st.subheader("Grok firehose discovery (Phase 9)")
+st.markdown(
+    "<div class='dim' style='margin-bottom:0.6rem;font-size:0.86rem;'>"
+    "Grok finds X posts matching natural-language queries Daniel maintains. "
+    "Every candidate verifies against the X API before scoring "
+    "(§29.2 — Grok is discovery, not measurement). Combined Anthropic + xAI "
+    "spend is gated by <code>combined_ai_monthly_cost_ceiling_usd</code> "
+    "(§28.6).</div>",
+    unsafe_allow_html=True,
+)
+
+# ----- Phase 9 settings batch read -----
+_phase9_settings_rows = conn.execute(
+    "SELECT key, value_json FROM settings WHERE key IN (?, ?, ?, ?)",
+    (
+        "grok_api_enabled",
+        "grok_query_list_json",
+        "grok_discovery_sweep_interval_minutes",
+        "combined_ai_monthly_cost_ceiling_usd",
+    ),
+).fetchall()
+_phase9_settings: dict[str, str | None] = {
+    row["key"]: row["value_json"] for row in _phase9_settings_rows
+}
+
+# ----- XAI_API_KEY status indicator (never displays the key value) -----
+import os as _os_for_grok  # noqa: E402
+
+_xai_key_configured = bool(_os_for_grok.environ.get("XAI_API_KEY", "").strip())
+_xai_key_color = "#7ec97e" if _xai_key_configured else "#d9a86b"
+_xai_key_label = "configured" if _xai_key_configured else "not set"
+st.markdown(
+    f"<div style='margin:0.4rem 0 0.8rem 0;font-size:0.92rem;'>"
+    f"<strong>XAI_API_KEY:</strong> "
+    f"<span style='color:{_xai_key_color};font-family:\"JetBrains Mono\", monospace;'>"
+    f"{html.escape(_xai_key_label)}</span>"
+    f"<span class='dim' style='margin-left:0.6rem;'>"
+    f"(set in .env; see .env.example for the line)</span></div>",
+    unsafe_allow_html=True,
+)
+
+# ----- grok_api_enabled toggle + cadence input -----
+_grok_enabled_raw = _phase9_settings.get("grok_api_enabled")
+_grok_enabled_value = True  # comprehensive default per §29.12
+if _grok_enabled_raw:
+    try:
+        _grok_enabled_value = bool(json.loads(_grok_enabled_raw))
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+_grok_interval_raw = _phase9_settings.get("grok_discovery_sweep_interval_minutes")
+_grok_interval_value = 120
+if _grok_interval_raw:
+    try:
+        _grok_interval_value = int(json.loads(_grok_interval_raw))
+    except (TypeError, json.JSONDecodeError, ValueError):
+        pass
+
+_grok_toggle_cols = st.columns([1, 1])
+with _grok_toggle_cols[0]:
+    _new_enabled = st.checkbox(
+        "Grok API enabled",
+        value=_grok_enabled_value,
+        key="settings_grok_api_enabled",
+        help=(
+            "When OFF the discovery sweep aborts at start; manual + X API "
+            "search paths still work. Default ON per §29.12."
+        ),
+    )
+    if _new_enabled != _grok_enabled_value:
+        conn.execute(
+            "INSERT INTO settings (key, value_json) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            ("grok_api_enabled", json.dumps(bool(_new_enabled))),
+        )
+        conn.commit()
+        st.toast(f"grok_api_enabled → {bool(_new_enabled)}")
+        st.rerun()
+
+with _grok_toggle_cols[1]:
+    _new_interval = st.number_input(
+        "Sweep interval (minutes)",
+        min_value=15,
+        max_value=24 * 60,
+        value=int(_grok_interval_value),
+        step=15,
+        key="settings_grok_sweep_interval",
+        help="launchd plist StartInterval default (120 min). Edit the plist after changing here.",
+    )
+    if int(_new_interval) != int(_grok_interval_value):
+        conn.execute(
+            "INSERT INTO settings (key, value_json) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            (
+                "grok_discovery_sweep_interval_minutes",
+                json.dumps(int(_new_interval)),
+            ),
+        )
+        conn.commit()
+        st.toast(f"grok_discovery_sweep_interval_minutes → {int(_new_interval)}")
+        st.rerun()
+
+# ----- Grok queries CRUD panel -----
+st.markdown(
+    "<div style='margin:0.8rem 0 0.3rem 0;font-size:0.92rem;'>"
+    "<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
+    "Grok queries</strong>"
+    "<span class='dim'> · one natural-language query per line · empty list = no Grok calls</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+_grok_queries_raw = _phase9_settings.get("grok_query_list_json")
+_grok_queries: list[str] = []
+if _grok_queries_raw:
+    try:
+        _parsed = json.loads(_grok_queries_raw)
+        if isinstance(_parsed, list):
+            _grok_queries = [str(q) for q in _parsed if isinstance(q, str)]
+    except (TypeError, json.JSONDecodeError):
+        _grok_queries = []
+
+_queries_text_default = "\n".join(_grok_queries)
+_queries_text_new = st.text_area(
+    "Queries (one per line)",
+    value=_queries_text_default,
+    height=160,
+    key="settings_grok_queries_textarea",
+    help=(
+        "Example: 'home cooks frustrated with meal planning'. Each line "
+        "becomes one Grok firehose search per sweep."
+    ),
+)
+_queries_cols = st.columns([1, 1, 4])
+with _queries_cols[0]:
+    if st.button("Save queries", key="settings_grok_save_queries"):
+        _new_queries = [
+            line.strip()
+            for line in (_queries_text_new or "").splitlines()
+            if line.strip()
+        ]
+        conn.execute(
+            "INSERT INTO settings (key, value_json) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            ("grok_query_list_json", json.dumps(_new_queries)),
+        )
+        conn.commit()
+        st.toast(f"saved {len(_new_queries)} query/queries")
+        st.rerun()
+with _queries_cols[1]:
+    if st.button(
+        "Run sweep now",
+        key="settings_grok_run_sweep_now",
+        help=(
+            "Runs app/jobs/grok_discovery_sweep.py synchronously. Honors "
+            "the kill switch + ceiling + query list."
+        ),
+    ):
+        with st.spinner("Running Grok sweep (this may take 30–60 seconds)…"):
+            try:
+                from app.jobs.grok_discovery_sweep import run as _run_grok_sweep
+                _sweep_summary = _run_grok_sweep(conn)
+                if _sweep_summary.get("error"):
+                    st.warning(
+                        f"sweep finished with note: {_sweep_summary['error']} "
+                        f"(discovered={_sweep_summary.get('candidates_discovered', 0)}, "
+                        f"inserted={_sweep_summary.get('candidates_inserted', 0)})"
+                    )
+                else:
+                    st.success(
+                        f"sweep OK · queries_run={_sweep_summary.get('queries_run', 0)} · "
+                        f"discovered={_sweep_summary.get('candidates_discovered', 0)} · "
+                        f"verified={_sweep_summary.get('candidates_verified', 0)} · "
+                        f"inserted={_sweep_summary.get('candidates_inserted', 0)} · "
+                        f"rejected_404={_sweep_summary.get('candidates_rejected_404', 0)}"
+                    )
+            except Exception as _sweep_err:
+                st.error(f"sweep failed: {_sweep_err}")
+
+# ----- Combined AI spend this month (§28.6) -----
+hairline()
+st.markdown(
+    "<div style='margin:0.4rem 0 0.3rem 0;font-size:0.95rem;'>"
+    "<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
+    "Combined AI spend this month</strong>"
+    "<span class='dim'> · Anthropic + xAI Grok · §28.6 ceiling</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+from app.agent import cost as _cost_module  # noqa: E402
+
+_anthropic_mtd = _cost_module.month_to_date_spend_usd(conn)
+_xai_mtd = _cost_module.xai_month_to_date_spend_usd(conn)
+_combined_mtd = _anthropic_mtd + _xai_mtd
+_combined_cap = _cost_module.get_monthly_ceiling_usd(conn)
+_combined_pct = (_combined_mtd / _combined_cap) if _combined_cap > 0 else 0.0
+_combined_pct_capped = max(0.0, min(_combined_pct, 1.0))
+_combined_color = (
+    "#d97e7e" if _combined_pct >= 1.0
+    else "#d9a86b" if _combined_pct >= 0.8
+    else "#7ec97e"
+)
+st.progress(
+    _combined_pct_capped,
+    text=(
+        f"${_combined_mtd:.2f} of ${_combined_cap:.2f} "
+        f"({_combined_pct * 100:.1f}%)"
+    ),
+)
+st.markdown(
+    f"<div style='font-family:\"JetBrains Mono\", monospace;"
+    f"font-size:0.86rem;color:{_combined_color};margin-bottom:0.5rem;'>"
+    f"Anthropic: ${_anthropic_mtd:.4f} · xAI Grok: ${_xai_mtd:.4f}"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+if _combined_pct >= 1.0:
+    st.error(
+        "Combined AI ceiling reached. Anthropic agent calls AND Grok sweep "
+        "are both paused. Raise the cap above (Growth Agent → "
+        "combined_ai_monthly_cost_ceiling_usd) or wait for the next month."
+    )
+elif _combined_pct >= 0.8:
+    st.warning(
+        f"Combined AI spend at {_combined_pct * 100:.0f}% of the ceiling — "
+        "yellow banner per §28.6."
+    )
+
+# ----- Recent Grok failures (last 7 days) -----
+_grok_fail_window_days = 7
+try:
+    _grok_fail_rows = conn.execute(
+        """
+        SELECT id, query, response_status_code, rejection_reason,
+               created_at_utc
+          FROM grok_api_responses
+         WHERE (rejection_reason IS NOT NULL
+                OR (response_status_code IS NOT NULL AND response_status_code >= 400))
+           AND created_at_utc >= datetime('now', ?)
+         ORDER BY created_at_utc DESC
+         LIMIT 50
+        """,
+        (f"-{_grok_fail_window_days} days",),
+    ).fetchall()
+except sqlite3.OperationalError:
+    # grok_api_responses missing — pre-migration-021 DB. Render empty.
+    _grok_fail_rows = []
+
+st.markdown(
+    f"<div style='margin:0.8rem 0 0.3rem 0;font-size:0.92rem;'>"
+    f"<strong style='font-family:\"IBM Plex Sans\", sans-serif;'>"
+    f"Recent Grok failures</strong>"
+    f"<span class='dim'> · last {_grok_fail_window_days} days · "
+    f"{len(_grok_fail_rows)} event(s)</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+if not _grok_fail_rows:
+    st.markdown(
+        "<div class='dim' style='font-size:0.86rem;margin-bottom:0.5rem;'>"
+        "(no Grok failures recorded in the window)</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    for _gfail in _grok_fail_rows:
+        _gf_status = _gfail[2]
+        _gf_reason = _gfail[3] or ""
+        _gf_badge_color = "#d97e7e"
+        if _gf_reason == "verification_404":
+            _gf_badge_color = "#a39d92"  # informational, not failure
+        elif _gf_reason in ("rate_limit_429", "cost_ceiling_hit"):
+            _gf_badge_color = "#d9a86b"
+        elif _gf_status is not None and _gf_status >= 500:
+            _gf_badge_color = "#d97e7e"
+        _gf_status_label = (
+            f"HTTP {int(_gf_status)}" if _gf_status is not None else "—"
+        )
+        st.markdown(
+            f"<div style='font-family:\"JetBrains Mono\", monospace;"
+            f"font-size:0.82rem;line-height:1.55;'>"
+            f"<span style='color:#a39d92;'>{html.escape(str(_gfail[4]))}</span> · "
+            f"<span style='color:{_gf_badge_color};'>{html.escape(_gf_status_label)}</span> · "
+            f"<span style='color:{_gf_badge_color};'>{html.escape(_gf_reason or 'http_error')}</span> · "
+            f"<span class='dim'>{html.escape(str(_gfail[1] or '')[:80])}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+# ---------------------------------------------------------------------------
 # §14.7 / §28.30 — Audit log viewer (Phase 5.11).
 # ---------------------------------------------------------------------------
 # Read-only window onto every state-changing event in the system. The
