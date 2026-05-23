@@ -55,8 +55,17 @@ from app.db import transaction
 
 _LOG = logging.getLogger(__name__)
 
+PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+
 ExportFormat = Literal["markdown", "html", "json", "mdx"]
 VALID_FORMATS: frozenset[str] = frozenset({"markdown", "html", "json", "mdx"})
+
+_FORMAT_EXTENSIONS: dict[str, frozenset[str]] = {
+    "markdown": frozenset({".md", ".markdown"}),
+    "html":     frozenset({".html", ".htm"}),
+    "json":     frozenset({".json"}),
+    "mdx":      frozenset({".mdx"}),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +96,24 @@ class ExportRecordFailedError(BlogExportError):
         super().__init__(
             f"file written to {target_path} but export record failed: {original}"
         )
+
+
+class ExportPathOutsideRootError(BlogExportError):
+    """Raised when ``target_path`` resolves outside the configured
+    ``blog_export_default_directory`` root (CWE-22 / CWE-73).
+
+    The export writer constrains every path to the configured root so a
+    fat-fingered ``/etc/hosts`` or `..`-traversal from the editor's
+    free-text target field can't clobber arbitrary files under
+    Daniel's user account.
+    """
+
+
+class ExportPathExtensionMismatchError(BlogExportError):
+    """Raised when ``target_path``'s extension does not match the
+    requested ``format`` (e.g. ``format='markdown'`` with
+    ``target_path='out.json'`` — almost certainly a typo, and worth
+    refusing rather than silently writing the wrong-suffix file)."""
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +445,83 @@ def _sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _allowed_export_root(conn: sqlite3.Connection) -> Path:
+    """Return the resolved absolute path of the configured export root.
+
+    Reads the ``blog_export_default_directory`` setting; falls back to
+    the migration default ``data/blog_exports/`` (relative to repo
+    root). Always resolves to an absolute, fully-resolved path so the
+    ``relative_to`` check in :func:`_validate_target_path` cannot be
+    fooled by symlinks or ``..`` components in the configured root.
+    """
+    raw = "data/blog_exports/"
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'blog_export_default_directory'"
+    ).fetchone()
+    if row is not None and row[0]:
+        try:
+            parsed = json.loads(row[0])
+            if isinstance(parsed, str) and parsed.strip():
+                raw = parsed
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    root = Path(raw)
+    if not root.is_absolute():
+        root = PROJECT_ROOT / root
+    # mkdir before resolve so symlink targets exist; the resolve() then
+    # collapses symlinks so the relative_to() check is meaningful.
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def _validate_target_path(
+    conn: sqlite3.Connection, target: Path, *, format: str,
+) -> Path:
+    """Resolve and constrain ``target`` against the configured export root.
+
+    P6R-3: pre-fix, ``target_path`` went verbatim into ``Path()`` →
+    ``mkdir(parents=True)`` + ``os.replace``, so a free-text input of
+    ``/etc/hosts`` or ``../../README.md`` would overwrite arbitrary
+    files. Post-fix: resolve to an absolute path, then verify it lives
+    under :func:`_allowed_export_root`. Path traversal, absolute paths
+    outside the root, and ``..``-laden relatives all raise
+    :class:`ExportPathOutsideRootError`. Also validates that the
+    extension matches the requested format to catch typos.
+    """
+    allowed_root = _allowed_export_root(conn)
+    try:
+        # Treat relative target paths as relative to the export root,
+        # NOT to the process cwd — Streamlit's cwd is configurable and
+        # cwd-relative paths surprise readers.
+        candidate = target.expanduser()
+        if not candidate.is_absolute():
+            candidate = allowed_root / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise BlogExportError(
+            f"could not resolve target_path {target!r}: {exc}"
+        ) from exc
+
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError:
+        raise ExportPathOutsideRootError(
+            f"target_path {resolved} is outside the configured export "
+            f"root {allowed_root}. Set blog_export_default_directory in "
+            "Settings if you want a different root; per-export "
+            "out-of-root writes are not permitted."
+        )
+
+    expected_exts = _FORMAT_EXTENSIONS.get(format, frozenset())
+    if expected_exts and resolved.suffix.lower() not in expected_exts:
+        raise ExportPathExtensionMismatchError(
+            f"target_path {resolved.name!r} extension does not match "
+            f"format={format!r} (expected one of {sorted(expected_exts)})"
+        )
+
+    return resolved
+
+
 def _atomic_write_file(target_path: Path, contents: str) -> int:
     """Write ``contents`` to ``target_path`` via temp-then-rename.
 
@@ -532,7 +636,12 @@ def export(
             version_number=current_version_number,
         )
 
-    target = Path(target_path)
+    # P6R-3: constrain target_path to the configured export root BEFORE
+    # any filesystem operation. Path-traversal + absolute-out-of-root
+    # paths raise ExportPathOutsideRootError; format/extension typos
+    # raise ExportPathExtensionMismatchError. No file is written, no
+    # DB row is inserted.
+    target = _validate_target_path(conn, Path(target_path), format=format)
     try:
         file_size_bytes = _atomic_write_file(target, contents)
     except OSError as exc:

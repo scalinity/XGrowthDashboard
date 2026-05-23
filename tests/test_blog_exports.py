@@ -20,6 +20,23 @@ from app.agent import blog_exports as be
 from app.agent import blogs as bm
 
 
+@pytest.fixture(autouse=True)
+def _point_exports_root_at_tmp(
+    db_conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """P6R-3: blog_exports.export now constrains target_path to the
+    configured root. Tests write to ``tmp_path``, so we update the
+    setting AND the PROJECT_ROOT-relative fallback for the duration of
+    each test."""
+    import json as _json
+    db_conn.execute(
+        "UPDATE settings SET value_json = ? "
+        "WHERE key = 'blog_export_default_directory'",
+        (_json.dumps(str(tmp_path)),),
+    )
+    return tmp_path
+
+
 def _seed_blog_with_body(
     db_conn: sqlite3.Connection, *, body: str = "# Title\n\nFirst paragraph.\n\n## Section\n\nMore text.",
     status: str = "ready",
@@ -324,3 +341,69 @@ def test_list_exports_returns_newest_first(
     # IDs should be DESC by exported_at_utc; the latest insertion
     # should be first.
     assert exports[0].id > exports[1].id > exports[2].id
+
+
+# ---------------------------------------------------------------------------
+# P6R-3 — path-traversal regression tests.
+# ---------------------------------------------------------------------------
+def test_export_rejects_absolute_path_outside_root(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """An absolute target path outside the configured export root
+    must raise ExportPathOutsideRootError; no file written, no DB row."""
+    blog_id = _seed_blog_with_body(db_conn)
+    # /tmp is not the configured tmp_path root (autouse fixture points
+    # the root at tmp_path), so /tmp/escape.md is outside.
+    bad_path = "/tmp/p6r3_should_not_exist.md"
+    with pytest.raises(be.ExportPathOutsideRootError):
+        be.export(db_conn, blog_id=blog_id, format="markdown",
+                  target_path=bad_path)
+    assert not Path(bad_path).exists()
+    assert db_conn.execute(
+        "SELECT COUNT(*) FROM blog_exports WHERE blog_id = ?", (blog_id,)
+    ).fetchone()[0] == 0
+
+
+def test_export_rejects_dotdot_traversal(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """Relative paths with .. that escape the root must raise."""
+    blog_id = _seed_blog_with_body(db_conn)
+    with pytest.raises(be.ExportPathOutsideRootError):
+        be.export(db_conn, blog_id=blog_id, format="markdown",
+                  target_path="../escape.md")
+    # And /etc/passwd-shape attempt.
+    with pytest.raises(be.ExportPathOutsideRootError):
+        be.export(db_conn, blog_id=blog_id, format="markdown",
+                  target_path="/etc/p6r3_should_not_exist.md")
+    assert db_conn.execute(
+        "SELECT COUNT(*) FROM blog_exports WHERE blog_id = ?", (blog_id,)
+    ).fetchone()[0] == 0
+
+
+def test_export_rejects_extension_mismatch(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """format='markdown' + target_path='out.json' must raise."""
+    blog_id = _seed_blog_with_body(db_conn)
+    with pytest.raises(be.ExportPathExtensionMismatchError):
+        be.export(db_conn, blog_id=blog_id, format="markdown",
+                  target_path=tmp_path / "wrong_suffix.json")
+    assert db_conn.execute(
+        "SELECT COUNT(*) FROM blog_exports WHERE blog_id = ?", (blog_id,)
+    ).fetchone()[0] == 0
+
+
+def test_export_accepts_relative_path_inside_root(
+    db_conn: sqlite3.Connection, tmp_path: Path,
+) -> None:
+    """Relative target paths resolve against the configured root, not
+    the process cwd. Daniel typing `mypost.md` writes to
+    `<allowed_root>/mypost.md`, not to wherever Streamlit happens to be
+    running from."""
+    blog_id = _seed_blog_with_body(db_conn)
+    result = be.export(db_conn, blog_id=blog_id, format="markdown",
+                       target_path="relative_inside.md")
+    expected = (tmp_path / "relative_inside.md").resolve()
+    assert Path(result.target_path) == expected
+    assert expected.exists()
