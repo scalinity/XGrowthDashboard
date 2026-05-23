@@ -68,6 +68,12 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
 _BATCH_LIMIT: int = 100
 
+# RV2-15: minimum elapsed minutes for a velocity-rate computation. Below
+# this threshold the per-hour rate amplifies sub-minute counter jitter
+# into spurious gains/decays. One full minute is the floor where SQLite's
+# YYYY-MM-DD HH:MM:SS resolution gives a stable delta.
+_MIN_SAMPLE_MINUTES: float = 1.0
+
 # /2/tweets?ids=… is the canonical batch endpoint; we add public_metrics
 # only (reply-target candidates are third-party posts, so non_public_metrics
 # /organic_metrics aren't authorized to Daniel's app).
@@ -157,11 +163,17 @@ def _compute_rates(
     three return None. Once a prior snapshot exists the rate is
     ``(new - prev) / hours_elapsed``.
     """
+    # RV2-15: clamp sub-minute deltas. Two consecutive snapshots
+    # inserted within the same minute would produce a tiny positive
+    # ``minutes_since_previous`` (e.g. 0.05) which we'd multiply by 60×
+    # to per-hour, amplifying counter jitter into noise. The
+    # `< _MIN_SAMPLE_MINUTES` floor ensures we only compute a rate when
+    # at least a minute has elapsed; below that the rate is undefined.
     if (
         previous_like_count is None
         or previous_reply_count is None
         or minutes_since_previous is None
-        or minutes_since_previous <= 0.0
+        or minutes_since_previous < _MIN_SAMPLE_MINUTES
     ):
         return None, None, None
     hours = minutes_since_previous / 60.0

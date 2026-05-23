@@ -43,6 +43,7 @@ class _CassetteInteraction:
 
     method: str
     uri: str
+    request_body: dict[str, Any] | list[Any] | None
     response_status_code: int | None
     response_body: dict[str, Any] | list[Any] | None
     response_stderr: str
@@ -68,6 +69,7 @@ def _load_cassette(name: str) -> list[_CassetteInteraction]:
             _CassetteInteraction(
                 method=(req.get("method") or "GET").upper(),
                 uri=req.get("uri") or "",
+                request_body=req.get("body"),
                 response_status_code=resp.get("status_code"),
                 response_body=resp.get("body"),
                 response_stderr=resp.get("stderr") or "",
@@ -89,9 +91,22 @@ def _normalize_endpoint(endpoint_arg: str) -> tuple[str, str]:
 
 
 def _matches(interaction: _CassetteInteraction, argv: list[str]) -> bool:
-    """True iff the cassette interaction matches the xurl argv shape."""
+    """True iff the cassette interaction matches the xurl argv shape.
+
+    Matches on (method, URI prefix, body subset). For each top-level
+    key in the cassette's request.body:
+    * value ``"ANY"`` → matches any value for that key (sentinel for
+      body-agnostic cassettes).
+    * value ``None`` or absent → key not asserted.
+    * any other value → must equal the request's value for that key.
+
+    Extra keys in the request body that aren't in the cassette are
+    ignored (subset match) so cassettes don't have to enumerate every
+    field X API adds in a future schema bump.
+    """
     method = "GET"
     endpoint_arg = ""
+    body_json: dict[str, Any] | None = None
     i = 1
     while i < len(argv):
         token = argv[i]
@@ -100,6 +115,12 @@ def _matches(interaction: _CassetteInteraction, argv: list[str]) -> bool:
             i += 2
             continue
         if token == "--data" and i + 1 < len(argv):
+            try:
+                _parsed = json.loads(argv[i + 1])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                _parsed = None
+            if isinstance(_parsed, dict):
+                body_json = _parsed
             i += 2
             continue
         endpoint_arg = token
@@ -110,6 +131,51 @@ def _matches(interaction: _CassetteInteraction, argv: list[str]) -> bool:
     arg_path, _ = _normalize_endpoint(endpoint_arg)
     if not arg_path.startswith(cassette_path):
         return False
+    # P8R-14: body subset match.
+    if isinstance(interaction.request_body, dict):
+        if body_json is None:
+            # Cassette expects a body but the request didn't send one.
+            return False
+        if not _body_subset_match(interaction.request_body, body_json):
+            return False
+    return True
+
+
+def _body_subset_match(
+    cassette_body: dict[str, Any], request_body: dict[str, Any]
+) -> bool:
+    """Recursive subset match honoring the ``"ANY"`` sentinel.
+
+    Top-level keys in cassette_body must be present (and match) in
+    request_body. Nested dicts recurse. Lists are compared by length +
+    per-index recursion. The ``"ANY"`` sentinel matches any value.
+    """
+    for key, expected in cassette_body.items():
+        if key not in request_body:
+            return False
+        actual = request_body[key]
+        if expected == "ANY":
+            continue
+        if isinstance(expected, dict):
+            if not isinstance(actual, dict):
+                return False
+            if not _body_subset_match(expected, actual):
+                return False
+            continue
+        if isinstance(expected, list):
+            if not isinstance(actual, list) or len(actual) != len(expected):
+                return False
+            for e, a in zip(expected, actual):
+                if e == "ANY":
+                    continue
+                if isinstance(e, dict):
+                    if not isinstance(a, dict) or not _body_subset_match(e, a):
+                        return False
+                elif e != a:
+                    return False
+            continue
+        if expected != actual:
+            return False
     return True
 
 
