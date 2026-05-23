@@ -214,16 +214,28 @@ def _require_confidence(payload: dict, key: str = "confidence_label") -> Confide
 # Tool #29 — repurpose_blog_to_x
 # ---------------------------------------------------------------------------
 def _is_guard_enabled(conn: sqlite3.Connection) -> bool:
+    """Return True iff the deterministic plagiarism guard is enabled.
+
+    P6R-19: parse strictly — only the JSON boolean ``true`` enables the
+    guard-disable path. The pre-fix code did ``bool(json.loads(row[0]))``,
+    which accepted the JSON string ``"false"`` (a truthy Python str) as
+    True — fail-open against a misconfigured value. Now we require
+    ``parsed is False`` to disable; everything else (including
+    misconfiguration, JSON parse failures, missing rows) keeps the
+    guard ON. Fail-closed by design — the guard is load-bearing per
+    §28.34.
+    """
     row = conn.execute(
         "SELECT value_json FROM settings WHERE key = ?",
         ("blog_repurposing_plagiarism_check_enabled",),
     ).fetchone()
     if row is None:
-        return True  # default ON per migration
+        return True
     try:
-        return bool(json.loads(row[0]))
+        parsed = json.loads(row[0])
     except (TypeError, ValueError, json.JSONDecodeError):
         return True
+    return parsed is not False  # only an explicit JSON `false` disables
 
 
 def _build_blog_to_x_user_message(
