@@ -5629,7 +5629,9 @@ The subprocess path may become attractive if API costs grow uncomfortable. Until
 
 ### 28.10 Publish flow — confirmation-gated direct posting
 
-The agent can draft AND publish to X, but only via an explicit confirmation flow per post. Server-side token generation, atomic transaction, and crash recovery are non-negotiable:
+The agent can draft AND publish to X, but only via an explicit confirmation flow per post. Server-side token generation, atomic transaction, and crash recovery are non-negotiable.
+
+**Phase 5.5 → Phase 8 transition (load-bearing context for the steps below):** Phase 5.5 shipped the §28.10 contract with the X API call stubbed against a manual-clipboard handoff branch as the only path. Phase 8 (migration 019) introduces `publish_via_api_enabled` (default TRUE) and adds the real `POST /2/tweets` branch alongside the existing manual-clipboard branch. When the setting is FALSE, the publish flow takes the existing manual-clipboard path; when TRUE, it takes the new API path. Both branches run inside the same six-check + atomic-transaction wrapper. Sandbox testing uses vcr.py-recorded fixtures (see `scripts/rerecord_x_api_fixtures.py`). The numbered steps below describe the unified contract; references to "X API success / failure" apply to whichever branch is live.
 
 1. Agent produces a draft (via `save_draft_post` or `save_draft_reply`). The orchestrator runs IWH self-score check + dark-pattern lint preflight; on failure the draft bounces back for revision (rules #12-13).
 2. Draft appears in chat with a "Publish to X" button.
