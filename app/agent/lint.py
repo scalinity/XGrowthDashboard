@@ -278,11 +278,17 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str, str], ...] = (
         "emoji_as_personality: decorative emoji chain (2+ in a row) used for tone",
         "emoji_as_personality",
     ),
-    # Legacy "amazing! 🔥" forced pattern — fires only when
-    # emoji_as_personality already missed (1 emoji at end-of-line).
+    # Legacy "amazing! 🔥" forced pattern — Phase 10 W6 follow-up
+    # tightened the label to reflect actual reachable scope: after
+    # emoji_as_personality moved earlier in the table, the only
+    # surface this legacy pattern still catches is a single-token
+    # affirmation followed by exactly ONE end-of-line emoji
+    # ("Amazing! 🔥"). Multi-emoji decorations
+    # ("Amazing! 🔥🔥", "Love this 🔥✨💯") are claimed first by
+    # emoji_as_personality. Label updated for accuracy.
     (
         r"\b(amazing|incredible|love\s+this|fire|absolute\s+banger)!?\s*" + _EMOJI_CLASS + r"+\s*$",
-        "forced: emoji-led affirmation with no substantive content",
+        "forced: single-emoji affirmation at end-of-line (multi-emoji handled by emoji_as_personality)",
         "forced",
     ),
     # ---- Phase 10 — eight new categories from Daniel's voice anchor ----
