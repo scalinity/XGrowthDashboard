@@ -893,8 +893,13 @@ def test_parse_response_prefix_routes_combined_verdicts(
 
 
 def test_save_draft_reply_persists_failure_mode_when_failed(
-    db_conn: sqlite3.Connection,
+    db_conn: sqlite3.Connection, monkeypatch
 ) -> None:
+    # Phase 10 S4 — network isolation: this test calls _save_draft_reply
+    # which fires score_screenshot_test in the post-commit path; without
+    # LINT_OFFLINE=1 a dev machine with ANTHROPIC_API_KEY set pays for
+    # a real Haiku call per test run.
+    monkeypatch.setenv("LINT_OFFLINE", "1")
     from app.agent.tools import _save_draft_reply
     _niche.set_niche(db_conn, problem="x", person="y")
     out = _save_draft_reply(
@@ -915,8 +920,9 @@ def test_save_draft_reply_persists_failure_mode_when_failed(
 
 
 def test_save_draft_reply_coerces_unknown_failure_mode_to_null(
-    db_conn: sqlite3.Connection, caplog
+    db_conn: sqlite3.Connection, monkeypatch, caplog
 ) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")  # S4 — network isolation
     """Phase 10 W2 — handler-level defense in depth. An unknown
     failure_mode (mistyped enum, future-Phase token from a stale
     dispatcher) must NOT crash the entire save transaction. The
@@ -943,8 +949,9 @@ def test_save_draft_reply_coerces_unknown_failure_mode_to_null(
 
 
 def test_revise_draft_propagates_reply_quality_lint_failure_mode(
-    db_conn: sqlite3.Connection,
+    db_conn: sqlite3.Connection, monkeypatch
 ) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")  # S4 — network isolation
     """Phase 10 W1 — revise_draft must propagate the new column from
     source to revision row. Without this fix, every IWH revision loses
     the parent's §28.18 lint audit trail."""
@@ -980,8 +987,9 @@ def test_revise_draft_propagates_reply_quality_lint_failure_mode(
 
 
 def test_save_draft_reply_leaves_failure_mode_null_on_pass(
-    db_conn: sqlite3.Connection,
+    db_conn: sqlite3.Connection, monkeypatch
 ) -> None:
+    monkeypatch.setenv("LINT_OFFLINE", "1")  # S4 — network isolation
     """Per spec: failure_mode populated only when passed=False."""
     from app.agent.tools import _save_draft_reply
     _niche.set_niche(db_conn, problem="x", person="y")
