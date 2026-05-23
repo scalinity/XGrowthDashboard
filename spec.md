@@ -3898,9 +3898,19 @@ No push notification required. A "Weekly review due" banner in the app is enough
     * Agent does NOT have a tool that reads `publish_confirmation_tokens` or `st.session_state`. The publish-flow token registry is unreachable from the agent loop by construction (§28.2 rule #10).
     * Agent does NOT have write access to `settings`, `milestones`, or `account_snapshots` — only to its own tables (`agent_drafts`, `agent_messages`) and to `posts` (drafts only, never confirmed posts without two-step confirm).
 
-16. **X API OAuth credentials** (consumer key/secret, access token/secret) stored in `.env` only. Never in DB, never logged, never included in `raw_api_responses` exports. Loaded by `app/x_client.py` (new module) only when a publish call fires.
+16. **X API OAuth credentials** (consumer key/secret, access token/secret) stored in `.env` only. Never in DB, never logged, never included in `raw_api_responses` exports. Loaded by `app/x_client.py` (new module) only when a publish call fires. **Phase 7 adds xurl-managed OAuth state** under `~/.xurl/` — the dashboard shells out to xurl and never holds raw OAuth tokens itself. Augmented write scope (`tweet.write`) arrives with Phase 8 via the same `xurl auth login` flow.
 
-17. **X API rate limits** enforced client-side before each publish call to avoid hitting X-side limits and triggering account flags. Default: 10 publishes/hour, 50/day. Adjustable in Settings.
+17. **X API rate limits** enforced client-side before each publish call to avoid hitting X-side limits and triggering account flags. Default: 10 publishes/hour, 50/day. Adjustable in Settings. Phase 7 adds read-side rate-limit handling (429 + Retry-After) in `app/jobs/post_metrics_refresh.py` and `app/jobs/reply_target_metrics_refresh.py`. Phase 8 adds a write-specific sliding window (`x_write_rate_limit_per_15min`, `x_write_rate_limit_per_24h` settings).
+
+19. **xAI Grok API key** (Phase 9):
+
+    * Stored in `.env` as `XAI_API_KEY`, never in SQLite.
+    * `.gitignore` already covers `.env`; `.env.example` documents the key alongside `ANTHROPIC_API_KEY`.
+    * Settings view shows status as "configured" / "not set" — never displays the key itself.
+    * Grok sweep refuses to call the API if the key is missing or invalid; surfaces error in Settings → Grok queries panel.
+    * Combined Anthropic + xAI spend tracked under one `combined_ai_monthly_cost_ceiling_usd` ceiling (§28.6); ceiling pauses the Grok sweep at 100%.
+
+20. **`grok_api_responses` is non-exportable** (mirrors the `raw_api_responses` carve-out): raw Grok payloads may contain candidate-post content and third-party handles, and are not bundled into default CSV exports. Opt-in toggle in Settings → Export for debugging only.
 
 18. **Publish-flow export carve-out** (per §16 (7) and §16 (8)):
     * `posts.publish_last_error` and `posts.published_via_agent_message_id` are EXCLUDED from default CSV export. Opt-in toggle in Settings → Export for debugging.
