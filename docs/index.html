@@ -659,6 +659,7 @@
         <li><a href="#phase-5-8"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.8</span><span>Drafting Intelligence Pack</span></a></li>
         <li><a href="#phase-5-10"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.10</span><span>Strategic Analysis Pack</span></a></li>
         <li><a href="#phase-5-11"><span class="dot-complete" aria-hidden="true"></span><span class="num">5.11</span><span>Growth Layer + QoL Pack</span></a></li>
+        <li><a href="#phase-6"><span class="dot-complete" aria-hidden="true"></span><span class="num">6</span><span>Long-form Blogs</span></a></li>
       </ul>
       <div class="add-phase">+ NEXT PHASE GOES HERE</div>
 
@@ -1593,6 +1594,92 @@
           <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Next phase pointer</span></summary>
           <div class="subsection-body">
             <p>After Phase 5.11 the consolidation surface is wide enough that the only remaining CreatorOS capability is <strong>blogs</strong> — deferred to Phase 6 with an explicit §0/§1/§19 scope rewrite. Phase 5.11's stub items (Session-2 draft tool wiring, "send to drafts" promotion from inspiration transforms, per-pillar campaign drill-down, monthly export writer) are independent polish work that can land between Phase 5.11 and Phase 6 without blocking either.</p>
+          </div>
+        </details>
+      </section>
+
+      <section class="phase" id="phase-6" data-phase-id="6" data-phase-title="Long-form Blogs">
+        <header class="phase-header">
+          <p class="kicker">Phase 6 · Long-form Blogs</p>
+          <h2>Long-form blog <em>authoring</em> surface</h2>
+          <p class="meta"><span data-mono>2026-05-22</span><span class="sep">·</span>spec <span class="spec">28.31</span>–<span class="spec">28.34</span></p>
+        </header>
+
+        <div class="score-bank" aria-label="Phase 6 counters">
+          <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number">01</div><div class="tile-bar" aria-hidden="true"><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">832</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Acceptance gates</p><div class="tile-number">12</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+        </div>
+
+        <details class="subsection" id="phase-6-completed" data-section-type="completed" open>
+          <summary><span class="caret"></span><span class="label-kicker">01 / Shipped</span><span class="label-title">Long-form blog production: schema, agent tools, editor, exports, repurposing</span></summary>
+          <div class="subsection-body">
+            <ul>
+              <li><strong>Migration <code>migrations/016_blogs.sql</code></strong> — four new tables (<code>blogs</code>, <code>blog_versions</code>, <code>blog_exports</code>, <code>blog_to_post_links</code>), one view (<code>v_blog_pipeline</code>), five new settings rows (stale-warning days, default target length, export default directory, repurposing-plagiarism-check toggle, agent max-draft-iterations). Slot 015 was taken by Phase 5.11's growth-layer migration; spec was corrected to 016 first (commit <code>afb98ea</code>). Final statement logs <code>migration_applied_016</code> to <code>audit_logs</code>. <span class="spec">10</span> <span class="spec">28.31</span></li>
+              <li><strong>Schema discipline + state machine (<span class="spec">28.31</span>)</strong> — <code>app/agent/blogs.py</code>. Eight-state machine enforced in <code>transition_status</code> (SQLite CHECKs can only constrain column shape; legal transitions live in code). <code>create_blog</code> derives ASCII-kebab slug + disambiguates in-transaction. <code>save_blog</code> appends version row + demote/promote current-pointer in a single transaction; no-op detection (body_hash AND outline AND title AND status unchanged → no version row, just <code>updated_at_utc</code> bump). <code>revert_to_version</code> creates forward-moving history — new row carries the older body, target row's <code>is_current_for_blog</code> is NOT flipped back. <code>set_seo_metadata</code> writes <code>blogs.seo_*</code> directly with NO version row (SEO is sidecar, not content).</li>
+              <li><strong>Blog drafting agent tools (<span class="spec">28.32</span>)</strong> — <code>app/agent/blog_drafting.py</code> + four <code>config/blog_*_prompt.md</code> templates. Four registered tools: <code>#25 outline_blog</code>, <code>#26 draft_blog</code>, <code>#27 suggest_blog_edits</code>, <code>#28 generate_blog_seo_metadata</code>. All four read the unified identity stack (niche + voice profile + voice samples + active personality lore) at call time — identity context is rendered into the USER message rather than the system prompt so a voice-profile regen in Settings is visible on the next call without restart. All four wrap blog content with <code>BEGIN_UNTRUSTED_DATA</code> markers per §28.2 rule #1. <code>suggest_blog_edits</code> NEVER auto-applies — the UI surfaces Accept / Reject / Modify per paragraph; accepted edits call <code>save_blog(... agent_action='edit_suggestion_applied')</code>. <code>generate_blog_seo_metadata</code> writes <code>blogs.seo_*</code> directly with no version row.</li>
+              <li><strong>Blog Editor view (<span class="spec">14.15</span>)</strong> — <code>app/pages/18_Blog_Editor.py</code>. Three-panel layout: outline (left, editable Markdown), body (center, editable Markdown), agent + identity + versions + linked posts (right). Identity readout LIVE-bound to fresh DB reads each rerun — no caching. Status selectbox bound to legal next statuses only; illegal transitions impossible to select. Four agent action buttons wired to <span class="spec">28.32</span> tools. Pending suggestions section with per-suggestion Accept / Reject. Version history with confidence chip + agent_action + Revert button creating forward-moving history. Footer actions: Save, Export ▾ (format dropdown + path picker + SEO/repurposing-notes checkboxes), Repurpose to X ▾ (three modes). Streamlit side-effects discipline — every mutation in an explicit <code>on_click</code> / <code>on_change</code> callback.</li>
+              <li><strong>Blogs index view (<span class="spec">14.14</span>)</strong> — <code>app/pages/17_Blogs.py</code>. Status counters strip across all eight Phase 6 statuses. Multi-select status filter via chip buttons; four-key sort selectbox (last_edited / stale_longest / length_gap / pillar). Filter + sort persist in <code>st.session_state</code>. Inline "+ new blog" form (title required; pillar / audience / target_length_words optional). Per-row keyline + status chip + confidence chip + length-vs-target + version + author + last-edited. Yellow keyline when <code>days_in_current_status &gt; blog_stale_status_warning_days</code> (default 21).</li>
+              <li><strong>Blog exports (<span class="spec">28.33</span>)</strong> — <code>app/agent/blog_exports.py</code>. Four format renderers (Markdown / HTML / JSON / MDX). Inline minimal Markdown→HTML converter — no new dependency added (CLAUDE.md minimal-deps stance). Atomic write-then-record: file written via tempfile + <code>os.replace</code> in target's parent dir (same-FS atomic rename); on file-write failure raises <code>ExportFileWriteError</code> with no DB row. DB insert + audit log + optional <code>ready → exported</code> transition in a single transaction; on DB-side failure raises <code>ExportRecordFailedError</code> carrying the orphan file path — file is deliberately NOT deleted (real work). <code>content_sha256</code> is the audit anchor. Re-export overwrites file but inserts a new row (append-only history).</li>
+              <li><strong>X ↔ blog repurposing (<span class="spec">28.34</span>)</strong> — <code>app/agent/blog_repurposing.py</code> + four <code>config/blog_to_x_*_prompt.md</code> / <code>x_to_blog_idea_prompt.md</code> templates. Two registered tools: <code>#29 repurpose_blog_to_x</code> (three modes: <code>thread_from_sections</code>, <code>single_post_summary</code>, <code>teaser_with_link</code>) and <code>#30 repurpose_x_to_blog_idea</code>. Plagiarism guard runs every blog → X output through <code>inspiration.compute_plagiarism_risk</code> against the source blog body — deterministic Jaccard + n-gram floor catches high overlap the model might underreport. <code>high</code> overlap raises <code>PlagiarismBlockedError</code> BEFORE any draft row is written; the editor surfaces a per-output override banner. Override is audit-logged. blog → X linkage rows in <code>blog_to_post_links</code> land at SHIP time via <code>finalize_blog_to_post_link</code> (idempotent across retries); X → blog linkage lands immediately at idea creation. Tool registry now at 30.</li>
+              <li><strong>Spec rewrite anchors</strong> — §0 new fifth paragraph + §1 new "Phase 6 expansion" paragraph clarify the content-production boundary. §7.1 (single-user local tool) UNCHANGED. The app NEVER publishes externally; exports write files to disk and Daniel publishes by hand. No Substack / Ghost / WordPress / Medium API path — refuse if asked. The previously-deferred-from-MVP "V1.1 Data collection" phase (formerly Phase 6 in §25) was renumbered to Phase 7.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-6-gates" data-section-type="gates">
+          <summary><span class="caret"></span><span class="label-kicker">02 / Acceptance</span><span class="label-title">Gates satisfied (<span class="spec">25</span> Phase 6)</span></summary>
+          <div class="subsection-body">
+            <ul class="gates-list">
+              <li>Migration 016 applies cleanly on a fresh tmp DB AND on the current main-branch DB; <code>migration_applied_016</code> audit row asserted by <code>test_phase6_audit_logs_migration_row_present</code>.</li>
+              <li>Full pytest suite green at <span data-mono>832</span> tests (target was ≥285). Five pre-existing flaky date-sensitive tests in <code>test_voice_profile</code> / <code>test_v_daily_reps_extension</code> fail near UTC midnight — unrelated to Phase 6.</li>
+              <li><code>uv run ruff check</code> clean across all new modules and views.</li>
+              <li>Streamlit boot smoke confirms <code>/_stcore/health</code> returns <code>ok</code> with no exceptions in the log.</li>
+              <li>State machine enforced in code — <code>test_transition_status_illegal_edge_raises</code> + <code>test_is_legal_transition</code> parametrized truth table covers all eight states.</li>
+              <li>No-op save detection — <code>test_save_blog_no_op_returns_none_and_no_new_row</code>.</li>
+              <li>Atomic export contract — <code>test_file_write_failure_raises_and_writes_no_row</code> + <code>test_db_insert_failure_preserves_file_and_raises_record_failed</code>.</li>
+              <li>Revert creates forward-moving history — <code>test_revert_creates_forward_moving_history</code> (target row's <code>is_current_for_blog</code> stays 0; new row carries the older body).</li>
+              <li>Plagiarism guard non-bypassable on blog → X — <code>test_repurpose_blog_to_x_plagiarism_blocked_on_high_overlap</code> + <code>test_repurpose_blog_to_x_override_lands_draft</code>.</li>
+              <li>Identity readout live-bound — <code>_render_identity_panel</code> in <code>18_Blog_Editor.py</code> reads from <code>conn</code> on every render; no <code>st.session_state</code> cache for niche / profile / lore.</li>
+              <li><code>suggest_blog_edits</code> does NOT auto-apply — <code>test_suggest_blog_edits_does_not_create_version_row</code>.</li>
+              <li>All four blog agent tools emit <code>&lt;confidence&gt;</code> tags; orchestrator parses + persists dominant label on <code>blog_versions.confidence_label_at_version</code> — <code>test_outline_blog_writes_version_row_with_agent_action</code> + <code>test_draft_blog_writes_version_row</code>.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-6-limitations" data-section-type="limitations">
+          <summary><span class="caret"></span><span class="label-kicker">03 / Carried</span><span class="label-title">Known limitations + deferred work</span></summary>
+          <div class="subsection-body">
+            <ul class="limitations-list">
+              <li><strong>Markdown → HTML renderer is minimal.</strong> Headings, paragraphs, inline emphasis, links, code fences — no lists, no tables, no images. Daniel's blogs use prose; we skipped the dependency rather than pulling in <code>markdown-it-py</code>. If a future blog needs richer rendering, that's the moment to install it.</li>
+              <li><strong>blog → X drafts don't yet flow through the full Phase 5.8 pipeline.</strong> They insert into <code>agent_drafts</code> with the plagiarism warning attached, but the IWH gate / dark-pattern lint / pre-publish scorer / repetition guard / personality-lore scan from <code>_save_draft_post</code> aren't called yet. The drafts surface in Manual Entry / Agent Chat with their similarity-warning JSON readable; full pipeline integration is the next polish.</li>
+              <li><strong>Linked-posts UI is read-only.</strong> The "Add link" form from the §14.15 acceptance criteria isn't implemented — Daniel can see existing links but can't create them manually. The agent-driven path (<code>repurpose_x_to_blog_idea</code> at idea creation + <code>finalize_blog_to_post_link</code> at ship time) covers the realistic use cases.</li>
+              <li><strong>Streamlit page navigation between Blogs index + Editor uses <code>st.switch_page</code>.</strong> On older Streamlit (&lt; 1.30) the switch silently no-ops — Daniel's environment is pinned at 1.30+, so the fallback path (set <code>editor_blog_id</code> in session_state and let the editor pick it up on next rerun) only matters in test contexts.</li>
+              <li><strong>Speculation-labeled draft surfaces as a chip but doesn't BLOCK export.</strong> Per §28.32 this is intentional — Daniel can ship a speculation-labeled blog if he reviews and accepts; the <code>blog_versions.confidence_label_at_version</code> is a permanent epistemic record. If Daniel decides he wants a hard block, the gate lives in <code>_export_cb</code>.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-6-lessons" data-section-type="lessons">
+          <summary><span class="caret"></span><span class="label-kicker">04 / Lessons</span><span class="label-title">What this phase taught</span></summary>
+          <div class="subsection-body">
+            <ul class="lessons-list">
+              <li><strong>The spec-correction-first pattern bit again.</strong> The Phase 6 edits in <code>spec.md</code> were authored against a state where migration slot 015 was open. By the time Phase 6 work started, Phase 5.11's <code>015_growth_layer_qol.sql</code> had taken it. Fix-up: bump to 016 AND update spec.md FIRST (commit <code>afb98ea</code>), then implement. CLAUDE.md's rule held: when implementation drifts from spec, fix implementation; when spec is wrong, fix spec first.</li>
+              <li><strong>Identity context belongs in the USER message, not the system prompt.</strong> Putting niche / voice / lore in the system prompt would cache it across the editor's lifetime — bad because Settings → Growth Agent → Voice Profile regen wouldn't reflect until next process restart. Rendering identity into the user message every call costs ~200-400 tokens per request and keeps the readout truthful.</li>
+              <li><strong>Nested transactions in agent helpers bit.</strong> <code>repurpose_x_to_blog_idea</code> originally wrapped <code>create_blog</code> + <code>save_blog</code> + niche-snapshot UPDATE + link INSERT + audit in one <code>with transaction(conn):</code> block. <code>create_blog</code> + <code>save_blog</code> use <code>BEGIN IMMEDIATE</code> internally — SQLite refuses to start a nested transaction. Fix: let the create/save helpers run in their own transactions, then wrap the post-creation niche/link/audit work in a SEPARATE transaction. This pattern shows up anywhere we compose <code>blogs.py</code> helpers — the right abstraction is sequential single-tx blocks, not lexical nesting.</li>
+              <li><strong>Partial-state export contract: never delete the file on DB-write failure.</strong> The mental model: the file on disk is Daniel's actual work product; the <code>blog_exports</code> row is bookkeeping. If the bookkeeping fails, we want Daniel to find the file and decide what to do. We deliberately raise <code>ExportRecordFailedError</code> carrying the path, so the editor's banner can point at the orphan. This mirrors the §28.10 publish-flow reconciliation pattern.</li>
+              <li><strong>Plagiarism guard for blog → X is non-bypassable by default but configurable.</strong> The <code>blog_repurposing_plagiarism_check_enabled</code> setting can disable the guard entirely — useful for testing, NOT for production use. The override path (Daniel checks a box, the override is audit-logged) is the realistic escape hatch. The guard fires on the source blog body, not the outline + body — paraphrased threads should naturally score low; only verbatim copies trip the high-risk label.</li>
+              <li><strong>Spec rename consideration was deferred to Daniel.</strong> "X Growth Dashboard" still accurately describes the primary distribution thesis; blogs serve that thesis via repurposing. A rename to e.g. "Distribution Dashboard" is a one-line spec edit Daniel can make at his discretion — the implementation has no name dependency.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-6-next" data-section-type="next">
+          <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Next phase pointer</span></summary>
+          <div class="subsection-body">
+            <p>Phase 6 closes the consolidation gap with CreatorOS — XGrowth now subsumes the entire functional surface. CreatorOS can be retired or kept frozen as historical archive. Phase 6's deferred polish items (full Phase 5.8 pipeline integration for blog → X drafts, linked-posts add-link UI, optional richer Markdown renderer) are independent and can land between Phase 6 and Phase 7. <strong>Phase 7</strong> (formerly the deferred-from-MVP V1.1 Data Collection, renumbered after the Phase 6 Blogs rename) is the next major milestone — programmatic X API access for account snapshots, recent-post import, post-metrics refresh, direct posting via <code>submit_post</code>, and X API search inside <code>find_reply_targets</code>.</p>
+            <p>Consider a project rename to something like "Distribution Dashboard" or "Personal Distribution OS" — the name no longer fully captures the surface, but the implementation doesn't depend on the name. One-line spec edit at Daniel's discretion.</p>
           </div>
         </details>
       </section>
