@@ -824,10 +824,20 @@ def api_get_recent_tweets(
     the recovery scan degrades gracefully to the existing manual-
     reconcile UI when xurl isn't installed.
     """
-    params = ["max_results=" + str(max(5, min(max_results, 100)))]
+    # P8R-10: url-encode via urllib.parse.urlencode instead of f-string
+    # concat. Today's only caller passes a sanitized snowflake (from
+    # _highest_committed_x_post_id, which is INT-cast in SQL), but the
+    # helper is in __all__ and may grow callers — defensive against a
+    # future caller passing a value containing '&' or '=' (e.g. from a
+    # corrupted row or a hand-edited test fixture).
+    from urllib.parse import urlencode
+
+    query_params: dict[str, str] = {
+        "max_results": str(max(5, min(max_results, 100))),
+    }
     if since_id:
-        params.append("since_id=" + str(since_id))
-    endpoint = "/2/users/me/tweets?" + "&".join(params)
+        query_params["since_id"] = str(since_id)
+    endpoint = "/2/users/me/tweets?" + urlencode(query_params)
 
     try:
         response = request(

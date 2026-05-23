@@ -740,6 +740,13 @@ def _score_reply_candidates(
                     audience=c.get("audience"),
                 )
         except Exception as exc:  # noqa: BLE001 — wrap any DB error per candidate
+            # RV2-10: log the full stack for operator diagnosis; the tool
+            # result gets just the message. Matches the discipline in
+            # _audit_profile_to_dict / _analyze_account_to_dict.
+            _LOG.warning(
+                "score_reply_candidates per-candidate failure for url=%r: %s",
+                url, exc, exc_info=True,
+            )
             errors.append(f"candidate {url!r}: {exc}")
             continue
         if "error" in result:
