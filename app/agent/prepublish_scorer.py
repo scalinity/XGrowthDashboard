@@ -703,9 +703,26 @@ def score_screenshot_test(
             "score_screenshot_test received unparseable response: %s", exc
         )
         return None
-    except Exception as exc:  # noqa: BLE001 — broad catch matches lint.py
+    except anthropic.APIError as exc:
+        # Phase 10 S11 — narrow Haiku-specific catch: APIError is the
+        # SDK base; APIConnectionError / APITimeoutError /
+        # RateLimitError / AuthenticationError all derive from it.
+        # Logged at INFO with the specific subclass name so audit
+        # filtering can distinguish transient outages from auth
+        # misconfiguration.
+        _LOG.info(
+            "score_screenshot_test Anthropic API error (%s): %s",
+            type(exc).__name__, exc,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — final fallback preserves the "never raises" contract
+        # Phase 10 S11 — anything outside the APIError hierarchy
+        # (httpx errors that escape the SDK wrapper, SDK contract
+        # changes, unforeseen bugs) gets logged at WARNING so genuine
+        # bugs surface in the operator's log triage instead of being
+        # silently swallowed.
         _LOG.warning(
-            "score_screenshot_test API call failed (%s): %s",
+            "score_screenshot_test unexpected non-API failure (%s): %s",
             type(exc).__name__, exc,
         )
         return None
