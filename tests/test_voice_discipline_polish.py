@@ -231,7 +231,7 @@ def test_composite_label_above_floor_stays_strong() -> None:
     label = ps.compute_composite_label(
         _strong_qualifying_scores(),
         screenshot_test_score=3,
-        screenshot_test_minimum_for_strong=2,
+        screenshot_test_minimum_for_strong_default=2,
     )
     assert label == "strong"
 
@@ -240,7 +240,7 @@ def test_composite_label_at_floor_stays_strong() -> None:
     label = ps.compute_composite_label(
         _strong_qualifying_scores(),
         screenshot_test_score=2,
-        screenshot_test_minimum_for_strong=2,
+        screenshot_test_minimum_for_strong_default=2,
     )
     assert label == "strong"
 
@@ -249,7 +249,7 @@ def test_composite_label_below_floor_downgrades_strong_to_viable() -> None:
     label = ps.compute_composite_label(
         _strong_qualifying_scores(),
         screenshot_test_score=1,
-        screenshot_test_minimum_for_strong=2,
+        screenshot_test_minimum_for_strong_default=2,
     )
     assert label == "viable"
 
@@ -258,7 +258,7 @@ def test_composite_label_below_floor_zero_also_downgrades() -> None:
     label = ps.compute_composite_label(
         _strong_qualifying_scores(),
         screenshot_test_score=0,
-        screenshot_test_minimum_for_strong=2,
+        screenshot_test_minimum_for_strong_default=2,
     )
     assert label == "viable"
 
@@ -269,7 +269,7 @@ def test_composite_label_viable_does_not_cascade_to_weak() -> None:
     label = ps.compute_composite_label(
         viable_scores,
         screenshot_test_score=0,
-        screenshot_test_minimum_for_strong=2,
+        screenshot_test_minimum_for_strong_default=2,
     )
     assert label == "viable"
 
@@ -279,7 +279,7 @@ def test_composite_label_weak_stays_weak() -> None:
     label = ps.compute_composite_label(
         weak_scores,
         screenshot_test_score=0,
-        screenshot_test_minimum_for_strong=2,
+        screenshot_test_minimum_for_strong_default=2,
     )
     assert label == "weak"
 

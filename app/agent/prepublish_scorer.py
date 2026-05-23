@@ -651,7 +651,7 @@ def compute_composite_label(
     scores: dict[str, int | None],
     *,
     screenshot_test_score: int | None = None,
-    screenshot_test_minimum_for_strong: int = (
+    screenshot_test_minimum_for_strong_default: int = (
         _SCREENSHOT_TEST_MINIMUM_FOR_STRONG_DEFAULT
     ),
 ) -> str:
@@ -667,16 +667,27 @@ def compute_composite_label(
       label is whatever the original ladder produces). This is the
       calibration-period contract: a NULL signal never penalizes.
     * When ``screenshot_test_score`` is non-NULL AND below
-      ``screenshot_test_minimum_for_strong`` → the label downgrades
-      from 'strong' to 'viable' (and 'viable'/'weak' stay as they
-      were). Intentionally soft: the spec calls for `strong → viable`,
-      not `viable → weak`, so a miscalibrated screenshot signal can't
-      cascade Daniel's whole pipeline into 'weak'.
+      ``screenshot_test_minimum_for_strong_default`` → the label
+      downgrades from 'strong' to 'viable' (and 'viable'/'weak' stay
+      as they were). Intentionally soft: the spec calls for
+      `strong → viable`, not `viable → weak`, so a miscalibrated
+      screenshot signal can't cascade Daniel's whole pipeline into
+      'weak'.
 
     The screenshot_test_score is NOT included in the dimension dict
     iteration above — gating happens as a post-hoc adjustment so the
     existing zero-count / two-plus / three-count ladder math stays
     pinned to the original 9 dimensions.
+
+    Phase 10 W8 — the floor parameter is named with the explicit
+    ``_default`` suffix and carries the constant fallback. PRODUCTION
+    CODE MUST pass the live setting value (read via
+    ``_read_screenshot_test_minimum_for_strong(conn)``). The default
+    exists only so the pure-function tests can call this without
+    threading a DB connection through every test case. A direct
+    caller that forgets the kwarg in production will silently use
+    constant ``2`` instead of Daniel's configured floor — call sites
+    that bypass ``score()`` should be reviewed.
     """
     vals = [v for v in scores.values() if v is not None]
     if not vals:
@@ -705,7 +716,7 @@ def compute_composite_label(
     if (
         base == "strong"
         and screenshot_test_score is not None
-        and screenshot_test_score < screenshot_test_minimum_for_strong
+        and screenshot_test_score < screenshot_test_minimum_for_strong_default
     ):
         return "viable"
     return base
@@ -784,7 +795,7 @@ def score(
     label = compute_composite_label(
         scores,
         screenshot_test_score=s_screenshot,
-        screenshot_test_minimum_for_strong=screenshot_floor,
+        screenshot_test_minimum_for_strong_default=screenshot_floor,
     )
 
     warnings: list[str] = []
@@ -945,7 +956,7 @@ def update_screenshot_score(
     new_label = compute_composite_label(
         scores,
         screenshot_test_score=ss_score,
-        screenshot_test_minimum_for_strong=floor,
+        screenshot_test_minimum_for_strong_default=floor,
     )
     # Narrow transaction held for the single UPDATE — milliseconds.
     from app.db import transaction
