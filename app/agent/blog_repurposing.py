@@ -497,11 +497,22 @@ def finalize_blog_to_post_link(
     ``agent_drafts → posts`` row has a populated ``published_to_x_at``.
     No-op if the linkage row already exists (idempotent across retries).
     """
-    relationship_kind = {
+    # P6R-29: pre-fix used .get(mode, "summary_post") which silently
+    # mapped typos (e.g. "thread_from_section" missing the trailing
+    # 's') to "summary_post". Now an unknown mode raises so the typo
+    # surfaces at the call site instead of corrupting the linkage
+    # taxonomy.
+    _MODE_TO_RELATIONSHIP = {
         "thread_from_sections": "thread_root",
         "single_post_summary": "summary_post",
         "teaser_with_link": "teaser_with_link",
-    }.get(mode, "summary_post")
+    }
+    if mode not in _MODE_TO_RELATIONSHIP:
+        raise BlogRepurposingError(
+            f"unknown mode {mode!r}. Allowed: "
+            f"{sorted(_MODE_TO_RELATIONSHIP)}"
+        )
+    relationship_kind = _MODE_TO_RELATIONSHIP[mode]
     existing = conn.execute(
         "SELECT id FROM blog_to_post_links "
         "WHERE blog_id = ? AND post_id = ? AND direction = 'blog_to_post'",
