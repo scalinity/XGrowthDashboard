@@ -379,6 +379,8 @@ def create_blog(
     audience: str | None = None,
     target_length_words: int | None = None,
     notes: str | None = None,
+    niche_problem_snapshot: str | None = None,
+    niche_person_snapshot: str | None = None,
 ) -> Blog:
     """Insert a new blog with ``status='idea'`` + an empty version 1 row.
 
@@ -387,6 +389,13 @@ def create_blog(
     same transaction. Version 1 is the immutable epistemic anchor — every
     subsequent save is a *change* relative to it, including the first
     real content edit.
+
+    ``niche_problem_snapshot`` / ``niche_person_snapshot`` are optional
+    snapshot columns that freeze the identity context the blog was
+    authored under (P6R-5: previously the X→blog repurposing flow wrote
+    these in a SECOND transaction after the create, leaving a window
+    where a crash could orphan a blog with NULL snapshots; we now write
+    them in the same transaction as the initial insert).
     """
     title_clean = (title or "").strip()
     if not title_clean:
@@ -404,11 +413,15 @@ def create_blog(
             """
             INSERT INTO blogs
               (slug, title, current_body_markdown, status, pillar, audience,
-               target_length_words, actual_length_words, notes)
-            VALUES (?, ?, '', 'idea', ?, ?, ?, 0, ?)
+               target_length_words, actual_length_words, notes,
+               niche_problem_snapshot, niche_person_snapshot)
+            VALUES (?, ?, '', 'idea', ?, ?, ?, 0, ?, ?, ?)
             RETURNING id
             """,
-            (slug, title_clean, pillar, audience, target_length_words, notes),
+            (
+                slug, title_clean, pillar, audience, target_length_words,
+                notes, niche_problem_snapshot, niche_person_snapshot,
+            ),
         )
         blog_id = int(cur.fetchone()[0])
         conn.execute(

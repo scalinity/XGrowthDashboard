@@ -650,9 +650,11 @@ def repurpose_x_to_blog_idea(
         audience_rec if isinstance(audience_rec, str) else None
     ) or post_row["audience"]
 
-    # Create the blog row (status='idea' by default), then update with
-    # the outline + niche snapshots. Then insert the blog_to_post_links
-    # row pointing back to the source post.
+    # P6R-5: create_blog now accepts niche snapshot args so they land
+    # in the SAME transaction as the initial blogs row insert. Pre-fix
+    # this was a separate UPDATE in a third transaction; a failure
+    # between txn 1 (create) and txn 3 (snapshots + link + audit) left
+    # an orphan blog with NULL snapshots and no source linkage.
     blog = _blogs.create_blog(
         conn,
         title=title.strip(),
@@ -661,9 +663,11 @@ def repurpose_x_to_blog_idea(
         target_length_words=target_length_words,
         notes=f"Derived from post #{post_id} ({post_row['x_post_id'] or 'manual'}). "
               f"Source text:\n\n{post_row['text']}",
+        niche_problem_snapshot=nd.problem,
+        niche_person_snapshot=nd.person,
     )
     # Seed the outline via save_blog (its own transaction — runs the
-    # demote/append/promote dance + audit-free version row).
+    # demote/append/promote dance + version row).
     _blogs.save_blog(
         conn,
         blog.id,
@@ -673,18 +677,13 @@ def repurpose_x_to_blog_idea(
         confidence_label_at_version=confidence,
     )
 
-    # Niche snapshots + link row + audit are atomic with each other in
-    # a SEPARATE transaction so the schema_discipline call above runs
-    # cleanly (transaction() uses BEGIN IMMEDIATE, which can't nest).
+    # Link row + audit are atomic with each other in a SEPARATE
+    # transaction (transaction() uses BEGIN IMMEDIATE so it can't nest
+    # with save_blog's own transaction above). On failure of THIS
+    # transaction the blog still exists with snapshots populated (from
+    # create_blog) and the outline version (from save_blog) — a clean
+    # recoverable state, not an orphan.
     with transaction(conn):
-        conn.execute(
-            """
-            UPDATE blogs
-            SET niche_problem_snapshot = ?, niche_person_snapshot = ?
-            WHERE id = ?
-            """,
-            (nd.problem, nd.person, blog.id),
-        )
         link_cur = conn.execute(
             """
             INSERT INTO blog_to_post_links
