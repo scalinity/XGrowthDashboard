@@ -187,3 +187,53 @@ uv run python -m scripts.rerecord_x_api_fixtures --dry-run   # print plan only
 ```
 
 See `docs/X_API_FIXTURES.md` for the cassette format, the timeout sentinel pattern, and the sandbox-cleanup safety rules.
+
+## Grok integration (Phase 9)
+
+Phase 9 adds **xAI Grok firehose discovery** as a third reply-target source alongside manual paste and curated `agent_target_accounts`. Grok runs Daniel-maintained natural-language queries against the X firehose; every returned candidate is verified against the X API before any score affects `engagement_surface_score` (the §29.2 source-of-truth invariant — Grok is for discovery, not measurement).
+
+Defaults:
+- `grok_api_enabled` → `TRUE` (opt-out kill switch, not opt-in).
+- `grok_query_list_json` → `[]` (Daniel populates via Settings → Reply Targets → Grok queries).
+- `grok_discovery_sweep_interval_minutes` → `120`.
+- `combined_ai_monthly_cost_ceiling_usd` → `$30` (one cap covers both Anthropic + xAI Grok per §28.6). At 100% **both** providers refuse new calls.
+
+Migration number: this phase ships as **migration 021**, not 020 — the original spec text said 020 but `020_force_drafted_reason_required.sql` (RV2-7 defense-in-depth) had already shipped, so the Grok migration landed at the next free slot. See `migrations/021_grok_integration.sql` + `docs/SCHEDULED_JOBS.md` for the full record.
+
+### One-time setup (Phase 9)
+
+1. Get an xAI API key at `https://console.x.ai/` and set it in `.env`:
+
+   ```bash
+   XAI_API_KEY=sk-or-xai-...
+   ```
+
+2. Populate `grok_query_list_json` via the Settings UI (Reply Targets → Grok queries → "Grok queries" textarea, one query per line). Empty list = no Grok calls happen, even with `grok_api_enabled=TRUE`.
+
+3. Click "Run sweep now" in Settings to test the round-trip synchronously, or load the launchd plist for the scheduled cadence:
+
+   ```bash
+   cp launchd/com.scalinity.xgrowth.grok-sweep.plist ~/Library/LaunchAgents/
+   # Edit ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+   # and replace REPLACE_WITH_XAI_API_KEY_BEFORE_LOAD with the real key.
+   launchctl load ~/Library/LaunchAgents/com.scalinity.xgrowth.grok-sweep.plist
+   ```
+
+### Settings rows seeded by migration 021
+
+- `grok_api_enabled` (default `true`) — kill switch. Sweep aborts at start when FALSE.
+- `grok_query_list_json` (default `[]`) — Daniel-maintained query list. CRUD via Settings.
+- `grok_discovery_sweep_interval_minutes` (default `120`) — launchd cadence. Edit both this setting AND the plist's `StartInterval` to actually change cadence.
+
+### Model + cost
+
+Phase 9 uses `grok-4.3` (1M-token context, $1.25/M input + $2.50/M output per the docs.x.ai pricing table as of 2026-05-23 — the recommended general-purpose model). Every Grok call writes one `grok_api_responses` audit row with `rate_snapshot_json` capturing input/output tokens so the §28.6 monthly spend reconstruction works even if xAI changes pricing later.
+
+### Failure modes
+
+- **§29.2 verification 404** — post deleted between Grok discovery and our verify call. Candidate rejected with `grok_api_responses.rejection_reason='verification_404'`; no `reply_targets` insert.
+- **Grok 429** — sweep pauses for `Retry-After`, resumes. In-progress unverified candidates dropped (re-discovered next sweep).
+- **Combined ceiling hit** — `app/grok_client.py` refuses new calls AND Anthropic agent calls also pause. Settings banner shows "Grok paused: combined AI ceiling hit."
+- **Dedupe** — same `target_x_post_id` from manual + Grok: first insert wins; second silently drops via the partial unique index.
+
+See `docs/SCHEDULED_JOBS.md` for the full Phase 9 runbook.
