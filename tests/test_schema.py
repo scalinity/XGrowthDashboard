@@ -81,6 +81,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "017_blog_agent_action_x_to_blog.sql",
     "018_x_api_reads.sql",
     "019_x_api_writes.sql",
+    "020_force_drafted_reason_required.sql",
 )
 
 

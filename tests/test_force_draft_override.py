@@ -154,3 +154,52 @@ def test_override_does_not_clear_lint_blocked(db_conn: sqlite3.Connection) -> No
     assert row["lint_blocked"] == 1
     assert row["lint_category"] == "ragebait"
     assert row["force_drafted"] == 1
+
+
+def test_rv2_7_db_trigger_rejects_force_drafted_without_reason(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """RV2-7: the DB-level trigger refuses an out-of-band write that
+    mints force_drafted=1 with a NULL or empty force_drafted_reason."""
+    rt_id = _seed_blocked_candidate(db_conn)
+    # Direct UPDATE bypassing the UI layer — pre-RV2-7 this would have
+    # silently committed and broken the §29.10 audit promise.
+    with pytest.raises(sqlite3.IntegrityError) as exc:
+        db_conn.execute(
+            "UPDATE reply_targets SET force_drafted = 1, "
+            "force_drafted_reason = NULL WHERE id = ?",
+            (rt_id,),
+        )
+    assert "RV2-7" in str(exc.value)
+    # Empty-string reason is also rejected (length(trim()) = 0).
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            "UPDATE reply_targets SET force_drafted = 1, "
+            "force_drafted_reason = '' WHERE id = ?",
+            (rt_id,),
+        )
+    # All-whitespace reason rejected.
+    with pytest.raises(sqlite3.IntegrityError):
+        db_conn.execute(
+            "UPDATE reply_targets SET force_drafted = 1, "
+            "force_drafted_reason = '   \t\n  ' WHERE id = ?",
+            (rt_id,),
+        )
+
+
+def test_rv2_7_db_trigger_allows_force_drafted_with_reason(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """RV2-7: a valid non-empty reason passes the trigger."""
+    rt_id = _seed_blocked_candidate(db_conn)
+    db_conn.execute(
+        "UPDATE reply_targets SET force_drafted = 1, "
+        "force_drafted_reason = 'genuine override' WHERE id = ?",
+        (rt_id,),
+    )
+    row = db_conn.execute(
+        "SELECT force_drafted, force_drafted_reason FROM reply_targets WHERE id = ?",
+        (rt_id,),
+    ).fetchone()
+    assert row["force_drafted"] == 1
+    assert row["force_drafted_reason"] == "genuine override"
