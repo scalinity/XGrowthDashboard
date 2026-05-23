@@ -69,6 +69,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
 from app.agent import audit_log as _audit_log
 from app.db import transaction
@@ -693,6 +694,17 @@ def transition_status(
         raise InvalidBlogFieldError(
             "published_externally requires external_url to be populated"
         )
+
+    # P6R-7: external_url must be http(s) — refuse javascript:, data:,
+    # file:, etc. so the editor surface cannot become a script-execution
+    # sink via XSS-escape bypass + Daniel clicking the surfaced URL.
+    # Mirrors P511R-19's http(s)-only discipline for inspiration.source_url.
+    if external_url is not None:
+        scheme = urlparse(external_url).scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise InvalidBlogFieldError(
+                f"external_url must use http or https scheme; got {scheme!r}"
+            )
 
     with transaction(conn):
         new_version_id = _save_blog_in_tx(

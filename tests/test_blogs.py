@@ -343,6 +343,27 @@ def test_revert_to_version_atomicity_under_audit_failure(
     )
 
 
+def test_transition_status_rejects_non_http_external_url(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-7: external_url must be http/https. javascript:/data:/file:
+    refused with InvalidBlogFieldError."""
+    b = bm.create_blog(db_conn, title="scheme")
+    for s in ("outlining", "drafting", "editing", "ready", "exported"):
+        bm.transition_status(db_conn, b.id, s)
+    for bad in ("javascript:alert(1)", "data:text/html,<h1>x</h1>",
+                "file:///etc/passwd", "vbscript:msgbox"):
+        with pytest.raises(bm.InvalidBlogFieldError):
+            bm.transition_status(
+                db_conn, b.id, "published_externally", external_url=bad
+            )
+    # http(s) still works.
+    bm.transition_status(
+        db_conn, b.id, "published_externally",
+        external_url="https://example.com/published",
+    )
+
+
 def test_transition_status_audit_row_records_edge(
     db_conn: sqlite3.Connection,
 ) -> None:
