@@ -255,12 +255,16 @@ def run(
         "candidates_discovered": 0,
         "candidates_verified": 0,
         "candidates_rejected_404": 0,
+        "candidates_rejected_other": 0,  # P9R-8
         "candidates_dedupe_dropped": 0,
         "candidates_inserted": 0,
+        "candidates_dropped_wall_clock": 0,  # P9R-50
         "rate_limit_pauses": 0,
         "rate_limit_aborts": 0,
         "cost_ceiling_aborts": 0,
         "server_errors": 0,
+        "grok_client_errors": 0,  # P9R-2 — non-429/non-5xx Grok 4xx
+        "x_api_server_errors": 0,  # P9R-27
         "error": None,
         "elapsed_seconds": 0.0,
     }
@@ -337,6 +341,22 @@ def run(
         except grok_client.GrokUnavailable as uv:
             summary["error"] = f"Grok unavailable: {uv}"
             break
+        except grok_client.GrokError as exc:
+            # P9R-2: catch-all for bare GrokError (any non-429/non-5xx 4xx
+            # — 400/401/403). Without this clause the sweep would crash
+            # uncaught, skipping the final audit_log.log() in main() and
+            # leaving NO scheduled_job row, defeating §28.30. Tally a
+            # generic counter and continue with the next query so a
+            # single bad-payload query doesn't kill the whole sweep.
+            summary["grok_client_errors"] = (
+                summary.get("grok_client_errors", 0) + 1
+            )
+            _log.warning(
+                "grok_discovery_sweep: Grok client error (status=%s) for "
+                "query=%r: %s",
+                getattr(exc, "status_code", None), query, exc,
+            )
+            continue
 
         summary["queries_run"] += 1
         summary["candidates_discovered"] += len(candidates)

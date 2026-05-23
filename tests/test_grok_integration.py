@@ -369,6 +369,36 @@ def test_grok_client_missing_api_key_raises_unavailable(
         grok_client.search("test", conn=db_conn)
 
 
+def test_sweep_catches_bare_grok_error_and_writes_audit_row(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P9R-2: a non-429/non-5xx Grok 4xx (bare GrokError) must NOT crash
+    the sweep — the catch-all branch tallies grok_client_errors and the
+    sweep continues so the scheduled_job audit row still lands."""
+
+    def _fake_search(query: str, **_kwargs: object) -> list[grok_client.GrokCandidate]:
+        raise grok_client.GrokError("xAI returned 401: invalid api key", status_code=401)
+
+    monkeypatch.setattr(grok_client, "search", _fake_search)
+    monkeypatch.setattr(grok_discovery_sweep.grok_client, "search", _fake_search)
+
+    settings_override = {
+        "grok_api_enabled": True,
+        "grok_query_list_json": ["any"],
+        "engagement_surface_floor_likes": 15,
+        "engagement_surface_pct_of_author": 0.001,
+        "engagement_surface_high_floor_likes": 50,
+        "engagement_surface_high_pct": 0.005,
+    }
+    summary = grok_discovery_sweep.run(db_conn, settings_override=settings_override)
+    # Sweep completed (didn't crash). Error counter incremented.
+    assert summary["grok_client_errors"] == 1
+    assert summary["candidates_discovered"] == 0
+    # No scheduled_job audit-row write here (run() returns a summary; the
+    # audit row lands in main()). What we're pinning is "run() doesn't
+    # raise" — which is the load-bearing §28.30 invariant.
+
+
 # ---------------------------------------------------------------------------
 # Dedupe between Grok + manual paste.
 # ---------------------------------------------------------------------------
