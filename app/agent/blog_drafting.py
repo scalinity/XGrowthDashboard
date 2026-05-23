@@ -39,9 +39,7 @@ mirrors the inspiration / brain_dump / account_research convention.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,13 +48,14 @@ from typing import Any, Callable, Literal
 from app.agent import audit_log as _audit_log
 from app.agent import blogs as _blogs
 from app.agent import niche as _niche
-from app.agent import personality_lore as _personality_lore
-from app.agent import voice as _voice
-from app.agent import voice_profile as _voice_profile
-from app.agent.untrusted_wrap import (
-    strip_code_fence as _strip_code_fence,
-    wrap_untrusted as _wrap_untrusted,
+from app.agent._blog_agent_helpers import (
+    VALID_CONFIDENCE_LABELS as _VALID_CONFIDENCE_LABELS,
+    make_default_caller as _make_default_caller,
+    parse_json_response as _parse_json_response_shared,
+    render_identity_context as _render_identity_context_shared,
+    require_confidence as _require_confidence_shared,
 )
+from app.agent.untrusted_wrap import wrap_untrusted as _wrap_untrusted
 
 _LOG = logging.getLogger(__name__)
 
@@ -94,9 +93,6 @@ class BlogDraftingModelError(BlogDraftingError):
 # Dataclasses (tool return shapes).
 # ---------------------------------------------------------------------------
 ConfidenceLabel = Literal["fact", "inference", "speculation", "mixed"]
-_VALID_CONFIDENCE_LABELS: frozenset[str] = frozenset(
-    {"fact", "inference", "speculation", "mixed"}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,39 +151,17 @@ class SeoMetadataResult:
 
 # ---------------------------------------------------------------------------
 # ModelCaller injection point + default Anthropic caller.
+# P6R-18: delegated to _blog_agent_helpers.make_default_caller.
 # ---------------------------------------------------------------------------
 # (system_prompt, user_message, model) -> (response_text, in_tokens, out_tokens)
 ModelCaller = Callable[[str, str, str], tuple[str, int, int]]
 
 
-def _default_caller(
-    system_prompt: str, user_message: str, model: str
-) -> tuple[str, int, int]:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise BlogDraftingModelError(
-            "ANTHROPIC_API_KEY is not set. See spec §28.8 for env setup."
-        )
-    import anthropic
-    # Explicit timeout. The Anthropic SDK defaults to 10 minutes; long
-    # blog drafts can legitimately run ~30-60 seconds, so 90s gives
-    # headroom without leaving the Streamlit thread blocked for ten
-    # minutes if the network hangs. Mirrors the timeout discipline
-    # applied across other agent caller sites (P511R-20).
-    client = anthropic.Anthropic(api_key=api_key, timeout=DEFAULT_TIMEOUT_SECONDS)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=DEFAULT_MAX_TOKENS,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    text_parts: list[str] = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            text_parts.append(getattr(block, "text", ""))
-    in_tok = int(getattr(resp.usage, "input_tokens", 0) or 0)
-    out_tok = int(getattr(resp.usage, "output_tokens", 0) or 0)
-    return ("".join(text_parts), in_tok, out_tok)
+_default_caller = _make_default_caller(
+    api_key_missing_exc=BlogDraftingModelError,
+    max_tokens=DEFAULT_MAX_TOKENS,
+    timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -201,73 +175,11 @@ def _load_prompt(kind: str) -> str:
 
 
 def _render_identity_context(conn) -> str:
-    """Render the niche × voice × samples × lore identity block.
-
-    Lives in the USER message rather than the system prompt so each
-    tool call gets a fresh read — the editor's identity readout is
-    bound to the same source-of-truth, so a voice-profile regen in
-    Settings is visible to the next agent call without restarting.
-    """
-    nd = _niche.get_niche(conn)
-    profile = _voice_profile.get_active(conn)
-    samples = _voice.get_active_voice_samples(conn)
-    splice_n = _personality_lore.get_splice_count(conn)
-    active_lore = _personality_lore.list_active(conn, limit=splice_n)
-
-    parts: list[str] = ["## Identity context", ""]
-    if nd.is_defined():
-        parts.append(f"You help **{nd.person}** solve **{nd.problem}**.")
-    else:
-        # Should be caught upstream by the refuse-on-undefined-niche
-        # check, but include the fallback for completeness.
-        parts.append("(niche is not defined — refuse and ask Daniel to fill it in)")
-    parts.append("")
-
-    if profile is not None:
-        desc = profile.self_description()
-        if desc:
-            parts.append(f"_Voice self-description:_ {desc}")
-        cadence = profile.cadence() or {}
-        vocab = profile.vocabulary_signatures()[:5]
-        stops = profile.stop_phrases()[:5]
-        bits: list[str] = []
-        if cadence:
-            for k in ("avg_chars", "avg_sentences", "one_idea_per_line_rate"):
-                v = cadence.get(k)
-                if v is not None:
-                    bits.append(f"{k}={v}")
-        if bits:
-            parts.append(f"_Voice cadence:_ {', '.join(bits)}")
-        if vocab:
-            parts.append("_Vocabulary signatures:_ " + ", ".join(f"`{v}`" for v in vocab))
-        if stops:
-            parts.append("_Stop phrases (avoid):_ " + ", ".join(f"`{s}`" for s in stops))
-        parts.append("")
-    else:
-        parts.append("(no active voice profile — operate from niche + samples alone)")
-        parts.append("")
-
-    if samples:
-        parts.append("### Voice samples")
-        for s in samples[:6]:
-            header = f"_Sample (priority {s.priority}"
-            if s.pillar:
-                header += f", pillar={s.pillar}"
-            header += "):_"
-            parts.append(header)
-            parts.append("> " + s.text.replace("\n", "\n> "))
-            parts.append("")
-    else:
-        parts.append("(no active voice samples)")
-        parts.append("")
-
-    lore_block = _personality_lore.render_splice_block(active_lore)
-    if lore_block:
-        parts.append("### Personality lore (active)")
-        parts.append(lore_block)
-        parts.append("")
-
-    return "\n".join(parts).strip()
+    """Render the drafting-flavored identity block (6 samples + voice
+    structural splice). P6R-18: delegates to the shared helper."""
+    return _render_identity_context_shared(
+        conn, sample_limit=6, include_voice_structural=True,
+    )
 
 
 def _refuse_if_niche_undefined(conn) -> None:
@@ -279,14 +191,7 @@ def _refuse_if_niche_undefined(conn) -> None:
 # Response parsing.
 # ---------------------------------------------------------------------------
 def _parse_json_response(text: str) -> dict[str, Any]:
-    cleaned = _strip_code_fence(text).strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise BlogDraftingModelError(f"model returned non-JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise BlogDraftingModelError("model returned non-object JSON")
-    return payload
+    return _parse_json_response_shared(text, model_error_exc=BlogDraftingModelError)
 
 
 def _require_str(payload: dict[str, Any], key: str, *, allow_empty: bool = False) -> str:
@@ -311,12 +216,9 @@ def _require_list(payload: dict[str, Any], key: str) -> list[Any]:
 
 
 def _require_confidence(payload: dict[str, Any], key: str = "confidence_label") -> str:
-    v = payload.get(key)
-    if v not in _VALID_CONFIDENCE_LABELS:
-        raise BlogDraftingModelError(
-            f"{key} must be one of {sorted(_VALID_CONFIDENCE_LABELS)}; got {v!r}"
-        )
-    return v
+    return _require_confidence_shared(
+        payload, key, model_error_exc=BlogDraftingModelError,
+    )
 
 
 # P6R-15: require at least one non-whitespace character after the H2

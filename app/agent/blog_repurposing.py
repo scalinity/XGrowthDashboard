@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,13 +49,14 @@ from app.agent import audit_log as _audit_log
 from app.agent import blogs as _blogs
 from app.agent import inspiration as _inspiration
 from app.agent import niche as _niche
-from app.agent import personality_lore as _personality_lore
-from app.agent import voice as _voice
-from app.agent import voice_profile as _voice_profile
-from app.agent.untrusted_wrap import (
-    strip_code_fence as _strip_code_fence,
-    wrap_untrusted as _wrap_untrusted,
+from app.agent._blog_agent_helpers import (
+    VALID_CONFIDENCE_LABELS as _VALID_CONFIDENCE_LABELS,
+    make_default_caller as _make_default_caller,
+    parse_json_response as _parse_json_response_shared,
+    render_identity_context as _render_identity_context_shared,
+    require_confidence as _require_confidence_shared,
 )
+from app.agent.untrusted_wrap import wrap_untrusted as _wrap_untrusted
 from app.db import transaction
 
 
@@ -120,9 +120,6 @@ class PlagiarismBlockedError(BlogRepurposingError):
 # Result dataclasses.
 # ---------------------------------------------------------------------------
 ConfidenceLabel = Literal["fact", "inference", "speculation", "mixed"]
-_VALID_CONFIDENCE_LABELS: frozenset[str] = frozenset(
-    {"fact", "inference", "speculation", "mixed"}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,29 +167,12 @@ class RepurposeXToBlogIdeaResult:
 ModelCaller = Callable[[str, str, str], tuple[str, int, int]]
 
 
-def _default_caller(
-    system_prompt: str, user_message: str, model: str
-) -> tuple[str, int, int]:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise BlogRepurposingModelError(
-            "ANTHROPIC_API_KEY is not set. See spec §28.8 for env setup."
-        )
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key, timeout=DEFAULT_TIMEOUT_SECONDS)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=DEFAULT_MAX_TOKENS,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    text_parts: list[str] = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            text_parts.append(getattr(block, "text", ""))
-    in_tok = int(getattr(resp.usage, "input_tokens", 0) or 0)
-    out_tok = int(getattr(resp.usage, "output_tokens", 0) or 0)
-    return ("".join(text_parts), in_tok, out_tok)
+# P6R-18: delegated to shared helper.
+_default_caller = _make_default_caller(
+    api_key_missing_exc=BlogRepurposingModelError,
+    max_tokens=DEFAULT_MAX_TOKENS,
+    timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -206,40 +186,13 @@ def _load_prompt(kind: str) -> str:
 
 
 def _render_identity_context(conn) -> str:
-    nd = _niche.get_niche(conn)
-    profile = _voice_profile.get_active(conn)
-    samples = _voice.get_active_voice_samples(conn)
-    splice_n = _personality_lore.get_splice_count(conn)
-    active_lore = _personality_lore.list_active(conn, limit=splice_n)
-
-    parts: list[str] = ["## Identity context", ""]
-    if nd.is_defined():
-        parts.append(f"You help **{nd.person}** solve **{nd.problem}**.")
-    else:
-        parts.append("(niche is not defined — refuse and ask Daniel to fill it in)")
-    parts.append("")
-
-    if profile is not None:
-        desc = profile.self_description()
-        if desc:
-            parts.append(f"_Voice self-description:_ {desc}")
-        cadence = profile.cadence() or {}
-        bits = [f"{k}={v}" for k, v in cadence.items() if v is not None]
-        if bits:
-            parts.append(f"_Voice cadence:_ {', '.join(bits)}")
-    if samples:
-        parts.append("")
-        parts.append("### Voice samples")
-        for s in samples[:4]:
-            parts.append(f"> {s.text.replace(chr(10), chr(10) + '> ')}")
-            parts.append("")
-
-    lore_block = _personality_lore.render_splice_block(active_lore)
-    if lore_block:
-        parts.append("### Personality lore (active)")
-        parts.append(lore_block)
-        parts.append("")
-    return "\n".join(parts).strip()
+    """Render the repurposing-flavored identity block (4 samples, no
+    structural voice splice — repurposing prompts are shorter so we
+    keep the identity context tight). P6R-18: delegates to shared
+    helper with the repurposing flavor."""
+    return _render_identity_context_shared(
+        conn, sample_limit=4, include_voice_structural=False,
+    )
 
 
 def _refuse_if_niche_undefined(conn) -> None:
@@ -248,23 +201,13 @@ def _refuse_if_niche_undefined(conn) -> None:
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
-    cleaned = _strip_code_fence(text).strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise BlogRepurposingModelError(f"model returned non-JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise BlogRepurposingModelError("model returned non-object JSON")
-    return payload
+    return _parse_json_response_shared(text, model_error_exc=BlogRepurposingModelError)
 
 
 def _require_confidence(payload: dict, key: str = "confidence_label") -> ConfidenceLabel:
-    v = payload.get(key)
-    if v not in _VALID_CONFIDENCE_LABELS:
-        raise BlogRepurposingModelError(
-            f"{key} must be one of {sorted(_VALID_CONFIDENCE_LABELS)}; got {v!r}"
-        )
-    return v  # type: ignore[return-value]
+    return _require_confidence_shared(
+        payload, key, model_error_exc=BlogRepurposingModelError,
+    )
 
 
 # ---------------------------------------------------------------------------
