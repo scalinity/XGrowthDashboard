@@ -185,6 +185,12 @@ DROP TABLE audit_logs;
 ALTER TABLE audit_logs_new RENAME TO audit_logs;
 
 -- Step 5: recreate indexes (DROP TABLE took them down).
+-- RV2-25: verified — these three are the COMPLETE set of indexes on
+-- audit_logs (grep migrations/*.sql 2026-05-23). Migration 015 created
+-- exactly these three; no later migration added any. If a future
+-- migration adds an audit_logs index, the rebuild here must be updated
+-- in parallel (or the new index must use CREATE INDEX IF NOT EXISTS
+-- in its own migration which will recreate it post-rebuild).
 CREATE INDEX IF NOT EXISTS idx_audit_logs_occurred
     ON audit_logs (occurred_at_utc DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_category_occurred
