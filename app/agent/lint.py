@@ -452,3 +452,394 @@ def reply_quality_lint(
             model_used="offline-fallback",
             api_call_failed=True,
         )
+
+
+# ===========================================================================
+# Phase 7 / §29.10 — thread-classifier lint.
+# ===========================================================================
+# Distinct from the §28.18 reply_quality_lint shipped in Phase 5.9 (above):
+#
+# - reply_quality_lint scans Daniel's DRAFT REPLY ('does this reply read as
+#   forced / AI-tasting / selfishly self-promoting?').
+# - thread_classifier_lint scans the TARGET POST's THREAD QUALITY before
+#   Daniel even starts drafting ('is this thread worth replying under?').
+#
+# Both lints can run on the same candidate. They write to different
+# columns (§28.18 → agent_drafts.reply_quality_lint_passed; §29.10 →
+# reply_targets.{lint_thread_classification_json, lint_category, lint_blocked}).
+#
+# Output schema per §29.10:
+#   { ragebait: bool,
+#     meme_with_no_serious_reply_path: bool,
+#     low_quality_reply_thread: bool,
+#     hijacking_required_to_mention_stir: bool,
+#     rationale: str }
+#
+# Blocking rules (enforced by the caller in tools.py::score_reply_candidates):
+#   - ragebait OR hijacking_required_to_mention_stir → lint_blocked=True;
+#     lint_category set to the primary block; row dims in Queue UI;
+#     'Draft reply' button disabled. Daniel can override via the
+#     Force-draft affordance per §29.7 (mandatory reason).
+#   - meme_with_no_serious_reply_path AND low_quality_reply_thread are
+#     signals only — each subtracts 1 from reply_opportunity_score
+#     (floored at 0). Never block on their own.
+#
+# Gated by ``reply_target_lint_enabled`` setting (default true; same
+# discipline as reply_quality_lint).
+
+
+_THREAD_LINT_CATEGORIES: tuple[str, ...] = (
+    "ragebait",
+    "meme_with_no_serious_reply_path",
+    "low_quality_reply_thread",
+    "hijacking_required_to_mention_stir",
+)
+
+
+# Offline pattern matchers — used in tests + as Haiku-outage fallback.
+# Conservative: false positives let Daniel override via Force-draft;
+# false negatives surface as Daniel encountering ragebait in the Queue
+# and using the Skip dropdown.
+#
+# The "hijacking_required" pattern looks for self-promotional language
+# patterns that would only register on Daniel's draft side; on the
+# THREAD side, it's the target post's topic being SO far from Daniel's
+# pillars that mentioning Stir would require hijacking. Hard to detect
+# offline without semantic understanding — the offline matcher is
+# intentionally narrow (just catches obvious "kitchen-frustration"
+# off-topic threads when Daniel's niche is software). Production
+# behavior leans on the Haiku call.
+_RAGEBAIT_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bunpopular\s+opinion\b", "ragebait: 'unpopular opinion' framing"),
+    (r"\b(everyone|nobody)\s+(is|will|wants?)\b.*[?!]", "ragebait: us-vs-them framing"),
+    (r"\bchange\s+my\s+mind\b", "ragebait: 'change my mind' framing"),
+    (r"\b(prove|fight)\s+me\s+wrong\b", "ragebait: 'fight me / prove me wrong' framing"),
+    (r"\b(woke|cancel\s+culture|libtard|trumptard)\b", "ragebait: tribal-culture-war terms"),
+)
+_MEME_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^\s*[A-Z\s]{5,}!?\s*$", "meme: shouting / all-caps single-line"),
+    (r"^\s*\S+\s*[?!]+\s*$", "meme: bare-word reaction post"),
+)
+_LOW_QUALITY_THREAD_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\b(rt|retweet)\s+(if|for|to)\b", "low-quality: RT-bait engagement-farming"),
+    (r"\b(like\s+if|follow\s+if|reply\s+below\s+with)\b", "low-quality: explicit engagement bait"),
+)
+
+
+@dataclass(frozen=True)
+class ThreadLintResult:
+    """Output of the §29.10 thread-classifier lint pass.
+
+    All four boolean flags carry independent signals; the caller maps them
+    onto ``lint_blocked`` + ``lint_category`` + the
+    ``reply_opportunity_score`` signal subtraction.
+
+    ``rationale`` is the one-line human-readable explanation surfaced as
+    a tooltip in the Queue UI alongside the dimmed row.
+
+    ``model_used`` carries the model id on a live call, ``'offline'`` on
+    a deterministic pattern match, ``'disabled'`` when the lint was
+    short-circuited via ``reply_target_lint_enabled=false``,
+    ``'offline-fallback'`` on Haiku unreachability.
+    """
+
+    ragebait: bool
+    meme_with_no_serious_reply_path: bool
+    low_quality_reply_thread: bool
+    hijacking_required_to_mention_stir: bool
+    rationale: str
+    model_used: str | None = None
+    api_call_failed: bool = False
+
+    @property
+    def is_blocking(self) -> bool:
+        """True iff §29.10 says the candidate's 'Draft reply' button is disabled."""
+        return self.ragebait or self.hijacking_required_to_mention_stir
+
+    @property
+    def primary_category(self) -> str | None:
+        """Denormalized primary category for the reply_targets.lint_category column.
+
+        Returns the first applicable category per the spec's display
+        precedence (ragebait outranks hijacking which outranks the two
+        signal-only ones). NULL when none fired.
+        """
+        if self.ragebait:
+            return "ragebait"
+        if self.hijacking_required_to_mention_stir:
+            return "hijacking_required_to_mention_stir"
+        if self.meme_with_no_serious_reply_path:
+            return "meme_with_no_serious_reply_path"
+        if self.low_quality_reply_thread:
+            return "low_quality_reply_thread"
+        return None
+
+    def to_json(self) -> str:
+        """Serialize for the lint_thread_classification_json column."""
+        return json.dumps(
+            {
+                "ragebait": self.ragebait,
+                "meme_with_no_serious_reply_path": self.meme_with_no_serious_reply_path,
+                "low_quality_reply_thread": self.low_quality_reply_thread,
+                "hijacking_required_to_mention_stir": (
+                    self.hijacking_required_to_mention_stir
+                ),
+                "rationale": self.rationale,
+            }
+        )
+
+
+_THREAD_CLASSIFIER_PROMPT = """You are reviewing an X post that someone is considering replying to.
+Classify the TARGET POST's thread quality on four orthogonal flags:
+
+1. ragebait — the post is designed to provoke arguments via tribal /
+   us-vs-them framing, 'unpopular opinion' bait, 'change my mind',
+   culture-war terms, or other patterns that engineer outrage over
+   substance.
+
+2. meme_with_no_serious_reply_path — the post is a meme / joke / one-
+   word reaction with no factual or experiential angle a substantive
+   reply could add. Replies under this kind of post are necessarily
+   forced.
+
+3. low_quality_reply_thread — the post's existing replies are
+   engagement-farming ('RT if you agree', 'reply with X'), low-effort
+   chat-room noise, or otherwise occupied by an audience that won't
+   reward a substantive reply.
+
+4. hijacking_required_to_mention_stir — Daniel's product is Stir
+   (parent-friendly meal planning). This flag should fire ONLY when
+   the target post's topic is SO far from cooking / parenting / meal-
+   planning that bringing up Stir would feel like hijacking. (Ignore
+   this flag if Daniel's niche definition is different from cooking;
+   the niche context is provided via the niche_problem field below.)
+
+Return STRICTLY JSON with exactly these keys:
+  ragebait: true | false
+  meme_with_no_serious_reply_path: true | false
+  low_quality_reply_thread: true | false
+  hijacking_required_to_mention_stir: true | false
+  rationale: one-line explanation (max ~120 chars)
+
+Do NOT include any text outside the JSON object.
+
+Target post author: @{author}
+Target post text:
+{post_text}
+
+Observed engagement metrics: {metrics}
+
+Daniel's niche (for the 'hijacking_required' decision):
+{niche_problem}
+"""
+
+
+def _offline_thread_classifier(
+    target_post_text: str,
+    target_author_handle: str,
+) -> ThreadLintResult:  # noqa: ARG001 — author kept for symmetry + future heuristics
+    """Deterministic pattern matcher — tests + Haiku-outage fallback."""
+    text = target_post_text or ""
+
+    ragebait_hits: list[str] = []
+    for pat, label in _RAGEBAIT_PATTERNS:
+        if re.search(pat, text, flags=re.IGNORECASE):
+            ragebait_hits.append(label)
+
+    meme_hits: list[str] = []
+    for pat, label in _MEME_PATTERNS:
+        if re.search(pat, text, flags=re.IGNORECASE):
+            meme_hits.append(label)
+
+    low_q_hits: list[str] = []
+    for pat, label in _LOW_QUALITY_THREAD_PATTERNS:
+        if re.search(pat, text, flags=re.IGNORECASE):
+            low_q_hits.append(label)
+
+    # Hijacking is semantic — offline matcher can't determine niche
+    # alignment without the niche context. Default to False; production
+    # leans on the Haiku call.
+    hijacking = False
+
+    pieces: list[str] = []
+    if ragebait_hits:
+        pieces.append("ragebait(" + "; ".join(ragebait_hits) + ")")
+    if meme_hits:
+        pieces.append("meme(" + "; ".join(meme_hits) + ")")
+    if low_q_hits:
+        pieces.append("low_quality(" + "; ".join(low_q_hits) + ")")
+
+    rationale = (
+        "offline thread lint: " + ", ".join(pieces) if pieces
+        else "offline thread lint: no failure-mode patterns matched"
+    )
+    return ThreadLintResult(
+        ragebait=bool(ragebait_hits),
+        meme_with_no_serious_reply_path=bool(meme_hits),
+        low_quality_reply_thread=bool(low_q_hits),
+        hijacking_required_to_mention_stir=hijacking,
+        rationale=rationale,
+        model_used="offline",
+    )
+
+
+def is_thread_classifier_lint_enabled(value_json: str | None) -> bool:
+    """Parse the ``reply_target_lint_enabled`` setting value_json."""
+    if value_json is None:
+        return True
+    try:
+        return bool(json.loads(value_json))
+    except (json.JSONDecodeError, ValueError):
+        return True
+
+
+def _parse_thread_classifier_response(body: str) -> ThreadLintResult | None:
+    """Map a Haiku response body to a ThreadLintResult. None on parse failure
+    so the caller can route through the offline matcher."""
+    text = (body or "").strip()
+    if not text:
+        return None
+    # Tolerate a leading code-fence (occasionally emitted by the model).
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return ThreadLintResult(
+        ragebait=bool(data.get("ragebait", False)),
+        meme_with_no_serious_reply_path=bool(
+            data.get("meme_with_no_serious_reply_path", False)
+        ),
+        low_quality_reply_thread=bool(data.get("low_quality_reply_thread", False)),
+        hijacking_required_to_mention_stir=bool(
+            data.get("hijacking_required_to_mention_stir", False)
+        ),
+        rationale=str(data.get("rationale", "") or "(no rationale provided)"),
+    )
+
+
+def thread_classifier_lint(
+    target_post_text: str,
+    target_author_handle: str,
+    observed_metrics: dict | None = None,
+    niche_problem: str | None = None,
+    *,
+    model: str = "claude-haiku-4-5",
+    enabled: bool = True,
+) -> ThreadLintResult:
+    """§29.10 thread-classifier lint over a candidate target post.
+
+    Distinct surface from ``reply_quality_lint`` (§28.18) — see the
+    module-level disambiguation comment above.
+
+    When ``enabled=False`` (the setting ``reply_target_lint_enabled`` is
+    off), short-circuits to all-False with rationale='lint disabled' so
+    the audit row records that the lint did not run.
+
+    Honors ``LINT_OFFLINE=1`` env var: skips the Haiku call and runs the
+    deterministic pattern matcher only (same env-var convention as
+    dark-pattern + reply-quality lints).
+
+    When Haiku is unreachable, falls back to the offline matcher with
+    ``model_used='offline-fallback'`` and ``api_call_failed=True``.
+
+    Returns a ``ThreadLintResult`` — never raises. The caller in
+    ``tools.py::score_reply_candidates`` interprets ``is_blocking``
+    and ``primary_category`` to set the reply_targets columns.
+    """
+    if not enabled:
+        return ThreadLintResult(
+            ragebait=False,
+            meme_with_no_serious_reply_path=False,
+            low_quality_reply_thread=False,
+            hijacking_required_to_mention_stir=False,
+            rationale="lint disabled",
+            model_used="disabled",
+        )
+
+    if os.environ.get("LINT_OFFLINE") == "1":
+        return _offline_thread_classifier(target_post_text, target_author_handle)
+
+    try:
+        import anthropic
+    except ImportError:
+        return _offline_thread_classifier(target_post_text, target_author_handle)
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return _offline_thread_classifier(target_post_text, target_author_handle)
+
+    metrics_str = json.dumps(observed_metrics or {}, sort_keys=True)
+    niche_str = (niche_problem or "(niche not provided)").strip()
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=400,
+            messages=[
+                {
+                    "role": "user",
+                    "content": _THREAD_CLASSIFIER_PROMPT.format(
+                        author=target_author_handle or "(handle not provided)",
+                        post_text=target_post_text or "(post text not provided)",
+                        metrics=metrics_str,
+                        niche_problem=niche_str,
+                    ),
+                }
+            ],
+        )
+        body = ""
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                body = block.text
+                break
+        parsed = _parse_thread_classifier_response(body)
+        if parsed is None:
+            fallback = _offline_thread_classifier(
+                target_post_text, target_author_handle
+            )
+            return ThreadLintResult(
+                ragebait=fallback.ragebait,
+                meme_with_no_serious_reply_path=fallback.meme_with_no_serious_reply_path,
+                low_quality_reply_thread=fallback.low_quality_reply_thread,
+                hijacking_required_to_mention_stir=(
+                    fallback.hijacking_required_to_mention_stir
+                ),
+                rationale=(
+                    f"unparseable haiku response → offline fallback: "
+                    f"{fallback.rationale}. raw: {body[:200]!r}"
+                ),
+                model_used="offline-fallback",
+                api_call_failed=False,
+            )
+        return ThreadLintResult(
+            ragebait=parsed.ragebait,
+            meme_with_no_serious_reply_path=parsed.meme_with_no_serious_reply_path,
+            low_quality_reply_thread=parsed.low_quality_reply_thread,
+            hijacking_required_to_mention_stir=parsed.hijacking_required_to_mention_stir,
+            rationale=parsed.rationale,
+            model_used=model,
+        )
+    except Exception as exc:
+        # Same outage discipline as the other two lints — fall back to
+        # the offline matcher with api_call_failed=True so audit
+        # reviewers can grep for intermittent outages without inferring
+        # from rationale prose.
+        fallback = _offline_thread_classifier(target_post_text, target_author_handle)
+        return ThreadLintResult(
+            ragebait=fallback.ragebait,
+            meme_with_no_serious_reply_path=fallback.meme_with_no_serious_reply_path,
+            low_quality_reply_thread=fallback.low_quality_reply_thread,
+            hijacking_required_to_mention_stir=(
+                fallback.hijacking_required_to_mention_stir
+            ),
+            rationale=(
+                f"offline-fallback (haiku unreachable: {type(exc).__name__}). "
+                f"offline result: {fallback.rationale}"
+            ),
+            model_used="offline-fallback",
+            api_call_failed=True,
+        )
