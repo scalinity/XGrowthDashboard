@@ -329,15 +329,32 @@ def request(
     # Successful 2xx responses look like {"data": [...], "meta": {...}}.
     status_code = _infer_status_code(parsed_body, proc.returncode, stderr)
 
+    # RV2-21: cap raised to 128KB to fit the typical
+    # /2/tweets/search/recent + expansions response shape (50-100KB).
+    # When truncation kicks in we annotate the audit row's notes so the
+    # operator knows the response_json may be mid-string-truncated and
+    # therefore not necessarily parseable as JSON.
+    _stdout_len = len(stdout)
+    _truncated_to = 128_000
+    if _stdout_len > _truncated_to:
+        _truncation_note = (
+            f"[response_text truncated_to={_truncated_to} "
+            f"original_length={_stdout_len}]"
+        )
+        notes_with_truncation = (
+            f"{log_notes}; {_truncation_note}" if log_notes else _truncation_note
+        )
+    else:
+        notes_with_truncation = log_notes
     raw_id = _log_raw(
         conn,
         source=log_source,
         endpoint=endpoint,
         method=method,
         body_json=body_json,
-        response_text=stdout[:65_000],  # bounded so we don't blow up the audit row
+        response_text=stdout[:_truncated_to],
         status_code=status_code,
-        notes=log_notes,
+        notes=notes_with_truncation,
     )
 
     if status_code == 401:
