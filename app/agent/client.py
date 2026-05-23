@@ -229,11 +229,20 @@ def dispatch_tool_call(
         # the handler can persist agent_drafts.reply_quality_lint_passed
         # alongside the row. When None (standalone draft) the handler
         # writes NULL — same semantics as the lint not running.
+        #
+        # Phase 10 / §28.18 — also inject failure_mode so the handler
+        # can persist agent_drafts.reply_quality_lint_failure_mode. The
+        # spec is explicit: populated only when passed=False; NULL on
+        # pass. Skipping the injection when passed is True keeps the
+        # column NULL via the handler's None-default contract.
         if decision.reply_quality_result is not None:
+            rq = decision.reply_quality_result
             tool_input = {
                 **tool_input,
-                "reply_quality_lint_passed": decision.reply_quality_result.passed,
+                "reply_quality_lint_passed": rq.passed,
             }
+            if not rq.passed and rq.failure_mode is not None:
+                tool_input["reply_quality_lint_failure_mode"] = rq.failure_mode
 
     try:
         tool = tools.get_tool(tool_name)

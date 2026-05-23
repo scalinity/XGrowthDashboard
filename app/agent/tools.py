@@ -1338,6 +1338,8 @@ def _save_draft_reply(
     agent_reasoning: str | None = None,
     confidence_label: str | None = None,
     reply_quality_lint_passed: bool | None = None,
+    reply_quality_lint_failure_mode: str | None = None,
+    reply_intent: str | None = None,  # noqa: ARG001 — Phase 10 §29.5 promotion; dispatcher validates BEFORE this handler runs, so the value just rides through for the existing reply_targets wiring (no new column on agent_drafts).
 ) -> dict[str, Any]:
     import re as _re
 
@@ -1350,6 +1352,13 @@ def _save_draft_reply(
         None if reply_quality_lint_passed is None
         else (1 if reply_quality_lint_passed else 0)
     )
+    # Phase 10 / §28.18 — failure_mode persistence. Per spec: populated
+    # only when passed=False; NULL on pass. The dispatcher omits the
+    # injection when passed=True so the default None argument keeps
+    # the column NULL via the schema CHECK contract.
+    rq_failure_mode_persist: str | None = (
+        reply_quality_lint_failure_mode if rq_persist == 0 else None
+    )
     with transaction(conn):
         draft_cur = conn.execute(
             """
@@ -1357,8 +1366,9 @@ def _save_draft_reply(
                 (session_id, conversation_id, draft_kind, text, pillar,
                  target_post_url, target_post_text, agent_reasoning,
                  voice_self_score, iwh_attempt_index, status,
-                 confidence_label, content_type, reply_quality_lint_passed)
-            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)
+                 confidence_label, content_type, reply_quality_lint_passed,
+                 reply_quality_lint_failure_mode)
+            VALUES (?, ?, 'reply', ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -1373,6 +1383,7 @@ def _save_draft_reply(
                 confidence_label,
                 ct,
                 rq_persist,
+                rq_failure_mode_persist,
             ),
         )
         draft_id = int(draft_cur.lastrowid)

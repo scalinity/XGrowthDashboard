@@ -220,6 +220,7 @@ def lint_draft(
 # by accident.
 _EMOJI_CLASS = "[\\U0001F300-\\U0001FAFF\\u2700-\\u27BF\\u2764]"
 _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str], ...] = (
+    # ---- Phase 5.9 original three categories ----
     (
         # RV2-26: bounded character class instead of .* — adversarial inputs.
         r"\bgreat\s+(post|thread|take)!?\s*" + _EMOJI_CLASS + r"[^.\n]{0,200}\b(check|stop\s+by|visit|see)\b",
@@ -241,7 +242,149 @@ _REPLY_QUALITY_PATTERNS: tuple[tuple[str, str], ...] = (
         r"\b(as\s+an\s+ai|i\s+am\s+an\s+ai|let\s+me\s+know\s+if\s+you'd\s+like\s+me\s+to)\b",
         "AI-tasting: explicit LLM-template phrasing",
     ),
+    # ---- Phase 10 — eight new categories from Daniel's voice anchor ----
+    # engagement_bait: curiosity gap framings that promise a payoff the
+    # reply doesn't deliver. Same surface as §28.2 #12 dark-pattern
+    # engagement bait, but firing at draft-save time on REPLY text.
+    (
+        r"\b\d+\s+secrets?\b[^.\n]{0,200}\b(don't|do not|nobody|no one)\s+(know|tell|tells)\b",
+        "engagement_bait: 'N secrets X don't know' framing",
+    ),
+    (
+        r"\bnumber\s+\d+\s+will\s+(surprise|shock|amaze)",
+        "engagement_bait: 'number N will surprise you' framing",
+    ),
+    (
+        r"\byou\s+won't\s+believe\b",
+        "engagement_bait: 'you won't believe' framing",
+    ),
+    # ragebait: manufactured opposition in REPLY text. Distinct from
+    # reply_targets.lint_category='ragebait' which scores the TARGET post.
+    (
+        r"\bunpopular\s+opinion\b",
+        "ragebait: 'unpopular opinion' framing",
+    ),
+    (
+        r"\b(change|fight|prove)\s+my\s+mind\b",
+        "ragebait: 'change my mind / fight me' framing",
+    ),
+    (
+        r"\b(everyone|everybody|nobody|no\s+one)\s+(in\s+this\s+thread|here|is)\s+(is\s+)?wrong\b",
+        "ragebait: 'everyone is wrong' tribal framing",
+    ),
+    # manipulative_question: questions wearing rhetorical clothing —
+    # the writer has a fixed take but lowers the reader's guard with
+    # false uncertainty.
+    (
+        r"\banyone\s+else\s+(think|feel|notice|see)\b[^.\n]{0,40}\?",
+        "manipulative_question: 'anyone else…?' false-uncertainty bait",
+    ),
+    (
+        r"\bam\s+i\s+(crazy|the\s+only|alone|missing\s+something)\b[^.\n]{0,30}\?",
+        "manipulative_question: 'am I crazy?' false-uncertainty bait",
+    ),
+    # fake_authority: creator-economy credential inflation. The §28.2
+    # #12 dark-pattern lint catches the most egregious cases; this
+    # surface catches the subtler "after scaling X to Y" pattern.
+    (
+        r"\bafter\s+(scaling|building|growing|launching)\s+(\d+\+?|over\s+\d+|hundreds?\s+of)\b",
+        "fake_authority: inflated scale claim",
+    ),
+    (
+        r"\bas\s+someone\s+who'?s?\s+(worked\s+with|coached|advised|helped|scaled)\s+(\d+\+?|hundreds?\s+of|thousands?\s+of)\b",
+        "fake_authority: 'as someone who's worked with N…' inflation",
+    ),
+    # performative_threading: 🧵 1/ on non-sequential content. Single
+    # post pretending to be a thread.
+    (
+        r"\U0001F9F5\s*1\s*/",
+        "performative_threading: '🧵 1/' on non-thread content",
+    ),
+    (
+        r"(?:^|\s)1/\s+",
+        "performative_threading: bare '1/ ' opener without a thread payload",
+    ),
+    # diving_preamble: throat-clearing before the first concrete
+    # sentence. The reply starts when the post says something.
+    (
+        r"^\s*(let\s+me\s+(unpack|break|dive)|diving\s+(into|in)|breaking\s+this\s+down|hot\s+take\s+incoming|let'?s\s+(dive|unpack))\b",
+        "diving_preamble: throat-clearing opener instead of a concrete first sentence",
+    ),
+    # emoji_as_personality: 2+ consecutive decorative emoji (not a
+    # thumbs-up on a real artifact). The §29.10 _EMOJI_CLASS captures
+    # the codepoints; this rule fires on chains of them.
+    (
+        r"(?:" + _EMOJI_CLASS + r"\s*){2,}",
+        "emoji_as_personality: decorative emoji chain (2+ in a row) used for tone",
+    ),
+    # hedging_that_erases: confidence-eroding strings. Two or more
+    # hedges in close proximity is the tell (a single "maybe" alone
+    # is honest; "kind of, sort of, maybe, no expert but…" is the
+    # eraser pattern).
+    (
+        r"\b(kind\s+of|sort\s+of)\b[^.\n]{0,80}\b(maybe|perhaps|just\s+thinking|no\s+expert)\b",
+        "hedging_that_erases: stacked hedges that subtract the substance",
+    ),
+    (
+        r"\b(just\s+thinking\s+out\s+loud|no\s+expert\s+but|not\s+sure\s+if\s+this\s+makes\s+sense)\b",
+        "hedging_that_erases: 'just thinking out loud / no expert but' eraser",
+    ),
 )
+
+# Phase 10 — the canonical eleven-value failure-mode enum. Mirrors the
+# CHECK constraint on agent_drafts.reply_quality_lint_failure_mode in
+# migration 023; the lint module is the single source of truth in code
+# and the migration is the single source of truth in schema. Tests pin
+# the equality.
+REPLY_QUALITY_FAILURE_MODES: tuple[str, ...] = (
+    "forced",
+    "ai_tasting",
+    "selfishly_self_promoting",
+    "engagement_bait",
+    "ragebait",
+    "manipulative_question",
+    "fake_authority",
+    "performative_threading",
+    "diving_preamble",
+    "emoji_as_personality",
+    "hedging_that_erases",
+)
+
+
+def _label_to_failure_mode(label: str) -> str:
+    """Map a pattern label string to the canonical enum value.
+
+    The label strings are human-readable for log surfaces; the enum
+    values are the persistent-schema contract. Centralizing the
+    mapping here keeps the pattern table cosmetic-free while staying
+    one-to-one with the eleven enum values.
+    """
+    label_lower = label.lower()
+    if "selfishly self-promoting" in label_lower or "selfishly_self_promoting" in label_lower:
+        return "selfishly_self_promoting"
+    if "ai-tasting" in label_lower or "ai_tasting" in label_lower:
+        return "ai_tasting"
+    if "engagement_bait" in label_lower or "engagement-bait" in label_lower:
+        return "engagement_bait"
+    if "ragebait" in label_lower:
+        return "ragebait"
+    if "manipulative_question" in label_lower:
+        return "manipulative_question"
+    if "fake_authority" in label_lower:
+        return "fake_authority"
+    if "performative_threading" in label_lower:
+        return "performative_threading"
+    if "diving_preamble" in label_lower:
+        return "diving_preamble"
+    if "emoji_as_personality" in label_lower:
+        return "emoji_as_personality"
+    if "hedging_that_erases" in label_lower:
+        return "hedging_that_erases"
+    # Defensive default — covers the legacy "forced: ..." labels and
+    # any future label string that doesn't carry an explicit enum
+    # token. "forced" was the legacy catch-all in Phase 5.9, so
+    # preserving it here is the right backstop.
+    return "forced"
 
 
 @dataclass(frozen=True)
@@ -284,11 +427,13 @@ Reply with exactly one of:
 def _parse_reply_quality_response(
     body: str, *, reply_text: str | None = None
 ) -> ReplyQualityResult:
-    """Map the four-option Haiku response to a ReplyQualityResult.
+    """Map the eleven-option Haiku response to a ReplyQualityResult.
 
-    Tolerates leading whitespace and the model occasionally wrapping
-    its answer in a code fence; the four expected verdict prefixes are
-    matched case-insensitively.
+    Phase 10: expanded from the original four-option set to recognize all
+    eleven failure modes. The matcher tolerates leading whitespace, code
+    fences, and the model occasionally using the human-readable category
+    label instead of the enum token. Each branch returns the canonical
+    enum value via _label_to_failure_mode (or direct token match).
 
     P59A-W3: when the response is unparseable, fall back to the offline
     pattern matcher (symmetric with the dark-pattern lint's outage
@@ -303,19 +448,51 @@ def _parse_reply_quality_response(
             rationale=body.strip(),
             failure_mode=None,
         )
-    if "forced" in text and text.startswith("yes"):
-        return ReplyQualityResult(
-            passed=False, rationale=body.strip(), failure_mode="forced"
-        )
-    if "ai-tasting" in text or "ai tasting" in text:
+    # Iterate the eleven enum values in order of specificity so a
+    # response that mentions multiple categories (rare but possible)
+    # resolves to the most-specific match. The order here matches
+    # REPLY_QUALITY_FAILURE_MODES with the legacy "forced" last so
+    # the broad legacy term doesn't shadow a more-specific Phase 10
+    # category. ai-tasting handled separately because the legacy
+    # response text uses "AI-tasting" (with hyphen).
+    if "ai-tasting" in text or "ai tasting" in text or "ai_tasting" in text:
         return ReplyQualityResult(
             passed=False, rationale=body.strip(), failure_mode="ai_tasting"
         )
-    if "self-promoting" in text or "selfishly" in text:
+    if (
+        "self-promoting" in text
+        or "selfishly" in text
+        or "selfishly_self_promoting" in text
+    ):
         return ReplyQualityResult(
             passed=False,
             rationale=body.strip(),
             failure_mode="selfishly_self_promoting",
+        )
+    # Phase 10 — eight new categories. Each scanned by its enum token
+    # (canonical) AND its space-separated variant (which Haiku sometimes
+    # emits when it's quoting the human-readable name).
+    for mode_token, alt_phrases in (
+        ("engagement_bait", ("engagement bait", "engagement-bait")),
+        # NOTE: ragebait must scan BEFORE other tokens that contain "bait"
+        # for prefix-matching robustness.
+        ("ragebait", ("ragebait", "rage bait", "rage-bait")),
+        ("manipulative_question", ("manipulative question", "manipulative-question")),
+        ("fake_authority", ("fake authority", "fake-authority")),
+        ("performative_threading", ("performative threading", "performative-threading")),
+        ("diving_preamble", ("diving preamble", "diving-preamble")),
+        ("emoji_as_personality", ("emoji as personality", "emoji-as-personality")),
+        ("hedging_that_erases", ("hedging that erases", "hedging-that-erases")),
+    ):
+        if mode_token in text or any(p in text for p in alt_phrases):
+            return ReplyQualityResult(
+                passed=False,
+                rationale=body.strip(),
+                failure_mode=mode_token,
+            )
+    if "forced" in text and text.startswith("yes"):
+        return ReplyQualityResult(
+            passed=False, rationale=body.strip(), failure_mode="forced"
         )
     # Unparseable — route through the offline matcher so the dark-pattern
     # and reply-quality lints have symmetric outage contracts. The
@@ -341,14 +518,16 @@ def _parse_reply_quality_response(
 
 
 def _offline_reply_quality(text: str) -> ReplyQualityResult:
-    """Deterministic pattern matcher — used in tests + as API fallback."""
+    """Deterministic pattern matcher — used in tests + as API fallback.
+
+    Phase 10: covers the eleven failure-mode categories. The
+    ``_label_to_failure_mode`` helper centralises the label-to-enum
+    mapping so the regex table stays purely cosmetic. The eleven
+    categories are listed in ``REPLY_QUALITY_FAILURE_MODES``.
+    """
     for pat, label in _REPLY_QUALITY_PATTERNS:
         if re.search(pat, text, flags=re.IGNORECASE):
-            mode = (
-                "selfishly_self_promoting" if "self-promoting" in label
-                else "ai_tasting" if "AI-tasting" in label
-                else "forced"
-            )
+            mode = _label_to_failure_mode(label)
             return ReplyQualityResult(
                 passed=False,
                 rationale=f"offline reply-quality lint matched: {label}",

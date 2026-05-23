@@ -137,6 +137,7 @@ def test_phase59_full_happy_path(
             "target_post_url": "https://x.com/foo/status/9999",
             "target_post_text": "A thoughtful piece on LLM evals.",
             "content_type": "value",
+            "reply_intent": "growth",  # Phase 10 §29.5 dispatcher gate.
         },
         message_id=msg3,
         assistant_text=_IWH_PASS,

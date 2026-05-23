@@ -288,6 +288,7 @@ def test_dispatcher_bounces_forced_reply_via_quality_lint(
             "target_post_url": "https://x.com/foo/status/123",
             "target_post_text": "Thoughtful evals piece.",
             "content_type": "value",
+            "reply_intent": "growth",  # Phase 10 §29.5 dispatcher gate.
         },
         message_id=msg_id,
         assistant_text=_PERFECT_IWH,
@@ -316,6 +317,7 @@ def test_dispatcher_lands_substantive_reply(
             "target_post_url": "https://x.com/foo/status/124",
             "target_post_text": "Thoughtful evals piece.",
             "content_type": "value",
+            "reply_intent": "icp_discovery",  # Phase 10 §29.5 dispatcher gate.
         },
         message_id=msg_id,
         assistant_text=_PERFECT_IWH,
@@ -349,6 +351,7 @@ def test_dispatcher_toggle_off_lands_forced_reply(
             "target_post_url": "https://x.com/foo/status/125",
             "target_post_text": "x",
             "content_type": "value",
+            "reply_intent": "relationship",  # Phase 10 §29.5 dispatcher gate.
         },
         message_id=msg_id,
         assistant_text=_PERFECT_IWH,
