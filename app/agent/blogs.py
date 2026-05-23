@@ -67,6 +67,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal, Optional
 from urllib.parse import urlparse
@@ -218,8 +219,25 @@ def _normalize_slug(title: str) -> str:
     is always non-empty. Disambiguation against existing rows (``-N``
     suffix) is done by the caller in :func:`create_blog` because it
     needs DB access.
+
+    P6R-23: NFKD-normalize before the ASCII strip so non-Latin titles
+    transliterate to their ASCII-decomposable form when possible
+    (``café`` → ``cafe``, ``naïve`` → ``naive``, ``résumé`` → ``resume``).
+    Titles with no ASCII-decomposable form (CJK ideographs, Devanagari,
+    Arabic, etc.) still fall through to ``'blog'``, but a Latin-derived
+    title with accent marks now produces a useful slug instead of
+    collapsing to the fallback.
     """
-    s = title.strip().lower()
+    # NFKD decomposes accented characters into base+combining-mark
+    # pairs; encode-then-decode through ASCII with errors='ignore'
+    # drops the combining marks, leaving the unaccented base letter.
+    s = (
+        unicodedata.normalize("NFKD", title)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .strip()
+        .lower()
+    )
     s = _SLUG_NORMALIZE_RE.sub("-", s)
     s = s.strip("-")
     if not s:

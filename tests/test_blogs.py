@@ -56,6 +56,24 @@ def test_create_blog_normalizes_unicode_and_punctuation(
     assert b.slug == "why-i-m-building-stir-first-principles"
 
 
+def test_create_blog_transliterates_accented_latin_titles(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-23: NFKD-decomposed accented Latin chars get transliterated
+    to their ASCII base form so the slug is meaningful."""
+    a = bm.create_blog(db_conn, title="Café résumé naïve façade")
+    assert a.slug == "cafe-resume-naive-facade"
+
+
+def test_create_blog_falls_back_to_blog_for_non_latin_titles(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """Titles with no ASCII-decomposable form still fall back to 'blog'.
+    Confirmed unchanged-behavior since transliteration is best-effort."""
+    a = bm.create_blog(db_conn, title="日本語のブログ")
+    assert a.slug.startswith("blog")
+
+
 def test_create_blog_rejects_empty_title(db_conn: sqlite3.Connection) -> None:
     with pytest.raises(bm.InvalidBlogFieldError):
         bm.create_blog(db_conn, title="   ")
