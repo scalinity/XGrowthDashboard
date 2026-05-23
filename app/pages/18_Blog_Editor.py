@@ -703,13 +703,21 @@ def main() -> None:
 
 def _render_export_dialog(blog_id: int) -> None:
     with open_connection() as conn:
-        default_dir = conn.execute(
+        row = conn.execute(
             "SELECT value_json FROM settings WHERE key = 'blog_export_default_directory'"
         ).fetchone()
-        try:
-            default_dir = json.loads(default_dir[0]) if default_dir else "data/blog_exports/"
-        except (TypeError, ValueError, json.JSONDecodeError):
-            default_dir = "data/blog_exports/"
+        # P6R-20: parse defensively — only accept a non-empty JSON
+        # string value. Pre-fix, a setting stored as a list/int would
+        # parse cleanly and then crash on .rstrip('/'). Type-check
+        # after json.loads.
+        default_dir = "data/blog_exports/"
+        if row is not None and row[0]:
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, str) and parsed.strip():
+                    default_dir = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         blog = _blogs.get_blog(conn, blog_id)
 
     st.selectbox(
