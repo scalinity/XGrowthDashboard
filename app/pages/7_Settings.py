@@ -1844,10 +1844,28 @@ st.markdown(
 )
 
 # ----- Per-job last-refresh timestamps -----
+# RV2-16: filter by Daniel's x_handle so a future multi-account schema
+# doesn't surface another account's snapshot timestamp as "Daniel's".
+# Matches the discipline of _already_have_manual_snapshot_today in
+# scripts/collect_account_snapshot.py.
+_x_handle_row = conn.execute(
+    "SELECT value_json FROM settings WHERE key = 'x_handle'"
+).fetchone()
+_daniel_handle = "dannyscalant"
+if _x_handle_row and _x_handle_row[0]:
+    try:
+        _daniel_handle = str(
+            json.loads(_x_handle_row[0]) or _daniel_handle
+        ).lstrip("@").strip()
+    except (TypeError, json.JSONDecodeError):
+        pass
+
 _last_refresh_rows: list[tuple[str, str | None]] = []
 _acct_row = conn.execute(
     "SELECT collected_at_utc FROM account_snapshots "
-    "WHERE source = 'api' ORDER BY collected_at_utc DESC LIMIT 1"
+    "WHERE source = 'api' AND username = ? "
+    "ORDER BY collected_at_utc DESC LIMIT 1",
+    (_daniel_handle,),
 ).fetchone()
 _last_refresh_rows.append(
     ("collect_account_snapshot", _acct_row[0] if _acct_row else None)
