@@ -442,6 +442,7 @@ def _compute_and_persist_scores_locked(
     reply_intent: str | None = None,
     pillar: str | None = None,
     audience: str | None = None,
+    precomputed_lint=None,  # type: ignore[no-untyped-def]
 ) -> dict[str, Any]:
     """Re-score an existing reply_targets row IN A CALLER-OWNED TRANSACTION.
 
@@ -489,13 +490,20 @@ def _compute_and_persist_scores_locked(
         "reply_count": row["reply_count"],
         "repost_count": row["repost_count"],
     }
-    lint = thread_classifier_lint(
-        target_post_text=row["target_text"] or "",
-        target_author_handle=row["target_author_handle"] or "",
-        observed_metrics=observed_metrics,
-        niche_problem=niche_problem,
-        enabled=lint_enabled,
-    )
+    # RV2-20: prefer the caller-precomputed lint result so the Haiku
+    # round-trip (typical ~500ms) happens OUTSIDE the transaction.
+    # Falling back to inline computation preserves backward compatibility
+    # for callers that haven't been refactored.
+    if precomputed_lint is not None:
+        lint = precomputed_lint
+    else:
+        lint = thread_classifier_lint(
+            target_post_text=row["target_text"] or "",
+            target_author_handle=row["target_author_handle"] or "",
+            observed_metrics=observed_metrics,
+            niche_problem=niche_problem,
+            enabled=lint_enabled,
+        )
     lint_blocked = 1 if lint.is_blocking else 0
     lint_category = lint.primary_category
     lint_json = lint.to_json()
@@ -657,6 +665,27 @@ def _score_reply_candidates(
     if not candidates:
         return {"scored": [], "errors": ["no candidates and no reply_target_id provided"]}
 
+    # RV2-20: pre-compute the §29.10 thread-classifier lint OUTSIDE the
+    # transaction so the Haiku round-trip doesn't hold BEGIN IMMEDIATE
+    # across N candidates × ~500ms per call. The setting + niche reads
+    # are also moved here so the per-candidate inner block stays
+    # write-only.
+    _lint_setting_row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'reply_target_lint_enabled'"
+    ).fetchone()
+    _lint_enabled = is_thread_classifier_lint_enabled(
+        _lint_setting_row[0] if _lint_setting_row else None
+    )
+    _niche_row = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'niche_problem'"
+    ).fetchone()
+    _niche_problem = None
+    if _niche_row and _niche_row[0]:
+        try:
+            _niche_problem = json.loads(_niche_row[0])
+        except (TypeError, json.JSONDecodeError):
+            _niche_problem = None
+
     scored: list[dict[str, Any]] = []
     errors: list[str] = []
     for c in candidates:
@@ -664,6 +693,20 @@ def _score_reply_candidates(
         if not url:
             errors.append("candidate missing url")
             continue
+        # RV2-20: lint the candidate BEFORE opening the transaction.
+        precomputed_lint = thread_classifier_lint(
+            target_post_text=(c.get("text") or c.get("target_text") or ""),
+            target_author_handle=(
+                c.get("author_handle") or c.get("target_author_handle") or ""
+            ),
+            observed_metrics={
+                "like_count": c.get("like_count"),
+                "reply_count": c.get("reply_count"),
+                "repost_count": c.get("repost_count"),
+            },
+            niche_problem=_niche_problem,
+            enabled=_lint_enabled,
+        )
         # /review-2 🔴 #2 — INSERT + metric-refresh + score UPDATE all run
         # inside one transaction so a CHECK failure on the inner UPDATE
         # rolls back the just-minted row instead of orphaning it.
@@ -738,6 +781,7 @@ def _score_reply_candidates(
                     reply_intent=c.get("reply_intent"),
                     pillar=c.get("pillar"),
                     audience=c.get("audience"),
+                    precomputed_lint=precomputed_lint,
                 )
         except Exception as exc:  # noqa: BLE001 — wrap any DB error per candidate
             # RV2-10: log the full stack for operator diagnosis; the tool
