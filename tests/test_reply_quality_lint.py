@@ -78,8 +78,11 @@ def test_disabled_short_circuits_to_pass() -> None:
         enabled=False,
     )
     assert result.passed is True
-    assert result.failure_mode == "lint_disabled"
+    # Phase 10 S6 — disabled is not a failure mode (not in the schema
+    # CHECK enum). The disabled signal lives on rationale + model_used.
+    assert result.failure_mode is None
     assert result.rationale == "lint disabled"
+    assert result.model_used == "disabled"
 
 
 def test_is_reply_quality_lint_enabled_default_true() -> None:
@@ -200,7 +203,10 @@ def test_decide_respects_setting_toggle(
     )
     assert decision.action == "save"
     assert decision.reply_quality_result is not None
-    assert decision.reply_quality_result.failure_mode == "lint_disabled"
+    # Phase 10 S6 — disabled state surfaces via model_used="disabled" +
+    # rationale="lint disabled"; failure_mode is None (not in schema enum).
+    assert decision.reply_quality_result.failure_mode is None
+    assert decision.reply_quality_result.model_used == "disabled"
 
 
 # ---------------------------------------------------------------------------

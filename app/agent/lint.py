@@ -444,8 +444,15 @@ class ReplyQualityResult:
     False bounces back as a failed IWH revision via the same enforcement
     path as ``LintResult.dark_pattern_detected``.
 
-    ``failure_mode`` is one of: 'forced', 'ai_tasting',
-    'selfishly_self_promoting', 'lint_disabled', or None on pass.
+    ``failure_mode`` is one of the eleven canonical
+    REPLY_QUALITY_FAILURE_MODES values, or None on pass / disabled.
+
+    Phase 10 S6: when ``enabled=False`` the lint short-circuits to
+    ``passed=True, failure_mode=None`` — disabled is not a failure
+    state. The prior ``failure_mode='lint_disabled'`` string was not
+    in the schema enum and would have IntegrityError'd if any code
+    path tried to persist it. The disabled signal lives on the
+    ``rationale`` and ``model_used`` fields instead.
     """
 
     passed: bool
@@ -719,7 +726,8 @@ def reply_quality_lint(
     """Run the §28.18 reply-quality lint over ``text``.
 
     When ``enabled=False`` short-circuits to ``passed=True`` with
-    ``failure_mode='lint_disabled'`` and ``rationale='lint disabled'``;
+    ``failure_mode=None`` (S6 — not in the schema enum) and
+    ``rationale='lint disabled'``;
     the audit row carries the disabled state so the trail is complete.
 
     Honors ``LINT_OFFLINE=1`` env var: skips the Haiku call and runs the
@@ -733,7 +741,10 @@ def reply_quality_lint(
         return ReplyQualityResult(
             passed=True,
             rationale="lint disabled",
-            failure_mode="lint_disabled",
+            # Phase 10 S6 — 'lint_disabled' is not in the schema
+            # CHECK enum. Disabled isn't a failure state, so
+            # failure_mode is None; model_used carries the signal.
+            failure_mode=None,
             model_used="disabled",
         )
 
