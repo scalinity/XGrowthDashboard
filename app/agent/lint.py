@@ -478,6 +478,13 @@ class ReplyQualityLintPromptMissingError(RuntimeError):
     missing or empty. Same severity as Section4AnchorMissingError —
     the live Haiku path has no inline fallback, so a missing file means
     the gate silently runs only the offline regex matcher in production.
+
+    Phase 10 S10 — could not inherit from prompt_builder.SpecDriftError
+    because the cross-module import chain
+    (lint → prompt_builder → tools → lint) is a circle. Callers who
+    want to catch every drift error should do
+    ``except (prompt_builder.SpecDriftError,
+              lint.ReplyQualityLintPromptMissingError):``.
     """
 
 

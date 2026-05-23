@@ -67,7 +67,26 @@ def _read_template() -> str:
     return PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
-class SpecRuleExtractionError(RuntimeError):
+# Phase 10 S10 — unified base class for every drift/extraction error
+# raised by this module. Lets callers catch the whole category with a
+# single `except SpecDriftError`. Inherits from RuntimeError so the
+# existing public-API contract (everything is a RuntimeError subclass)
+# is preserved.
+class SpecDriftError(RuntimeError):
+    """Base class for all spec / prompt / migration drift errors raised
+    by app.agent.prompt_builder and adjacent modules.
+
+    Phase 10 S10 — consolidates the prior trio of independent
+    RuntimeError subclasses (SpecRuleExtractionError,
+    VoiceProfilePrescriptiveMissingError, Section4AnchorMissingError)
+    under one umbrella so a single `except SpecDriftError` catches
+    everything CI / pre-commit cares about. Each leaf class still
+    exists and is still raised by its specific check; they now inherit
+    from this base.
+    """
+
+
+class SpecRuleExtractionError(SpecDriftError):
     """Raised when extract_rules_from_spec cannot find any rules.
 
     Treat as a hard build failure — the assembled system prompt would
@@ -263,7 +282,7 @@ def load_voice_profile_prescriptive() -> str:
     return _load_voice_profile_prescriptive_cached(mtime)
 
 
-class VoiceProfilePrescriptiveMissingError(RuntimeError):
+class VoiceProfilePrescriptiveMissingError(SpecDriftError):
     """Raised when verify_voice_profile_prescriptive_present cannot find
     the static prescriptive voice anchor file.
 
@@ -271,6 +290,10 @@ class VoiceProfilePrescriptiveMissingError(RuntimeError):
     and the build pipeline would silently strip Section 5's
     prescriptive layer, and the agent would lose the load-bearing
     "what voice IS / what voice IS NOT" anchor without any signal.
+
+    Phase 10 S10 — inherits from SpecDriftError so a single
+    `except SpecDriftError` catches all drift errors raised by this
+    module.
     """
 
 
@@ -543,7 +566,7 @@ def verify_reply_intent_enum_dispatcher_in_sync() -> bool:
 # than substring-only (a future copy edit that splits a block into prose
 # variants won't silently disable the drift check).
 # ---------------------------------------------------------------------------
-class Section4AnchorMissingError(RuntimeError):
+class Section4AnchorMissingError(SpecDriftError):
     """Raised when verify_section_4_anchors finds a missing additive block.
 
     Each of the three Phase 10 additive blocks (engagement-with-integrity,
@@ -551,6 +574,9 @@ class Section4AnchorMissingError(RuntimeError):
     *should* survive arbitrary §28.3 reorganization but can be
     accidentally deleted in a future copy-edit pass. The drift check
     surfaces the missing block by name so the fix is one-line.
+
+    Phase 10 S10 — inherits from SpecDriftError so a single
+    `except SpecDriftError` catches every drift error in this module.
     """
 
 
