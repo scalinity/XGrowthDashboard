@@ -546,7 +546,12 @@ def _infer_status_code(
                 # Phase 8: 403 cold-reply error envelope is keyed
                 # "Forbidden" — match before the broader "auth" check
                 # below so we don't misclassify as 401.
-                if "forbidden" in title or "cold" in title:
+                # P8R-11: title check is exact-match ("forbidden") not
+                # substring (avoids matching "scold" etc.); also
+                # honor the stable X API `type` URI for cold-reply
+                # which is the canonical machine-readable marker.
+                error_type = str(first_error.get("type") or "").lower()
+                if title == "forbidden" or "cold-reply" in error_type:
                     return 403
                 if "unauthorized" in title or "auth" in title:
                     return 401

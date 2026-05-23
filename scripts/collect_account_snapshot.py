@@ -103,7 +103,13 @@ def run(conn: sqlite3.Connection, *, today_iso: str | None = None) -> dict[str, 
         summary["skipped_reason"] = "data_collection_mode=manual"
         return summary
 
-    username = _get_setting(conn, "x_handle", default="dannyscalant")
+    # RV2-12: normalize the stored handle. Daniel sometimes edits
+    # ``x_handle`` to ``@dannyscalant`` via the Settings UI; the manual
+    # account_snapshots rows store the bare ``dannyscalant`` shape, so
+    # an unnormalized query would miss the duplicate-day guard and
+    # break the §17 'manual entry wins' contract.
+    username_raw = _get_setting(conn, "x_handle", default="dannyscalant")
+    username = str(username_raw or "dannyscalant").lstrip("@").strip()
     if _already_have_manual_snapshot_today(conn, today, username):
         summary["skipped_reason"] = "duplicate_day_manual_entry_present"
         return summary

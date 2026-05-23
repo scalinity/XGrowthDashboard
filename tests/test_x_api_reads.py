@@ -118,6 +118,35 @@ def test_collect_account_snapshot_skips_when_manual_mode(
     assert called["n"] == 0
 
 
+def test_rv2_12_handle_with_at_prefix_still_finds_manual_snapshot(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RV2-12: if Daniel edits x_handle to '@dannyscalant', the
+    duplicate-day guard must still match the bare-handle manual rows."""
+    db_conn.execute(
+        "UPDATE settings SET value_json = ? WHERE key = 'x_handle'",
+        ('"@dannyscalant"',),
+    )
+    db_conn.execute(
+        """
+        INSERT INTO account_snapshots
+          (snapshot_date, collected_at_utc, username, profile_url,
+           followers_count, following_count, post_count, listed_count,
+           baseline_followers, source, data_quality)
+        VALUES ('2026-05-22', datetime('now'), 'dannyscalant',
+                'https://x.com/dannyscalant', 64, 200, 1234, 1, 61,
+                'manual', 'manual')
+        """
+    )
+    monkeypatch.setattr(
+        x_client, "request",
+        lambda *a, **kw: pytest.fail("must not call X API when manual row exists"),
+    )
+    summary = collect_account_snapshot.run(db_conn, today_iso="2026-05-22")
+    assert summary["snapshot_inserted"] is False
+    assert summary["skipped_reason"] == "duplicate_day_manual_entry_present"
+
+
 def test_collect_account_snapshot_preserves_manual_entry_same_day(
     db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
