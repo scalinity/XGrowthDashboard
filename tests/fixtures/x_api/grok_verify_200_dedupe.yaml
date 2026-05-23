@@ -1,0 +1,24 @@
+# Phase 9 fixture cassette — duplicate verification. Same shape as
+# grok_verify_200.yaml but a separate cassette file so the dedupe
+# test can use it in sequence with another 200 cassette.
+interactions:
+  - request:
+      method: GET
+      uri: /2/tweets/
+    response:
+      status_code: 200
+      body:
+        data:
+          id: "9990001111"
+          text: "Dedupe target — first inserted via manual paste."
+          author_id: "777000112"
+          created_at: "2026-05-22T22:30:00Z"
+          public_metrics:
+            like_count: 11
+            reply_count: 2
+            retweet_count: 0
+            quote_count: 0
+            bookmark_count: 1
+            impression_count: 400
+      stderr: ""
+      exit_code: 0

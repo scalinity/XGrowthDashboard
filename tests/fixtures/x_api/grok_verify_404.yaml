@@ -1,0 +1,20 @@
+# Phase 9 fixture cassette — §29.2 verification 404. The X API
+# returned a "Not Found" envelope for the candidate's target_x_post_id;
+# the discovery sweep MUST reject the candidate and log
+# rejection_reason='verification_404' to grok_api_responses with NO
+# reply_targets insert.
+interactions:
+  - request:
+      method: GET
+      uri: /2/tweets/
+    response:
+      status_code: 404
+      body:
+        errors:
+          - status: 404
+            title: "Not Found Error"
+            detail: "Could not find tweet with id: [9999999999]."
+            type: "https://api.twitter.com/2/problems/resource-not-found"
+            value: "9999999999"
+      stderr: ""
+      exit_code: 0
