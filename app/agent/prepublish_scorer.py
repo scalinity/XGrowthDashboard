@@ -665,8 +665,17 @@ def score_screenshot_test(
         return None
 
     voice_snapshot = _render_voice_profile_snapshot(voice_profile)
-    prompt = prompt_template.replace("{draft}", draft_text).replace(
-        "{voice_profile}", voice_snapshot
+    # Phase 10 S1 — atomic single-pass substitution so a draft_text
+    # containing the literal "{voice_profile}" can't act as a
+    # delimiter and capture the voice snapshot into draft territory
+    # (and vice versa for voice_snapshot containing "{draft}"). re.sub
+    # with a lookup-table replacer evaluates each match exactly once
+    # against the ORIGINAL string, not the already-substituted output.
+    _substitutions = {"{draft}": draft_text, "{voice_profile}": voice_snapshot}
+    prompt = re.sub(
+        r"\{(draft|voice_profile)\}",
+        lambda m: _substitutions[m.group(0)],
+        prompt_template,
     )
 
     try:

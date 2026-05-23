@@ -192,6 +192,93 @@ def test_build_system_prompt_includes_prescriptive_layer(
 # ===========================================================================
 # 3. Screenshot test scorer — None/0..3 behavior + composite_label gating.
 # ===========================================================================
+def test_screenshot_prompt_substitution_atomic_single_pass(
+    monkeypatch,
+) -> None:
+    """S1 — a draft containing the literal "{voice_profile}" must NOT
+    cause the voice snapshot to be re-substituted into draft territory.
+    Pins that the substitution is single-pass against the original
+    template."""
+    monkeypatch.delenv("LINT_OFFLINE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-test-key")
+
+    captured: dict[str, str] = {}
+
+    class _FakeResp:
+        def __init__(self) -> None:
+            class _B:
+                type = "text"
+                text = '{"score": 2, "rationale": "fake"}'
+            self.content = [_B()]
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured["body"] = kwargs["messages"][0]["content"]
+            return _FakeResp()
+
+    class _FakeAnthropic:
+        def __init__(self, **kwargs) -> None:  # noqa: ARG002
+            self.messages = _FakeMessages()
+
+    import anthropic as _a
+    monkeypatch.setattr(_a, "Anthropic", _FakeAnthropic)
+
+    # Draft text contains the literal "{voice_profile}" delimiter — if
+    # substitution is chained .replace (the bug), this would leak the
+    # voice snapshot into the draft slot.
+    evil_draft = "Talking about {voice_profile} as a literal concept."
+    out = ps.score_screenshot_test(evil_draft, voice_profile=None)
+    assert out == 2  # parser succeeded → substitution wasn't garbled
+    body = captured.get("body", "")
+    # The literal "{voice_profile}" string in the draft should land
+    # inside the draft slot of the rendered prompt unchanged. If the
+    # bug were present, the post-replace prompt would have the voice
+    # snapshot ("(no active voice profile)" here) where the draft
+    # said "{voice_profile}".
+    assert "{voice_profile}" in body, (
+        "S1 regression: chained .replace ate the literal "
+        "'{voice_profile}' string from the draft."
+    )
+
+
+def test_reply_quality_prompt_substitution_atomic_single_pass(
+    monkeypatch,
+) -> None:
+    """S1 mirror for the lint prompt — target_post containing literal
+    "{reply}" must not capture reply text."""
+    monkeypatch.delenv("LINT_OFFLINE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-test-key")
+
+    captured: dict[str, str] = {}
+
+    class _FakeResp:
+        def __init__(self) -> None:
+            class _B:
+                type = "text"
+                text = "no, this is genuine and substantive"
+            self.content = [_B()]
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured["body"] = kwargs["messages"][0]["content"]
+            return _FakeResp()
+
+    class _FakeAnthropic:
+        def __init__(self, **kwargs) -> None:  # noqa: ARG002
+            self.messages = _FakeMessages()
+
+    import anthropic as _a
+    monkeypatch.setattr(_a, "Anthropic", _FakeAnthropic)
+
+    evil_target = "OP wrote: '{reply}' as a literal placeholder."
+    lint.reply_quality_lint("my actual reply", target_post_text=evil_target)
+    body = captured.get("body", "")
+    assert "{reply}" in body, (
+        "S1 regression: chained .replace ate the literal '{reply}' from "
+        "the target_post slot."
+    )
+
+
 def test_render_voice_profile_snapshot_wraps_payload_in_sentinel(
 ) -> None:
     """Phase 10 W9 — voice profile content must be wrapped in a

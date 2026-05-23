@@ -753,11 +753,20 @@ def reply_quality_lint(
         client = anthropic.Anthropic(api_key=api_key)
         prompt_template = load_reply_quality_lint_prompt()
         # Phase 10 / §28.18 — substitute the two delimiters. Using
-        # .replace (not .format) keeps the prompt's literal `{` / `}`
-        # characters in surrounding markdown unescaped. C1 fix.
-        prompt_body = prompt_template.replace(
-            "{target_post}", target_post_text or "(target post not provided)"
-        ).replace("{reply}", text)
+        # re.sub (single-pass) instead of chained .replace so a
+        # target_post containing the literal "{reply}" can't capture
+        # the reply text into target-post territory (S1 fix). Each
+        # match is resolved exactly once against the ORIGINAL template,
+        # not the already-substituted output.
+        _splices = {
+            "{target_post}": target_post_text or "(target post not provided)",
+            "{reply}": text,
+        }
+        prompt_body = re.sub(
+            r"\{(target_post|reply)\}",
+            lambda m: _splices[m.group(0)],
+            prompt_template,
+        )
         resp = client.messages.create(
             model=model,
             max_tokens=200,
