@@ -48,14 +48,17 @@ queue's manual-paste affordance.
 from __future__ import annotations
 
 import argparse
-import json
+import contextlib
+import errno
+import fcntl
 import logging
+import os
 import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -72,7 +75,10 @@ from app.agent.reply_targets import (  # noqa: E402
 from app.agent.timeparse import parse_x_api_datetime  # noqa: E402
 from app.db import DEFAULT_DB_PATH, connect  # noqa: E402
 
-_log = logging.getLogger(__name__)
+# P9R-45: rename to _LOG to match the project-wide convention used by
+# app/grok_client.py and app/x_client.py. The bare _log name diverged
+# from the rest of the codebase.
+_LOG = logging.getLogger(__name__)
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
 
@@ -84,6 +90,58 @@ _MAX_SWEEP_SECONDS: float = 240.0
 # Bounded ceiling on the in-job sleep when Grok rate-limits us. Same
 # rationale as ``app/x_client.py::_MAX_RATE_LIMIT_WAIT_SECONDS``.
 _MAX_RATE_LIMIT_WAIT_SECONDS: float = 90.0
+
+# P9R-59: filesystem lock to keep the launchd cron and the Streamlit
+# "Run sweep now" button from running the sweep concurrently. Two
+# parallel sweeps would double-spend tokens at xAI and could partially
+# collide on grok_api_responses + reply_targets writes. The unique
+# constraint on target_x_post_id keeps rows correct, but the rate-
+# limit budget at xAI is global to Daniel's account.
+_SWEEP_LOCK_PATH: Path = Path("data") / "grok_sweep.lock"
+
+
+class SweepAlreadyRunning(RuntimeError):
+    """Another sweep instance holds the filesystem lock — abort cleanly."""
+
+
+@contextlib.contextmanager
+def _sweep_lock(lock_path: Path = _SWEEP_LOCK_PATH) -> Iterator[None]:
+    """fcntl.flock(LOCK_EX | LOCK_NB) on ``lock_path``.
+
+    Raises ``SweepAlreadyRunning`` if another process holds the lock;
+    on Windows or any platform without fcntl, this is a no-op (the
+    project is macOS-only per CLAUDE.md, so we don't need a Windows
+    fallback today). The lock is released on context exit even if the
+    sweep raises.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fp = open(lock_path, "a+")  # noqa: SIM115 — manual close in finally
+    try:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                raise SweepAlreadyRunning(
+                    "Another grok_discovery_sweep is already running "
+                    f"(lock held on {lock_path}). Skipping this run."
+                ) from exc
+            raise
+        # Record PID + start time inside the lock file so an operator
+        # tail can see who holds it.
+        try:
+            fp.seek(0)
+            fp.truncate()
+            fp.write(f"pid={os.getpid()} started={time.time():.0f}\n")
+            fp.flush()
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fp.close()
 
 
 def _read_settings(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -270,7 +328,7 @@ def _insert_candidate(
         # insert's discovered_via stays in place (manual / agent_score /
         # next_rep_seed / v1.1_api_search / grok_semantic — whichever
         # got there first).
-        _log.debug(
+        _LOG.debug(
             "grok_discovery_sweep: dedupe drop x_post_id=%s (%s)",
             candidate.target_x_post_id, exc,
         )
@@ -288,6 +346,19 @@ def run(
     Returns a summary dict suitable for the ``scheduled_job`` audit
     row's ``details_json`` payload. The summary is also the return
     value of ``main()`` for CLI consumption.
+
+    P9R-57: the Streamlit "Run sweep now" button in
+    ``app/pages/7_Settings.py`` intentionally calls ``run(conn)``
+    with no overrides — the DB is the source of truth for
+    ``grok_query_list_json`` + ``grok_api_enabled``. Don't add a
+    settings-override kwarg pass-through from the UI without
+    discussing first; the UI surface is "save settings → click run"
+    and the run is meant to honor exactly what's in the DB.
+
+    ``settings_override`` is a test-only escape hatch so unit tests
+    don't have to write to the settings table. Production callers
+    (the launchd cron, the Streamlit button) pass None and let
+    ``_read_settings`` resolve from the DB.
     """
     started = time.perf_counter()
     summary: dict[str, Any] = {
@@ -339,7 +410,7 @@ def run(
         # reflects "we ran out of time" rather than reporting success.
         if (time.perf_counter() - started) > _MAX_SWEEP_SECONDS:
             deferred_queries = len(queries) - summary["queries_run"]
-            _log.warning(
+            _LOG.warning(
                 "grok_discovery_sweep: wall-clock budget exhausted after "
                 "%d queries; deferring %d to next sweep",
                 summary["queries_run"], deferred_queries,
@@ -373,7 +444,7 @@ def run(
                     f"next sweep will retry"
                 )
                 break
-            _log.warning(
+            _LOG.warning(
                 "grok_discovery_sweep rate-limited; sleeping %.0fs", wait
             )
             summary["rate_limit_pauses"] += 1
@@ -383,7 +454,7 @@ def run(
             continue
         except grok_client.GrokServerError as srv:
             summary["server_errors"] += 1
-            _log.warning(
+            _LOG.warning(
                 "grok_discovery_sweep: Grok server error for query=%r: %s",
                 query, srv,
             )
@@ -401,7 +472,7 @@ def run(
             summary["grok_client_errors"] = (
                 summary.get("grok_client_errors", 0) + 1
             )
-            _log.warning(
+            _LOG.warning(
                 "grok_discovery_sweep: Grok client error (status=%s) for "
                 "query=%r: %s",
                 getattr(exc, "status_code", None), query, exc,
@@ -421,7 +492,7 @@ def run(
             if (time.perf_counter() - started) > _MAX_SWEEP_SECONDS:
                 remaining = len(candidates) - candidate_idx
                 summary["candidates_dropped_wall_clock"] += remaining  # P9R-50
-                _log.warning(
+                _LOG.warning(
                     "grok_discovery_sweep: wall-clock budget exhausted "
                     "mid-query; dropping %d candidates for query=%r",
                     remaining, query[:80],
@@ -450,7 +521,7 @@ def run(
                         f"retry_after={wait}s exceeds in-job cap"
                     )
                     return _finalize_summary(summary, started)
-                _log.warning(
+                _LOG.warning(
                     "X API verify rate-limited; sleeping %.0fs", wait
                 )
                 summary["rate_limit_pauses"] += 1
@@ -459,8 +530,20 @@ def run(
             except x_client.XApiUnavailable as uv:
                 summary["error"] = f"X API unavailable during verify: {uv}"
                 return _finalize_summary(summary, started)
+            except x_client.XApiServerError as srv:
+                # P9R-27: dedicated branch for X API 5xx during verify.
+                # Pre-fix this collapsed into the generic XApiError catch
+                # with no counter and no targeted handling. Now: bump
+                # x_api_server_errors and continue (the candidate is
+                # dropped — re-discovered next sweep).
+                summary["x_api_server_errors"] += 1
+                _LOG.warning(
+                    "X API 5xx during verify for x_post_id=%s: %s",
+                    candidate.target_x_post_id, srv,
+                )
+                continue
             except x_client.XApiError as exc:
-                _log.warning(
+                _LOG.warning(
                     "X API verify error for x_post_id=%s: %s",
                     candidate.target_x_post_id, exc,
                 )
@@ -534,52 +617,35 @@ def _log_verification_rejection(
 ) -> None:
     """Write a ``grok_api_responses`` row marking the candidate as rejected.
 
-    P9R-42 (DRY): centralizes the §29.2 verification-rejection audit
-    insert. Picks the right ``rejection_reason`` based on status_code —
-    404 → 'verification_404', anything else → 'http_error_other'.
+    P9R-42 (DRY): delegates to ``grok_client._log_grok_response`` so the
+    audit-insert shape, broad-except handling, and JSONL sidecar
+    fallback live in exactly one place. Picks ``rejection_reason``
+    based on status_code — 404 → 'verification_404', anything else →
+    'http_error_other'.
 
-    P9R-37: ``duration_ms`` recorded as NULL (truer than hardcoded 0)
-    since the verification call's elapsed time isn't threaded through
-    to this logger today.
-
-    P9R-11: broaden the catch to ``sqlite3.DatabaseError`` so an
-    IntegrityError on a future CHECK refactor doesn't escape and break
-    the upstream call. Same pattern as ``grok_client._log_grok_response``.
+    P9R-37: ``duration_ms=0`` (the helper requires int). The
+    verification call's actual elapsed time isn't threaded through to
+    this logger today; the column is dropped from the Settings panel's
+    failures-table display, so the 0 isn't user-visible.
     """
     rejection_reason = (
         "verification_404" if status_code == 404 else "http_error_other"
     )
-    try:
-        conn.execute(
-            """
-            INSERT INTO grok_api_responses
-              (query, request_payload_json, response_status_code,
-               response_body_json, rate_snapshot_json,
-               rejection_reason, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"§29.2 verification: x_post_id={candidate.target_x_post_id}",
-                json.dumps(
-                    {
-                        "phase": "verification",
-                        "target_x_post_id": candidate.target_x_post_id,
-                        "target_post_url": candidate.target_post_url,
-                        "target_author_handle": candidate.target_author_handle,
-                    }
-                ),
-                status_code,
-                json.dumps({"error": error or "verification failed"}),
-                None,
-                rejection_reason,
-                None,  # P9R-37: NULL duration_ms instead of 0.
-            ),
-        )
-    except sqlite3.DatabaseError as exc:
-        _log.warning(
-            "grok_api_responses verification-rejection insert failed "
-            "(suppressed): %s", exc,
-        )
+    grok_client._log_grok_response(
+        conn,
+        query=f"§29.2 verification: x_post_id={candidate.target_x_post_id}",
+        request_payload={
+            "phase": "verification",
+            "target_x_post_id": candidate.target_x_post_id,
+            "target_post_url": candidate.target_post_url,
+            "target_author_handle": candidate.target_author_handle,
+        },
+        response_status_code=status_code,
+        response_body={"error": error or "verification failed"},
+        rate_snapshot=None,
+        rejection_reason=rejection_reason,
+        duration_ms=0,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -613,12 +679,28 @@ def main(argv: list[str] | None = None) -> int:
     }
     unhandled_exc: BaseException | None = None
     try:
-        summary = run(conn, max_results_per_query=args.max_results)
+        # P9R-59: filesystem advisory lock so two concurrent sweeps
+        # (e.g. launchd cadence overlapping with "Run sweep now")
+        # can't double-spend at xAI. A second sweep attempting to
+        # enter the lock raises SweepAlreadyRunning and writes a
+        # short audit row instead.
+        try:
+            with _sweep_lock():
+                summary = run(conn, max_results_per_query=args.max_results)
+        except SweepAlreadyRunning as locked:
+            summary = {
+                "queries_run": 0,
+                "candidates_discovered": 0,
+                "error": str(locked),
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                "concurrent_skip": True,
+            }
+            _LOG.info("grok_discovery_sweep: %s", locked)
     except BaseException as exc:  # noqa: BLE001 — catch-all for audit safety
         unhandled_exc = exc
         summary["error"] = f"unhandled exception in run(): {exc!r}"[:500]
         summary["elapsed_seconds"] = round(time.perf_counter() - started, 3)
-        _log.exception("grok_discovery_sweep: unhandled exception in run()")
+        _LOG.exception("grok_discovery_sweep: unhandled exception in run()")
     finally:
         try:
             success = summary.get("error") is None
@@ -632,11 +714,11 @@ def main(argv: list[str] | None = None) -> int:
                 success=success,
                 error_message=summary.get("error"),
             )
-            _log.info("grok_discovery_sweep summary: %s", summary)
+            _LOG.info("grok_discovery_sweep summary: %s", summary)
         except Exception:  # noqa: BLE001 — audit-write best-effort
-            _log.exception("grok_discovery_sweep: failed to write audit row")
+            _LOG.exception("grok_discovery_sweep: failed to write audit row")
         elapsed = round(time.perf_counter() - started, 3)
-        _log.info("grok_discovery_sweep completed in %ss", elapsed)
+        _LOG.info("grok_discovery_sweep completed in %ss", elapsed)
         conn.close()
     if unhandled_exc is not None:
         raise unhandled_exc
