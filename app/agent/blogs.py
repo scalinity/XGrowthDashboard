@@ -118,7 +118,14 @@ VALID_STATUSES: frozenset[str] = frozenset(
 )
 
 VALID_AGENT_ACTIONS: frozenset[str] = frozenset(
-    {"outline", "draft", "edit_suggestion_applied", "seo_metadata"}
+    {
+        "outline", "draft", "edit_suggestion_applied", "seo_metadata",
+        # P6R-17: distinguish the seed outline produced by X→blog
+        # repurposing from the standalone outline_blog tool — both
+        # write a version row with agent_action, but the provenance
+        # differs and analytics needs to disambiguate.
+        "x_to_blog_idea_outline",
+    }
 )
 
 # (from_status, to_status) — every transition the state machine permits.

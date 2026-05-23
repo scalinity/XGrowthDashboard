@@ -668,12 +668,15 @@ def repurpose_x_to_blog_idea(
     )
     # Seed the outline via save_blog (its own transaction — runs the
     # demote/append/promote dance + version row).
+    # P6R-17: agent_action='x_to_blog_idea_outline' (not 'outline') so
+    # analytics can disambiguate "seed outline from X post repurposing"
+    # from "outline produced by standalone outline_blog tool".
     _blogs.save_blog(
         conn,
         blog.id,
         outline_markdown=outline_markdown,
         created_by="agent",
-        agent_action="outline",
+        agent_action="x_to_blog_idea_outline",
         confidence_label_at_version=confidence,
     )
 

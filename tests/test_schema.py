@@ -78,6 +78,7 @@ EXPECTED_MIGRATION_FILES: tuple[str, ...] = (
     "014_velocity_view_expose_noise_floor.sql",
     "015_growth_layer_qol.sql",
     "016_blogs.sql",
+    "017_blog_agent_action_x_to_blog.sql",
 )
 
 
@@ -1196,6 +1197,30 @@ def test_phase6_audit_logs_migration_row_present(db_conn: sqlite3.Connection) ->
     ).fetchone()
     assert row is not None
     assert row["success"] == 1
+
+
+def test_phase6_blog_versions_x_to_blog_idea_outline_action_admitted(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """P6R-17: migration 017 extends the agent_action CHECK to admit
+    'x_to_blog_idea_outline' so the X→blog seed-outline path is
+    distinguishable from the standalone outline_blog tool."""
+    blog_id = db_conn.execute(
+        "INSERT INTO blogs (slug, title) VALUES ('xtb', 't') RETURNING id"
+    ).fetchone()[0]
+    db_conn.execute(
+        """
+        INSERT INTO blog_versions
+          (blog_id, version_number, body_text_hash, title_at_version,
+           status_at_version, created_by, agent_action)
+        VALUES (?, 1, 'h', 't', 'idea', 'agent', 'x_to_blog_idea_outline')
+        """,
+        (blog_id,),
+    )
+    row = db_conn.execute(
+        "SELECT agent_action FROM blog_versions WHERE blog_id = ?", (blog_id,)
+    ).fetchone()
+    assert row["agent_action"] == "x_to_blog_idea_outline"
 
 
 def test_phase6_v_blog_pipeline_basic_rollup(db_conn: sqlite3.Connection) -> None:
