@@ -100,3 +100,28 @@ def test_list_conversations(client: TestClient) -> None:
     convos = client.get("/agent/conversations", headers=AUTH).json()["conversations"]
     titles = {c.get("title") for c in convos}
     assert {"one", "two"} <= titles
+
+
+def test_stream_endpoint_requires_token(client: TestClient) -> None:
+    assert (
+        client.post("/agent/conversations/1/stream", json={"text": "hi"}).status_code
+        == 401
+    )
+
+
+def test_stream_message_emits_sse_events(client: TestClient) -> None:
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "what's next?"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    text = resp.text
+    assert "event: start" in text
+    assert "event: assistant" in text
+    assert "stub assistant reply" in text
+    assert "event: done" in text

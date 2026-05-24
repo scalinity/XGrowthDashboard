@@ -12,16 +12,22 @@ HTTP shape only; all reads/writes delegate to existing backend code.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable, Iterator
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent import _internal_tools, confirmation, invariants
 from app.agent.client import AgentClient, start_conversation
 from app.db import DEFAULT_DB_PATH, apply_migrations, connect
+from app.forms import FormError, get_setting, set_setting
+from app.forms.correction import submit_correction
+from app.forms.post_log import submit_post
+from app.forms.snapshot import submit_snapshot
 from app.service.security import BearerTokenAuth
 
 ConnFactory = Callable[[], sqlite3.Connection]
@@ -51,6 +57,25 @@ class PublishBody(BaseModel):
     text: str
     confirm: str
     message_id: int | None = None
+
+
+class SettingValue(BaseModel):
+    """PUT /settings/{key} request body. ``value`` is any JSON-serializable value."""
+
+    value: Any
+
+
+def _form_error(exc: FormError) -> HTTPException:
+    """Map a forms-layer FormError to a 400 with structured field errors."""
+    return HTTPException(
+        status_code=400,
+        detail={"message": str(exc), "field_errors": exc.field_errors},
+    )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """Format one Server-Sent Event frame (text/event-stream)."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 def _default_conn_factory() -> sqlite3.Connection:
@@ -122,6 +147,69 @@ def create_app(
             "account_last_7": [dict(r) for r in account_last_7],
         }
 
+    @app.get("/views/next-rep", dependencies=[Depends(auth)])
+    def view_next_rep(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.2 Next Rep — lane performance with graduated confidence labels."""
+        rows = conn.execute("SELECT * FROM v_lane_performance").fetchall()
+        return {"slice": "next_rep", "lane_performance": [dict(r) for r in rows]}
+
+    @app.get("/views/validation", dependencies=[Depends(auth)])
+    def view_validation(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.5 Funnel — last-7 validation funnel (Stir conversion events)."""
+        rows = conn.execute(
+            "SELECT * FROM v_funnel_daily ORDER BY event_date DESC LIMIT 7"
+        ).fetchall()
+        return {"slice": "validation_status", "funnel_last_7": [dict(r) for r in rows]}
+
+    # ----- Manual entry write endpoints (§15) -----
+    # Wrap the pure forms submit functions. Validation + FormError semantics
+    # are unchanged; a FormError becomes a 400 with per-field detail.
+
+    @app.post("/forms/snapshot", dependencies=[Depends(auth)])
+    def post_snapshot(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            snapshot_id = submit_snapshot(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"snapshot_id": snapshot_id}
+
+    @app.post("/forms/post", dependencies=[Depends(auth)])
+    def post_log(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            post_id = submit_post(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"post_id": post_id}
+
+    @app.post("/forms/correction", dependencies=[Depends(auth)])
+    def post_correction(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            correction_id = submit_correction(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"correction_id": correction_id}
+
+    # ----- Settings read/update (§14.7) -----
+
+    @app.get("/settings", dependencies=[Depends(auth)])
+    def read_settings(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        rows = conn.execute("SELECT key FROM settings ORDER BY key").fetchall()
+        return {"settings": {r["key"]: get_setting(conn, r["key"]) for r in rows}}
+
+    @app.put("/settings/{key}", dependencies=[Depends(auth)])
+    def update_setting(
+        key: str, body: SettingValue, conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        # set_setting handles the JSON encode + §28.30 audit-log write-through.
+        set_setting(conn, key, body.value)
+        return {"ok": True, "key": key, "value": body.value}
+
     # ----- Agent session endpoints (§14.8, §28) -----
     # Wrap the existing AgentClient.send_message_sync. The §28.10 publish
     # tools remain unreachable from here (they are not in AGENT_TOOLS; the
@@ -191,6 +279,56 @@ def create_app(
             "model": turn.model,
             "error": turn.error,
         }
+
+    @app.post(
+        "/agent/conversations/{conversation_id}/stream",
+        dependencies=[Depends(auth)],
+    )
+    def stream_message(
+        conversation_id: int, body: SendMessageBody
+    ) -> StreamingResponse:
+        """SSE surface for the Agent Chat view (§14.8, §31.3).
+
+        Emits lifecycle events: ``start`` → ``assistant`` (full text) → one
+        ``tool_call`` per dispatched tool → ``done`` (token/cost totals), or
+        ``error``. The agent client is synchronous today (client.py S11), so
+        this frames the completed turn rather than incremental tokens; true
+        token-by-token streaming is a follow-up that swaps _call_model for the
+        Anthropic streaming API. The frontend consumes the same event shape
+        either way.
+
+        Opens its own connection inside the generator (not via the request
+        dependency) so the connection outlives the handler return for the
+        duration of the stream.
+        """
+        client = agent_factory()
+
+        def event_gen() -> Iterator[str]:
+            conn = factory()
+            try:
+                yield _sse("start", {"conversation_id": conversation_id})
+                turn = client.send_message_sync(
+                    conn, conversation_id=conversation_id, user_text=body.text
+                )
+                if turn.error:
+                    yield _sse("error", {"error": turn.error})
+                else:
+                    yield _sse("assistant", {"text": turn.assistant_text})
+                    for tc in turn.tool_calls:
+                        yield _sse("tool_call", tc)
+                yield _sse(
+                    "done",
+                    {
+                        "input_tokens": turn.input_tokens,
+                        "output_tokens": turn.output_tokens,
+                        "cost_usd": turn.cost_usd,
+                        "error": turn.error,
+                    },
+                )
+            finally:
+                conn.close()
+
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
 
     # ----- Publish endpoint (§28.10) — server-side click-handler replication -----
     # This is the FastAPI equivalent of the §14.8 Streamlit click-handler. It is
