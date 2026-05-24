@@ -16,8 +16,6 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-import streamlit as st
-
 from app.forms import FormError
 
 CORRECTABLE_FIELDS: tuple[str, ...] = (
@@ -103,6 +101,8 @@ def list_snapshot_options(conn: sqlite3.Connection, limit: int = 50) -> list[sql
 
 def render(conn: sqlite3.Connection, *, key_prefix: str = "correction") -> None:
     """Streamlit fragment: snapshot correction form."""
+    import streamlit as st  # lazy — keeps the FastAPI sidecar graph streamlit-free (§31.6)
+
     st.subheader("Correct a snapshot field")
     st.caption(
         "Corrections never overwrite the original snapshot (§13 hard rule 2). "

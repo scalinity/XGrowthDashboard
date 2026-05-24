@@ -2,3 +2,6 @@
 # will have compiled files and executables
 /target/
 /gen/schemas
+
+# Frozen Python sidecar binary (built by scripts/build_sidecar.sh, ~29MB).
+/bin/

@@ -24,8 +24,6 @@ from datetime import date as _date_t
 from datetime import datetime
 from typing import Any
 
-import streamlit as st
-
 from app.forms import FormError, now_utc_iso
 
 POST_TYPES_UI: tuple[str, ...] = ("post", "reply", "quote")
@@ -233,6 +231,8 @@ def add_post_id(
 
 def render(conn: sqlite3.Connection, *, key_prefix: str = "post_log") -> None:
     """Streamlit fragment: post/reply logging."""
+    import streamlit as st  # lazy — keeps the FastAPI sidecar graph streamlit-free (§31.6)
+
     st.subheader("Log a post / reply / quote")
     st.caption(
         "Spec §15.2 — manual entries are first-class. Sets `posted_via='manual'`. "

@@ -39,6 +39,12 @@ __pycache__/
 .playwright-mcp/
 phase*.png
 
+# Native desktop (Phase 11) build artifacts. The frozen sidecar binary lives
+# under desktop/src-tauri/bin/ (gitignored there); this covers the PyInstaller
+# work dir and the Tauri release bundle output.
+build/
+desktop/src-tauri/bin/
+
 # OS
 .DS_Store
 Thumbs.db

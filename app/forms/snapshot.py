@@ -23,8 +23,6 @@ import sqlite3
 from datetime import date as _date_t
 from typing import Any
 
-import streamlit as st
-
 from app.forms import FormError, get_setting, now_utc_iso
 
 
@@ -157,6 +155,8 @@ def _defaults_from_settings(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def render(conn: sqlite3.Connection, *, key_prefix: str = "snapshot") -> None:
     """Streamlit fragment: pinned snapshot form."""
+    import streamlit as st  # lazy — keeps the FastAPI sidecar graph streamlit-free (§31.6)
+
     defaults = _defaults_from_settings(conn)
 
     st.subheader("Pinned daily snapshot")

@@ -19,14 +19,28 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 APP_NAME = "XGrowthDashboard"
 DB_FILENAME = "dashboard.db"
 
-# app/paths.py → app/ → repo root.
-PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
-LEGACY_DATA_DIR: Path = PROJECT_ROOT / "data"
+# Whether we're running inside a PyInstaller-frozen sidecar (§31.6).
+_FROZEN: bool = bool(getattr(sys, "frozen", False))
+_MEIPASS: str | None = getattr(sys, "_MEIPASS", None)
+
+# Source/repo root in dev (app/paths.py → app/ → repo root). When frozen this
+# points inside the unpacked bundle — used only for the dev legacy-data fallback.
+_SOURCE_ROOT: Path = Path(__file__).resolve().parent.parent
+
+# RESOURCE_ROOT — where READ-ONLY bundled resources (migrations/, config/,
+# spec.md) live: the PyInstaller unpack dir when frozen, else the repo root.
+# Exported as PROJECT_ROOT for backward compatibility: every `PROJECT_ROOT /
+# "config" / ...` and `MIGRATIONS_DIR` consumer resolves to the bundle for free.
+RESOURCE_ROOT: Path = Path(_MEIPASS) if _MEIPASS else _SOURCE_ROOT
+PROJECT_ROOT: Path = RESOURCE_ROOT
+
+LEGACY_DATA_DIR: Path = _SOURCE_ROOT / "data"
 
 
 def application_support_dir() -> Path:
@@ -46,6 +60,10 @@ def resolve_data_dir() -> Path:
         return env
     app_support = application_support_dir()
     if (app_support / DB_FILENAME).exists():
+        return app_support
+    # A frozen .app has no repo-relative ./data to fall back to — Application
+    # Support is its home (a fresh DB is created there on first connect).
+    if _FROZEN:
         return app_support
     return LEGACY_DATA_DIR
 

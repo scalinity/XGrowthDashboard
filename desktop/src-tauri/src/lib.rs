@@ -60,11 +60,13 @@ fn build_sidecar_command(app: &tauri::App) -> Command {
     } else {
         // Release: the PyInstaller-frozen binary shipped in Contents/Resources
         // (Phase 11.12). Fall back to a bare name on PATH if not yet bundled.
+        // Bundled at Resources/bin/xgrowth-sidecar (see tauri.conf.json
+        // bundle.resources). Fall back to a bare name on PATH if absent.
         let resource = app
             .path()
             .resource_dir()
             .ok()
-            .map(|d| d.join(SIDECAR_BIN));
+            .map(|d| d.join("bin").join(SIDECAR_BIN));
         match resource {
             Some(path) if path.exists() => Command::new(path),
             _ => Command::new(SIDECAR_BIN),
