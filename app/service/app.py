@@ -16,10 +16,10 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
-from app.agent import invariants
+from app.agent import _internal_tools, confirmation, invariants
 from app.agent.client import AgentClient, start_conversation
 from app.db import DEFAULT_DB_PATH, apply_migrations, connect
 from app.service.security import BearerTokenAuth
@@ -42,6 +42,15 @@ class SendMessageBody(BaseModel):
     """POST /agent/conversations/{id}/messages request body."""
 
     text: str
+
+
+class PublishBody(BaseModel):
+    """POST /publish request body (§28.10). ``confirm`` must equal 'confirm'."""
+
+    post_id: int
+    text: str
+    confirm: str
+    message_id: int | None = None
 
 
 def _default_conn_factory() -> sqlite3.Connection:
@@ -181,6 +190,56 @@ def create_app(
             "cost_usd": turn.cost_usd,
             "model": turn.model,
             "error": turn.error,
+        }
+
+    # ----- Publish endpoint (§28.10) — server-side click-handler replication -----
+    # This is the FastAPI equivalent of the §14.8 Streamlit click-handler. It is
+    # the ONLY legitimate external caller of the internal publish tools (the
+    # agent can never reach them — they are absent from AGENT_TOOLS and the boot
+    # invariants prove it). The raw confirmation token is minted and consumed
+    # ENTIRELY within this process and is NEVER returned to the frontend; the
+    # frontend only sends the typed-'confirm' phrase + the (possibly edited) text.
+    # The six-check chain + atomic transaction live unchanged in publish.py.
+
+    @app.post("/publish", dependencies=[Depends(auth)])
+    def publish(
+        body: PublishBody, conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        if body.confirm.strip().lower() != "confirm":
+            raise HTTPException(
+                status_code=400, detail="must type 'confirm' to publish"
+            )
+        char_count = len(body.text)
+        if not 0 < char_count <= 280:
+            raise HTTPException(
+                status_code=400,
+                detail=f"text must be 1..280 chars (got {char_count})",
+            )
+        # Same sequence as the Streamlit modal's confirm handler: write the
+        # (possibly edited) text, invalidate stale tokens, mint a fresh
+        # single-use token, publish atomically, drop the raw token.
+        confirmation.update_post_text_for_publish(
+            conn, post_id=body.post_id, new_text=body.text, message_id=body.message_id
+        )
+        confirmation.invalidate_unconsumed_tokens_for_post(conn, post_id=body.post_id)
+        minted = confirmation.mint_confirmation_token(
+            conn, post_id=body.post_id, draft_text=body.text
+        )
+        result = _internal_tools.publish_post_to_x(
+            conn,
+            post_id=body.post_id,
+            confirmation_token=minted.raw_token,
+            message_id=body.message_id,
+        )
+        del minted  # the raw token is gone from this frame.
+        return {
+            "success": result.success,
+            "post_id": result.post_id,
+            "method": result.method,
+            "intent_url": result.intent_url,
+            "x_post_id": result.x_post_id,
+            "error": result.error,
+            "error_kind": result.error_kind,
         }
 
     return app
