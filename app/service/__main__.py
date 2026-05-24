@@ -17,11 +17,14 @@ The shell reads those two lines, then talks to the service with
 
 from __future__ import annotations
 
+import os
 import socket
 import sys
 
 import uvicorn
 
+from app.paths import migrate_legacy_db_if_needed
+from app.secret_store import resolve_anthropic_api_key
 from app.service.app import create_app
 from app.service.security import generate_launch_token
 
@@ -38,6 +41,23 @@ def _pick_free_loopback_port() -> int:
 
 
 def main() -> int:
+    # Load a repo .env if present (dev), then resolve the Anthropic key from
+    # env → Keychain and export it so AgentClient picks it up unchanged (§31.5).
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:  # python-dotenv always present, but never hard-fail boot
+        pass
+    api_key = resolve_anthropic_api_key()
+    if api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+
+    # Migrate the legacy ./data DB into Application Support on first launch
+    # (copy, not move — §31.5). Done before serving so the default conn
+    # factory resolves to the migrated path.
+    migrate_legacy_db_if_needed()
+
     token = generate_launch_token()
     port = _pick_free_loopback_port()
 

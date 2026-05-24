@@ -15,6 +15,7 @@ dependencies = [
     "cursor-sdk>=0.1.5",
     "fastapi>=0.136.3",
     "uvicorn>=0.47.0",
+    "keyring>=25.7.0",
 ]
 
 [dependency-groups]

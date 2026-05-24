@@ -20,8 +20,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH: Path = PROJECT_ROOT / "data" / "dashboard.db"
+from app.paths import PROJECT_ROOT, resolve_db_path
+
+# DEFAULT_DB_PATH resolves per §31.5: XGROWTH_DATA_DIR env → Application Support
+# (once the native app has migrated) → legacy <repo>/data. Computed once at
+# import; tests and CLIs pass explicit paths so they are unaffected, and a
+# standalone `streamlit run` with no env/App-Support DB still gets ./data.
+DEFAULT_DB_PATH: Path = resolve_db_path()
 MIGRATIONS_DIR: Path = PROJECT_ROOT / "migrations"
 
 

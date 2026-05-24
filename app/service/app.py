@@ -23,11 +23,12 @@ from pydantic import BaseModel
 
 from app.agent import _internal_tools, confirmation, invariants
 from app.agent.client import AgentClient, start_conversation
-from app.db import DEFAULT_DB_PATH, apply_migrations, connect
+from app.db import apply_migrations, connect
 from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
 from app.forms.post_log import submit_post
 from app.forms.snapshot import submit_snapshot
+from app.paths import resolve_db_path
 from app.service.security import BearerTokenAuth
 
 ConnFactory = Callable[[], sqlite3.Connection]
@@ -79,8 +80,13 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 def _default_conn_factory() -> sqlite3.Connection:
-    """Open the real DB and ensure migrations are applied (sidecar default)."""
-    conn = connect(DEFAULT_DB_PATH)
+    """Open the resolved DB (§31.5) and ensure migrations are applied.
+
+    Resolves the path fresh on each call so a runtime migration to Application
+    Support (performed by the sidecar before it serves) is picked up — the
+    import-time ``DEFAULT_DB_PATH`` constant would be stale across that move.
+    """
+    conn = connect(resolve_db_path())
     apply_migrations(conn)
     return conn
 
