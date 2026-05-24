@@ -25,11 +25,15 @@ class BearerTokenAuth:
     """
 
     def __init__(self, token: str) -> None:
-        self._expected = f"Bearer {token}"
+        # Compare on UTF-8 bytes: secrets.compare_digest raises TypeError on
+        # non-ASCII *str* input, which would surface as a 500 rather than a
+        # clean 401 for a malformed Authorization header. str.encode never
+        # raises, and compare_digest on bytes is constant-time for any input.
+        self._expected = f"Bearer {token}".encode()
 
     def __call__(self, authorization: str | None = Header(default=None)) -> None:
         if authorization is None or not secrets.compare_digest(
-            authorization, self._expected
+            authorization.encode("utf-8"), self._expected
         ):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

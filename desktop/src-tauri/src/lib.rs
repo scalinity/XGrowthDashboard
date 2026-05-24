@@ -94,20 +94,24 @@ fn spawn_sidecar(app: &tauri::App) {
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
-            if let Some(rest) = line.strip_prefix(PORT_PREFIX) {
-                if let Ok(port) = rest.trim().parse::<u16>() {
-                    let state = handle.state::<SidecarState>();
-                    let mut info = state.info.lock().unwrap();
-                    info.port = Some(port);
-                    finalize(&handle, &mut info);
+            let ready_payload: Option<SidecarInfo> = if let Some(rest) =
+                line.strip_prefix(PORT_PREFIX)
+            {
+                match rest.trim().parse::<u16>() {
+                    Ok(port) => update_field(&handle, |info| info.port = Some(port)),
+                    Err(_) => None,
                 }
             } else if let Some(rest) = line.strip_prefix(TOKEN_PREFIX) {
-                let state = handle.state::<SidecarState>();
-                let mut info = state.info.lock().unwrap();
-                info.token = Some(rest.trim().to_string());
-                finalize(&handle, &mut info);
+                let token = rest.trim().to_string();
+                update_field(&handle, |info| info.token = Some(token))
             } else {
                 log::info!("[sidecar] {line}");
+                None
+            };
+            // Emit OUTSIDE the state lock (update_field released it).
+            if let Some(payload) = ready_payload {
+                log::info!("sidecar ready on 127.0.0.1:{:?}", payload.port);
+                let _ = handle.emit("sidecar://ready", payload);
             }
         }
         log::warn!("sidecar stdout closed");
@@ -120,13 +124,22 @@ fn spawn_sidecar(app: &tauri::App) {
         .replace(child);
 }
 
-/// When both port + token are known, mark ready once and notify the frontend.
-fn finalize(handle: &tauri::AppHandle, info: &mut SidecarInfo) {
+/// Apply a mutation to the shared SidecarInfo under the lock, and — if this
+/// transition makes it newly ready (port + token both known) — return a clone
+/// to emit. The lock is released before this returns, so the caller emits
+/// without holding it.
+fn update_field<F: FnOnce(&mut SidecarInfo)>(
+    handle: &tauri::AppHandle,
+    mutate: F,
+) -> Option<SidecarInfo> {
+    let state = handle.state::<SidecarState>();
+    let mut info = state.info.lock().unwrap();
+    mutate(&mut info);
     if !info.ready && info.port.is_some() && info.token.is_some() {
         info.ready = true;
-        let _ = handle.emit("sidecar://ready", info.clone());
-        log::info!("sidecar ready on 127.0.0.1:{:?}", info.port);
+        return Some(info.clone());
     }
+    None
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -88,3 +88,17 @@ def test_bearer_auth_constant_time_compare_rejects_wrong() -> None:
         auth(authorization=None)
     # Correct token passes (returns None).
     assert auth(authorization="Bearer secret") is None
+
+
+def test_bearer_auth_non_ascii_header_raises_401_not_typeerror() -> None:
+    # RV11-1: Starlette decodes header bytes as latin-1, so a malformed
+    # Authorization header can reach the dependency as a non-ASCII str. The
+    # old secrets.compare_digest(str, str) raised TypeError (→ 500); the fix
+    # compares on UTF-8 bytes and must cleanly raise HTTPException (401).
+    # (httpx's TestClient can't transmit non-ASCII header values, so this is
+    # exercised at the dependency level — the actual fixed code path.)
+    import fastapi
+
+    auth = BearerTokenAuth("secret")
+    with pytest.raises(fastapi.HTTPException):
+        auth(authorization="Bearer café")
