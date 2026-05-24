@@ -1,0 +1,210 @@
+/*
+ * Global stylesheet — ported 1:1 from app/components/theme.py _CSS_TEMPLATE
+ * (spec §31.4). Replaces the per-page apply_theme() call: applied once at the
+ * app root. Dark-only (§14.7). All values mirror PALETTE in tokens.ts.
+ */
+
+:root {
+  /* Surfaces */
+  --ink: #0e1116;
+  --surface: #161a20;
+  --surface-raised: #1c2128;
+  --hairline: #2a2f37;
+  /* Type */
+  --bone: #e6e1d8;
+  --bone-dim: #a8a39a;
+  --bone-faint: #6c6960;
+  /* Accents */
+  --phosphor: #5fb3a1;
+  --phosphor-dim: #3d7a6c;
+  --warn-amber: #c98b16;
+  /* Confidence tiers */
+  --conf-insufficient-bg: #2a2f37;
+  --conf-insufficient-fg: #a8a39a;
+  --conf-directional-bg: #c98b16;
+  --conf-directional-fg: #0e1116;
+  --conf-tentative-bg: #3a73e0;
+  --conf-tentative-fg: #ffffff;
+  --conf-confident-bg: #2da564;
+  --conf-confident-fg: #0e1116;
+  /* Fonts */
+  --font-display: "Fraunces Variable", "Fraunces", "IBM Plex Serif", Georgia, serif;
+  --font-body: "IBM Plex Sans", -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  font-family: var(--font-body);
+  color: var(--bone);
+  background-color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Page titles + section headings — Fraunces display serif. */
+h1 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 144, "SOFT" 50;
+  font-size: 2.6rem;
+  letter-spacing: -0.015em;
+  color: var(--bone);
+  margin: 0 0 0.25em;
+  line-height: 1.05;
+}
+h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 72, "SOFT" 30;
+  font-size: 1.6rem;
+  letter-spacing: -0.01em;
+  color: var(--bone);
+  margin: 0 0 0.6em;
+}
+h3 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--bone);
+}
+
+/* Every number renders in JetBrains Mono so columns align like a lab readout. */
+.numeric {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--bone);
+}
+
+/* Honest-disclaimer texture: small, dim, neutral. */
+.dim {
+  color: var(--bone-dim);
+}
+.faint {
+  color: var(--bone-faint);
+}
+
+.hairline {
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  margin: 1.5rem 0;
+}
+
+.callout {
+  background-color: var(--surface);
+  border-left: 2px solid var(--phosphor);
+  padding: 0.9rem 1.1rem;
+  margin: 0.8rem 0;
+  font-family: var(--font-body);
+}
+.callout em {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  color: var(--bone-dim);
+}
+
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bone-faint);
+}
+
+/* Buttons — flat, mono labels, phosphor accent. */
+button {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--hairline);
+  color: var(--bone);
+  border-radius: 2px;
+  padding: 0.45rem 1.1rem;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+button:hover {
+  border-color: var(--phosphor);
+  color: var(--phosphor);
+}
+button.primary {
+  background-color: var(--phosphor-dim);
+  border-color: var(--phosphor);
+  color: var(--bone);
+}
+button.primary:hover {
+  background-color: var(--phosphor);
+  color: var(--ink);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Inputs. */
+input,
+textarea,
+select {
+  background-color: var(--surface);
+  color: var(--bone);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  font-family: var(--font-body);
+  padding: 0.4rem 0.6rem;
+}
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--phosphor);
+}
+
+/* Tabs — lab-notebook flavor. */
+.tab-list {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.tab {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: var(--bone-dim);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.8rem;
+}
+.tab[aria-selected="true"] {
+  color: var(--bone);
+  border-bottom: 2px solid var(--phosphor);
+}
+
+/* Tables — quiet, readable. */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+table td,
+table th {
+  border-bottom: 1px solid var(--hairline);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+table th {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bone-faint);
+  font-weight: 500;
+}
