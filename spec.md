@@ -16,6 +16,8 @@ A local-first "weight-loss dashboard for X growth" that helps Daniel track daily
 > **Scope expansion (2026-05-22) — long-form blogs as a Phase 6 first-class surface.** After Phases 5.8 through 5.11 closed the consolidation gap with Daniel's prior creator tool (CreatorOS), one capability remained out of XGrowth: long-form blog authoring. Phase 6 (§28.31 through §28.34, full checklist in §25 Phase 6) adds blogs as a first-class production surface — `blogs` / `blog_versions` / `blog_exports` / `blog_to_post_links` tables, two new views (§14.14 Blogs index, §14.15 Blog Editor), agent tools for blog ideation / outlining / drafting / editing, exports (Markdown / HTML / JSON / MDX), and bidirectional repurposing (X thread ↔ blog, with deterministic plagiarism floor). **The single-user local-tool scope clarification in §7.1 is unchanged** — blogs are produced locally, exported to disk, published externally on Daniel's blog platform (not by this app). This is NOT a scope expansion toward multi-user / cloud / packaging; it is a *content-production-surface* expansion within the same single-user-local thesis. **Project name consideration deferred to Daniel.** "X Growth Dashboard" remains accurate as the name describes the primary distribution thesis; blogs serve that thesis via repurposing. A rename to e.g. "Distribution Dashboard" or "Personal Distribution OS" is a one-line spec edit Daniel can make at his discretion; the implementation does not depend on it. See §30 items 93–97 for the full delta.
 >
 > **API + Grok consolidation (2026-05-22, same day) — V1.1 reads, V1.2 writes, and V1.2 Grok all promoted to comprehensive v1 scope as Phases 7, 8, and 9.** After Phase 6 (blogs) shipped, three deferred capabilities still sat on the V1.x side of the §29.1 / §28.10 / §10 boundaries: X API read integration (`reply_target_snapshots`, metrics-refresh jobs, velocity + timing scoring, thread-classifier lint), X API write integration (the §28.10 publish-flow contract executes against the real X API instead of the manual-clipboard-only branch), and Grok firehose discovery (`reply_targets.discovered_via='grok_semantic'`). Per the comprehensive-default rule these are now in v1: **Phase 7 (X API reads, migration 018)**, **Phase 8 (X API writes, migration 019)**, **Phase 9 (Grok integration, migration 020)**. Grok defaults to ENABLED (`grok_api_enabled = TRUE`); X API writes default to ENABLED (`publish_via_api_enabled = TRUE`); `data_collection_mode` flips default to `'api'` with Phase 7. **Manual workflows remain inviolable as Settings-selectable fallbacks forever** — every API path has a separately-tested manual-equivalent path. The `audience_quality_score` 7th resolver dimension and `v_content_type_x_pillar_performance` cross-pivot stay deferred (density / data-source reasons, not API). See §30 items 98–100 for the full delta, §29.12 for the Grok integration section, and §25 Phases 7/8/9 for the per-phase checklists.
+>
+> **Native macOS desktop conversion (2026-05-24) — architecture direction reversed; §7.1/§7.2 presentation verdict superseded.** The original §7.1/§7.2 dropped Tauri/Electron and declared that "this tool runs as `streamlit run` on Daniel's machine and that's the entire deployment story." That *presentation/deployment* decision is **reversed**: XGrowth is repackaged as a true native macOS application — a real `.app` bundle (movable to `/Applications`, with its own icon and `Info.plist`) that launches directly into the dashboard, **not** a browser tab and **not** a thin webview hosting the old Streamlit UI. The architecture is **Tauri v2 (Rust shell + system WKWebView) + a Vite/React + TypeScript frontend that recreates the `app/components/theme.py` design system 1:1 + the existing Python backend run unchanged as a FastAPI loopback sidecar.** The decision rests on *visual fidelity*, not polish: the dashboard UI is already CSS/HTML + Plotly, so a web frontend inside a native shell is the highest-fidelity port (charts render byte-identically via Plotly.js from the same figure JSON), whereas a pure SwiftUI/AppKit rewrite could not match the instrument-panel look. **This is NOT a move toward distribution, multi-user, the App Store, or cloud sync** — the single-user/local-only thesis of §1 and §7.1 is unchanged; "native" describes the *shell*, not the audience. The Python backend (DB, agent + all tools/invariants, X/Grok clients, forms, jobs, exports) is reused verbatim — only the presentation layer changes. The Streamlit entry point (`app/main.py`) remains runnable throughout development. Locked sub-decisions: frontend = React + TypeScript; bridge = FastAPI sidecar bound to `127.0.0.1` (random port + token handshake, SSE for agent streaming); Python runtime = frozen + embedded (PyInstaller/PyOxidizer) so the `.app` is self-contained; user data copied (not moved) to `~/Library/Application Support/XGrowthDashboard/` with `ANTHROPIC_API_KEY` migrated to the macOS Keychain. Full architecture in new **§31**; per-sub-phase checklist in **§25 Phase 11**. See §30 item 102 for the full delta.
 
 ---
 
@@ -105,9 +107,11 @@ Streamlit can run a local web app from a normal Python script, opening it in the
 
 Tauri is attractive for a later packaged desktop app because it uses web UI with a Rust-backed native shell and system webview, but it adds build/setup complexity that does not help the first-week distribution loop. ([Tauri][9])
 
-Electron is a mature cross-platform desktop option for JavaScript/HTML/CSS apps, but it ships Chromium and Node.js in the binary, which is heavier than needed for this single-user dashboard MVP. ([Electron][10])
+> **Updated 2026-05-24:** the first-week distribution loop shipped long ago (through Phase 10), so the "doesn't help the first week" objection is now moot. **Tauri v2 is the chosen native-desktop shell for Phase 11** (§0, §7.1, §31). The web-UI-in-native-shell model is the *highest-fidelity* port precisely because XGrowth's UI is already CSS/HTML + Plotly — a system-WKWebView frontend reuses the existing design tokens verbatim and renders charts byte-identically.
 
-Next.js is a strong full-stack React option and can run locally at `localhost:3000`, but it adds more frontend/backend surface area than the MVP needs. ([Next.js][11])
+Electron is a mature cross-platform desktop option for JavaScript/HTML/CSS apps, but it ships Chromium and Node.js in the binary, which is heavier than needed for this single-user dashboard MVP. **(Phase 11 chose Tauri v2 over Electron for a smaller `.app` that uses the system WKWebView rather than bundling Chromium — see §31.)** ([Electron][10])
+
+Next.js is a strong full-stack React option and can run locally at `localhost:3000`, but it adds more frontend/backend surface area than the MVP needs. **(Phase 11's frontend is a Vite + React/TypeScript single-page app rendered inside the Tauri shell — not a Next.js server; the only "server" is the FastAPI Python sidecar on loopback — see §31.)** ([Next.js][11])
 
 ---
 
@@ -236,6 +240,8 @@ The dominant question should be:
 
 ## 7.1 Decision
 
+> **Superseded in part (2026-05-24):** The *storage and data-collection* decisions in this section (SQLite, manual-first entry, `VACUUM INTO` backups, CSV/Markdown export, and the `xurl` → X-API → Grok upgrade path) remain authoritative and unchanged. The *presentation and deployment* decision — "**Streamlit + `st.connection`** … runs as `streamlit run`" — is **superseded by Phase 11**, which repackages this same SQLite + Python backend behind a native macOS Tauri v2 `.app` with a recreated React/TypeScript frontend. See the 2026-05-24 §0 note, the revised §7.2 verdict below, and the full architecture in **§31**. Streamlit remains a supported local development surface throughout Phase 11; it is simply no longer the *only* deployment story.
+
 **Recommended MVP:**
 
 * **SQLite** for local-first storage.
@@ -277,8 +283,9 @@ The honest alternative-to-build isn't Next.js; it's a Google Sheet + Looker Stud
 | **SQLite + Python + Streamlit (manual-first)** | Fastest MVP, zero auth/cost, schema enforces product discipline, easy CSV/Markdown export, natural upgrade path to API | Less polished than custom React; Streamlit UX has limits                            | **Best fit for personal local tool** |
 | Google Sheet + Looker Studio    | 2-hour setup, zero engineering                                                                                  | Schema discipline disappears; no immutable snapshots, no enforced sample-size logic | Acceptable if you don't care about the discipline |
 | Next.js + SQLite                | Better frontend, strong TS/React ergonomics                                                                    | More boilerplate, API routes/server actions/ORM choices, slower MVP                 | Only if Streamlit UX feels too limiting after months of use |
+| **Tauri v2 + React/TS frontend + Python (FastAPI) sidecar** | Native macOS `.app` movable to `/Applications`; reuses the entire Python backend verbatim; recreates the CSS/Plotly instrument-panel UI at near-pixel fidelity; charts byte-identical via Plotly.js; system WKWebView (no bundled Chromium) | Largest build surface (Rust shell + frozen Python + frontend); Streamlit stock-widget chrome must be reimplemented, so not byte-identical on generic controls | **Chosen for Phase 11 (native desktop port); see §0 + §31** |
 
-Tauri, Electron, FastAPI+React, and other desktop-packaging or production-shaped options were considered and dropped — this tool runs as `streamlit run` on Daniel's machine and that's the entire deployment story.
+Tauri, Electron, FastAPI+React, and other desktop-packaging or production-shaped options were originally considered and dropped here on the grounds that `streamlit run` was the entire deployment story. **That verdict was reversed on 2026-05-24 (see §0).** XGrowth is now repackaged as a native macOS `.app`: **Tauri v2 (Rust shell + system WKWebView) + a React/TypeScript frontend that recreates the `theme.py` design system 1:1 + the existing Python backend run as a FastAPI loopback sidecar.** The decisive reason is *visual fidelity*, not polish — the dashboard UI is already CSS/HTML + Plotly, so a web frontend in a native shell is the highest-fidelity port (a pure SwiftUI/AppKit rewrite would not match). This is **not** a move toward distribution, multi-user, the App Store, or cloud sync; single-user-local per §1 is unchanged. Full spec: **§31**; checklist: **§25 Phase 11**.
 
 ### Recommendation
 
@@ -5358,6 +5365,56 @@ Adds Grok firehose discovery as a third reply-target source. Defaults `grok_api_
   * [ ] Test agent does NOT have access to `stir_testers` PII or `qualitative_feedback`.
   * [ ] Test agent in manual mode does NOT call X API.
 
+### Phase 11 — Native macOS desktop app (see §31 for full spec)
+
+Additive and non-destructive: the Streamlit app stays runnable throughout (§31.8). Frontend = React/TS; bridge = FastAPI loopback sidecar; runtime = frozen + embedded; data → `~/Library/Application Support/XGrowthDashboard/`; secrets → Keychain.
+
+**11.0 — Backend service extraction (`app/service/`)**
+
+* [ ] FastAPI app bound to `127.0.0.1`, random free port printed to stdout, per-launch bearer-token auth on every route.
+* [ ] Read endpoints for all dashboard slices (Today, Next Rep, Progress, Content Performance, Funnel, Weekly Review, Reply Queue, Campaigns, Calendar, Inspiration, Blogs, Settings).
+* [ ] Write endpoints wrapping the manual forms + corrections + settings upserts, reusing `with transaction(conn)`.
+* [ ] Agent session endpoints with **SSE streaming** of assistant tokens + visible tool-call blocks (§28 transparency).
+* [ ] §28.10 publish flow preserved server-side (single-use sha256 token, TTL, six checks, atomic txn, click-handler-only internal tools); startup invariants from `app/main.py` run at sidecar startup.
+* [ ] pytest (TestClient) green; every existing backend test still passes; `uv run ruff check` clean. **Streamlit untouched.**
+
+**11.1 — Data/config/secrets path migration**
+
+* [ ] Path resolver: `XGROWTH_DATA_DIR` → Application Support → legacy `./data`.
+* [ ] One-time **copy** (not move) of legacy `./data/dashboard.db` (+ WAL/SHM) to Application Support on first native launch.
+* [ ] Bundled read-only resource resolver for `migrations/*.sql` + `config/*.md` (bundle-relative, not CWD).
+* [ ] `ANTHROPIC_API_KEY` (+ `XAI_API_KEY`, X OAuth) read from macOS Keychain; `.env` remains the dev path.
+* [ ] Streamlit + service both consume the resolver; existing schema tests pass against a fresh tmp DB.
+
+**11.2 — Design-system port (isolated)**
+
+* [ ] Invoke `/frontend-design`; commit to faithful instrument-panel reproduction.
+* [ ] Port `PALETTE` + `LANE_SCATTER_COLORS` → CSS custom properties / TS tokens (no inlined hex, no new tokens in views).
+* [ ] Bundle Fraunces + IBM Plex Sans + JetBrains Mono (offline-identical rendering).
+* [ ] Recreate every `theme.py` component + `badges/` + `charts/` as React components in a component gallery; screenshot-diff against Streamlit.
+* [ ] Plotly.js charts fed the Python charts module's figure JSON; assert equality.
+
+**11.3 — Tauri v2 shell + sidecar lifecycle (`desktop/`)**
+
+* [ ] `.app` skeleton: window, menu, Dock icon, `Info.plist` (`CFBundleName = "X Growth Dashboard"`).
+* [ ] Spawn/supervise frozen sidecar: read port from stdout, health-check, token handshake, graceful shutdown on quit, restart-on-crash with backoff.
+* [ ] App launches directly into the dashboard (no browser, no Streamlit).
+
+**11.4–11.11 — View ports (one acceptance gate per view, §31.7 order)**
+
+* [ ] Today · [ ] Next Rep · [ ] Progress · [ ] Content Performance · [ ] Funnel · [ ] Weekly Review (read-only analytics first).
+* [ ] Manual Entry · [ ] Settings (forms + writes).
+* [ ] Agent Chat (streaming + tool-call blocks + §28.10 confirmation modal) · [ ] Reply Target Queue · [ ] Brain Dump · [ ] Coach · [ ] Account Researcher (agent surfaces).
+* [ ] Content Calendar · [ ] Campaigns · [ ] Inspiration Library · [ ] Blogs · [ ] Blog Editor.
+* [ ] Each view passes its visual-fidelity screenshot-diff gate before being marked done.
+
+**11.12 — Packaging, signing & launch**
+
+* [ ] Freeze Python sidecar (PyInstaller/PyOxidizer) embedded in `Contents/Resources/`; no external Python/uv at runtime.
+* [ ] Icon + DMG (drag-to-`/Applications`); ad-hoc signing (Developer-ID/notarization documented as optional).
+* [ ] Re-express §28.10 publish-security tests against the service API.
+* [ ] Manual end-to-end: move `.app` to `/Applications`, launch, full loop works on a clean machine state.
+
 ---
 
 ## 26. MVP acceptance criteria
@@ -7307,6 +7364,111 @@ Grok firehose discovery is a third reply-target source alongside manual paste (�
 
 ---
 
+## 31. Native macOS desktop architecture (Phase 11)
+
+> Added 2026-05-24. This section is **authoritative** for the native-desktop conversion and *supersedes the presentation/deployment portion* of §7.1/§7.2 (see the 2026-05-24 §0 note). Storage, data model, agent contract, and every behavioral invariant elsewhere in this spec are unchanged — Phase 11 changes the *presentation layer only*.
+
+### 31.1 What this phase is (and is not)
+
+Phase 11 repackages XGrowth as a **true native macOS application**: a code-signable `.app` bundle that lives in `/Applications`, owns a Dock icon and `Info.plist`, and launches **directly into the dashboard**. It is explicitly **not** a browser tab, **not** `streamlit run` opened in a browser, and **not** a thin webview that simply hosts the existing Streamlit server. The entire Python backend — database, the §28 Growth Agent and all its tools/invariants, the §29 reply-target machinery, X/Grok clients, forms, scheduled jobs, exports, backups — is **reused verbatim**. Only how pixels reach the screen changes.
+
+**Non-goals (load-bearing — same thesis as §1/§7.1):** not multi-user, not distributed to anyone but Daniel, not the App Store, not cloud sync, not a SaaS. "Native" describes the *shell*, not the audience. Any later suggestion that Phase 11 "enables distribution" is to be refused and pointed back here and to §7.1.
+
+### 31.2 Target architecture
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│  XGrowthDashboard.app  (Tauri v2 — Rust shell, system WKWebView) │
+│                                                                  │
+│   ┌────────────────────────────┐     spawns + supervises        │
+│   │ Frontend (Vite + React/TS) │ <── sidecar lifecycle ──┐       │
+│   │  · design system ← theme.py │                         │       │
+│   │  · Plotly.js charts         │   HTTP/SSE on 127.0.0.1 │       │
+│   │  · 18 views                 │ ───────────────────────┼─────┐ │
+│   └────────────────────────────┘   (random port + token) │     │ │
+│                                                            v     v │
+│                                  ┌──────────────────────────────┐ │
+│                                  │ Python sidecar (FastAPI)      │ │
+│                                  │  app/service/  ← NEW          │ │
+│                                  │  wraps app/agent, forms,      │ │
+│                                  │  exports, jobs, backup, db    │ │
+│                                  └───────────────┬──────────────┘ │
+│                                                  v                │
+│                                   ~/Library/Application Support/   │
+│                                     XGrowthDashboard/dashboard.db  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+- **Shell:** Tauri v2 (Rust). Uses the macOS **system WKWebView** — no bundled Chromium (the Electron objection in §3). Owns the window, menu bar, Dock presence, `Info.plist`, icon, and the sidecar process lifecycle (spawn on launch, health-check, graceful shutdown on quit, restart-on-crash with backoff).
+- **Frontend:** Vite + React + TypeScript single-page app, loaded from the bundle (no dev server in production). Renders all 18 views and the recreated design system. Charts use **Plotly.js**, fed the *same figure JSON* the Python `app/components/charts/` module already produces → byte-identical charts.
+- **Backend bridge:** a FastAPI app (`app/service/`) bound to `127.0.0.1` on a **random free port**, printed to stdout for the shell to read. Every request carries a **per-launch bearer token** (generated by the shell, passed to the sidecar via env, required on every call) so nothing else on the loopback interface can drive the backend. Agent turns stream over **SSE**.
+- **Backend:** unchanged `app/db.py`, `app/agent/*`, `app/forms/*`, `app/exports/*`, `app/jobs/*`, `app/backup.py`, `app/x_client.py`, `app/grok_client.py`. The service layer is a thin adapter, not a rewrite (the agent tools already take a `sqlite3.Connection` and return JSON — see §28.4).
+
+### 31.3 Backend service layer (`app/service/`)
+
+A new package that exposes the existing backend over HTTP without changing it:
+
+- **Read endpoints** mirror the dashboard slices the Streamlit pages render today (e.g. `GET /views/today`, `/views/progress`, `/views/content-performance`, `/views/funnel`, `/views/weekly-review`, `/views/next-rep`, `/views/reply-queue`, `/views/campaigns`, `/views/calendar`, `/views/inspiration`, `/views/blogs`, `/settings`). Each returns the same data the page computes, as JSON.
+- **Write endpoints** wrap the §forms (manual snapshot, post/reply logging, corrections, settings upserts) and reuse the existing `with transaction(conn): …` discipline (§db.py) — no business logic moves to the frontend.
+- **Agent endpoints** wrap `app/agent/client.py`: start/continue a session, stream assistant tokens + **visible tool-call blocks** over SSE (§28 transparency requirement), list/search sessions.
+- **Publish flow (§28.10) is preserved exactly.** The two-step confirmation, the single-use sha256-hashed `confirmation_token`, the TTL, the six pre-publish checks, the atomic transaction, and the **click-handler-only** internal-tool surface (`app/agent/_internal_tools.py`) all stay server-side. The frontend renders the confirmation modal (exact text, char count, TTL countdown) and POSTs the token to consume it; it never gains the ability to publish without the server-side gate. The §main.py startup invariants (`_assert_publish_tools_unreachable`, `_assert_personality_lore_unreachable`, `_assert_coach_excludes_write_tools`) run at sidecar startup too.
+- **Cost/ceiling, niche-gating, lint, repetition guard, confidence labels** — all unchanged; they live below the service layer.
+
+### 31.4 Frontend & design-system port
+
+The dark "instrument-panel" identity is reproduced **1:1** from `app/components/theme.py`, not reinterpreted:
+
+- **Design tokens:** `PALETTE` (ink `#0e1116`, surface, hairline `#2a2f37`, bone `#e6e1d8`/dim/faint, phosphor `#5fb3a1`/dim, the four colorblind-safe confidence tiers, `warn_amber`, `noise_band`) and `LANE_SCATTER_COLORS` are ported verbatim to CSS custom properties / a TS token module. **No new color tokens or fonts** may be introduced in view code — extend the token module, mirroring the project rule that bans inlining hex outside `theme.py`.
+- **Typography:** Fraunces (display serif, variable, `opsz`/`SOFT` settings preserved), IBM Plex Sans (body), **JetBrains Mono for every number** (tabular figures). Fonts are **bundled with the app** (self-contained — not fetched from Google Fonts at runtime, so the app renders identically offline).
+- **Components:** every `theme.py` helper is recreated as a React component with the same DOM/CSS: `kicker`, `hairline`, `callout`, `dim`, `numeric`, `tool_call_block`, `iwh_meter`, `cost_meter`, `token_ttl_countdown`, `console_log_row`, `readout_card`, `score_bank` (R/E/S/O stepped cluster), `recommended_action_badge` (stepped ladder, **no red**), `specimen_block`, `status_chip`, `citation_chip` (surviving vs stripped), `candidate_card`, plus the `badges/` and `charts/` submodules. The "no red," "show steps not slopes," and "sample-size frames a question not a failure" disciplines carry over.
+- **Charts:** rendered with Plotly.js from the Python charts module's existing figure specs → effectively byte-identical. This is the strongest fidelity lever and the reason a web frontend was chosen over native UI.
+- **`apply_theme()` equivalent:** a single global stylesheet + token layer applied at the app root (replacing the per-page `apply_theme()` call).
+- **Theme stays dark-only** (§14.7); no light variant is added in Phase 11.
+- All UI work in Phase 11 begins by invoking the project's `/frontend-design` skill (per CLAUDE.md "UI work"), committing to the returned aesthetic direction, which here means faithful reproduction of the existing instrument-panel system.
+
+### 31.5 Data, config & secrets paths
+
+- **User-writable state → macOS standard location:** `~/Library/Application Support/XGrowthDashboard/` holds `dashboard.db` (+ WAL/SHM), `backups/`, `exports/`, `weekly_reports/`, `raw_api/`. A path resolver replaces the hard-coded `PROJECT_ROOT/data/…` (`app/db.py:DEFAULT_DB_PATH`) with precedence: **(1)** `XGROWTH_DATA_DIR` env override → **(2)** Application Support → **(3)** legacy `./data` (dev fallback).
+- **One-time migration:** on first native launch, if no Application Support DB exists but a legacy `./data/dashboard.db` does, it is **copied (not moved)** — the original stays in place so the Streamlit version keeps working during development. WAL/SHM sidecars are handled per the existing backup discipline.
+- **Bundled read-only resources:** `migrations/*.sql` and `config/*.md` (`agent_system_prompt.md`, `voice_profile_prescriptive.md`, `screenshot_test_prompt.md`, content pillars/UTM YAML) ship inside the frozen sidecar's resource tree and are resolved relative to the bundle, **never** the CWD.
+- **Secrets:** `ANTHROPIC_API_KEY` (and `XAI_API_KEY`, X OAuth tokens) move to the **macOS Keychain**, read by the sidecar at startup. The repo-root `.env` remains the dev/Streamlit path; the packaged app does not depend on a `.env` next to a binary in `/Applications`. `xurl` tokens continue to live under `~/.xurl/`.
+
+### 31.6 Packaging, signing & launch
+
+- **Frozen Python sidecar:** the backend + interpreter + deps are frozen (PyInstaller or PyOxidizer) into a single executable embedded under `Contents/Resources/`. The app runs with **no external Python/uv requirement** — a genuine first-class citizen.
+- **Bundle:** Tauri produces `XGrowthDashboard.app` with icon, `Info.plist` (`CFBundleName = "X Growth Dashboard"`, `LSMinimumSystemVersion`, etc.), drag-to-`/Applications` install (DMG), and launch-into-dashboard.
+- **Signing/notarization:** ad-hoc signing is sufficient for Daniel's own machine; Developer-ID signing + notarization is documented as optional (only relevant if the binary ever crosses Gatekeeper on another Mac — which the non-distribution thesis says it won't).
+- **uv-only build:** all Python dependency changes go through `uv add` / `uv lock`; the freeze step consumes the `uv`-managed environment.
+
+### 31.7 The 18-view fidelity inventory
+
+Every current Streamlit page (`app/pages/`) is ported, each gated by a **visual-fidelity acceptance check** (screenshot-diff the React view against the Streamlit view at the same data state; any visible drift on custom components or charts is a bug). Honest caveat (carried from the §0 note): Streamlit's *built-in widget chrome* (stock buttons, inputs, tabs, metric tiles, dataframes, expanders) is only partially themed today and is **reimplemented** in the port — so "exactly the same" means a faithful, near-pixel-perfect recreation of the instrument-panel aesthetic, **not** a byte-identical copy of Streamlit's generic controls. Custom components and all Plotly charts can be made effectively indistinguishable.
+
+Port order follows data/UX dependency (read-only analytics → manual entry → agent surfaces → blogs):
+
+1. `1_Today` · 2. `2_Next_Rep` · 3. `3_Progress` · 4. `4_Content_Performance` · 5. `5_Funnel` · 6. `6_Weekly_Review` · 7. `8_Manual_Entry` · 8. `7_Settings` · 9. `9_Agent_Chat` · 10. `10_Reply_Target_Queue` · 11. `11_Brain_Dump` · 12. `12_Coach` · 13. `13_Account_Researcher` · 14. `14_Content_Calendar` · 15. `15_Campaigns` · 16. `16_Inspiration_Library` · 17. `17_Blogs` · 18. `18_Blog_Editor`.
+
+(Note: §19's MVP-era "nine views" count predates Phases 5.5–6, which grew the app to these 18 views. The 18 above are the authoritative port scope.)
+
+### 31.8 Coexistence with the Streamlit app during development
+
+Phase 11 is **additive and non-destructive**. The Streamlit entry point (`app/main.py` + `app/pages/`) and `theme.py` remain runnable via `streamlit run app/main.py` throughout, against the same backend and (in dev) the same legacy `./data/dashboard.db`. The new code lives in new trees (`app/service/` for the FastAPI adapter; `desktop/` for the Tauri shell + React frontend) so neither stack breaks the other. Streamlit is retired only after the native app reaches full view parity — and even then is kept as a fallback dev surface.
+
+### 31.9 Testing strategy
+
+- **Service layer:** pytest against the FastAPI app (TestClient), reusing existing fixtures (`vcrpy` for X/Grok, `freezegun` for time); every existing backend test continues to pass unchanged. `uv run pytest -q` + `uv run ruff check` remain the Python gate.
+- **Frontend:** component tests + visual-regression screenshots per view (the §31.7 fidelity gate). Plotly figure JSON is asserted equal to the Python output.
+- **Publish-flow security tests (§28.10) are re-expressed against the service API** — token single-use, exact-text re-display, edited-draft-posts-edited-text, no-publish-without-token — so the native path is held to the same bar as the Streamlit path.
+
+### 31.10 Anti-features (load-bearing)
+
+- **No business logic in the frontend.** Scoring, gating, lint, confidence, cost ceilings, and the publish gate stay in Python. The frontend renders and collects input; it never decides.
+- **The publish path never becomes frontend-reachable without the server-side §28.10 gate.** The internal publish tools stay click-handler-only on the server; the frontend can only *request* a confirmed publish with a valid single-use token.
+- **No new network surface beyond loopback.** The sidecar binds `127.0.0.1` only, token-gated; the app makes no inbound connections.
+- **No telemetry, no auto-update server, no account system.** Single-user local tool, unchanged.
+
+---
+
 ## 30. Changelog — 2026-05-21 revision
 
 Audit-driven rewrite of the original spec. Substantive changes:
@@ -7637,6 +7799,10 @@ Phase 7, Phase 8, Phase 9. Three deferred capabilities — originally V1.1 (X AP
 ### Voice discipline polish (2026-05-23) — §28.11, §28.12, §28.18, §28.3, §29.5 (Phase 10, migration 023)
 
 101. **Phase 10 — Voice Discipline Polish Pack (migration 023).** Five additive tightenings of the Growth Agent's voice fidelity and intent discipline, no new infrastructure. (1) `prepublish_scores.screenshot_test_score` (10th dimension, 0..3 or NULL) — Haiku call against `config/screenshot_test_prompt.md` asking "would peer-Daniel screenshot this?"; composite-label gate downgrades `strong → viable` when score is non-NULL and below `screenshot_test_minimum_for_strong` (default 2); NULL passes through (calibration period). `SCORER_VERSION` bumped to `prepublish-scorer/0.2.0`. (2) Prescriptive voice layer — new static `config/voice_profile_prescriptive.md` (hand-curated, version-controlled "voice IS / voice IS NOT" anchor distilled from Daniel's external Hermes voice anchor) splices into Section 5 between the generated voice_profile structural block and the raw voice_samples; `app/agent/prompt_builder.py::verify_voice_profile_prescriptive_present()` drift check fires on missing/empty file. (3) Reply-quality lint expanded from 3 to 11 failure modes — original `forced / ai_tasting / selfishly_self_promoting` plus new `engagement_bait / ragebait / manipulative_question / fake_authority / performative_threading / diving_preamble / emoji_as_personality / hedging_that_erases`. `agent_drafts.reply_quality_lint_failure_mode` (eleven-value enum) populated only when `passed=False`; NULL on pass. `_label_to_failure_mode` centralises the enum mapping. §29.7 Queue badge tightened from `Lint blocked — <category>` to `Lint: <category>`. (4) Section 4 of `config/agent_system_prompt.md` gains three additive blocks (no deletions): engagement-with-integrity framing block after the dark-patterns floor, screenshot-test principle in Structure, IWH-operationalized block before Format guidance. Each block bracketed by sentinel comments; `verify_section_4_anchors()` drift check fires per-anchor on missing block. (5) `save_draft_reply` schema marks `reply_intent` required; `app/agent/client.py::dispatch_tool_call` validates against `REPLY_INTENT_ENUM` BEFORE the niche/IWH/lint gate; honors `reply_intent_required` settings toggle (default ON; OFF is the calibration escape hatch). Settings → Growth Agent gains a new "Reply discipline" panel surfacing both `reply_intent_required` and the previously-hidden `reply_quality_lint_enabled` toggle. `verify_reply_intent_enum_dispatcher_in_sync()` extends the existing three-way drift check (spec / code / prompt) to cover the dispatcher import. Migration 023 also seeds two new settings rows. Net delta: +1 migration, +80 tests (1043 → 1123), +1 scorer dimension, +8 lint categories, +3 system-prompt anchor blocks, +1 hard dispatcher gate with toggle escape hatch. The phase plan's nominal migration slot was 021 — landed at 023 because Phase 9 had already shipped 021/022; treat the migration-number slot as "whatever's next" rather than spec-baked. (§10 `prepublish_scores.screenshot_test_score`, §10 `agent_drafts.reply_quality_lint_failure_mode`, §10 settings rows, §25 Phase 10, §28.3 Section 4 additive blocks, §28.11 10th dimension + composite gate, §28.12 prescriptive layer, §28.18 11-category expansion, §29.5 reply_intent promotion, §29.7 Queue badge format)
+
+### Native macOS desktop conversion (2026-05-24) — §0, §3, §7.1/§7.2, §31, §25 Phase 11
+
+102. **Phase 11 — Native macOS desktop app.** Reverses the §7.1/§7.2 *presentation/deployment* verdict ("`streamlit run` is the entire deployment story"). XGrowth is repackaged as a true native macOS `.app` (movable to `/Applications`, own icon/`Info.plist`, launches directly into the dashboard — not a browser tab, not a thin webview over Streamlit). Architecture: **Tauri v2 (Rust shell + system WKWebView) + Vite/React + TypeScript frontend recreating `app/components/theme.py` 1:1 + the existing Python backend run unchanged as a FastAPI loopback sidecar** (`127.0.0.1`, random port + per-launch bearer token, SSE for agent streaming). Chosen on *visual-fidelity* grounds: the UI is already CSS/HTML + Plotly, so a web frontend in a native shell is the highest-fidelity port (charts byte-identical via Plotly.js) and a pure SwiftUI/AppKit rewrite would not match. Locked sub-decisions: React+TS; FastAPI sidecar; Python frozen + embedded (PyInstaller/PyOxidizer, self-contained — no external Python/uv at runtime); user data **copied** (not moved) to `~/Library/Application Support/XGrowthDashboard/`; `ANTHROPIC_API_KEY` → macOS Keychain. The Python backend (DB, §28 agent + all tools/invariants, §29 reply machinery, X/Grok clients, forms, jobs, exports, backups) is reused verbatim; only the presentation layer changes. §28.10 publish flow, the click-handler-only internal-tool surface, and the `app/main.py` startup invariants are preserved server-side. Additive and non-destructive: `streamlit run app/main.py` stays runnable throughout (§31.8). **Not a move toward distribution / multi-user / App Store / cloud** — single-user-local per §1/§7.1 unchanged; "native" = shell, not audience. Port scope is the 18 current views (the §19 "nine views" count predates Phases 5.5–6). New code trees: `app/service/` (FastAPI adapter) + `desktop/` (Tauri shell + React frontend). (§0 2026-05-24 note, §3 Tauri/Electron/Next.js bullets, §7.1 partial-supersession banner, §7.2 verdict + comparison row, §25 Phase 11 checklist 11.0–11.12, §31 full architecture.)
 
 Historical version-label updates (items 22 / 29 / 65 / 82 / 86 originally framed against V1.1+ / V1.1 / V1.2 labels — the labels are stale post-consolidation; the items themselves describe shipped or absorbed work and stay correct in substance):
 

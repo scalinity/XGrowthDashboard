@@ -6,9 +6,14 @@ Project-local standing rules that override conflicting global defaults. The user
 
 ## What this project is
 
-**Single-user, local-only Python/Streamlit tool.** Runs as `streamlit run app/main.py` on Daniel's machine. Not packaged, not distributed, not multi-tenant. No Stripe, no auth, no cloud sync. The "production-minded" practices in `spec.md` (immutable snapshots, `VACUUM INTO` backups, schema discipline) exist to protect Daniel's data and learning, not to prepare for distribution.
+**Single-user, local-only Python tool.** Runs on Daniel's machine only — not distributed, not multi-tenant. No Stripe, no auth, no cloud sync. The "production-minded" practices in `spec.md` (immutable snapshots, `VACUUM INTO` backups, schema discipline) exist to protect Daniel's data and learning, not to prepare for distribution.
 
-If a suggestion implies distribution, packaging for the App Store, multi-user support, or cloud sync — refuse and point back to §7.1 of `spec.md`.
+**Two presentation surfaces** (see `spec.md` §31, 2026-05-24 native-desktop conversion):
+
+- **Streamlit** (`streamlit run app/main.py`) — the original dev surface; stays runnable throughout Phase 11.
+- **Native macOS `.app`** (Phase 11) — Tauri v2 shell + React/TS frontend + the *same* Python backend run as a FastAPI loopback sidecar; movable to `/Applications`.
+
+**Native packaging for Daniel's own machine is explicitly in scope (Phase 11) and is NOT distribution.** "Native" describes the shell, not the audience. What stays out of scope and must still be refused (point back to §1 / §7.1 / §31): the **App Store, multi-user, cloud sync, telemetry, auto-update, or any "ship it to other people" path.**
 
 ---
 
@@ -37,8 +42,10 @@ If a suggestion implies distribution, packaging for the App Store, multi-user su
 - `app/x_client.py` is the X API OAuth wrapper (publishing only, Phase 5.5+).
 - `migrations/` holds raw SQL files applied in lexicographic order.
 - `scripts/` holds operational one-shots (backup, export, etc.). Not the daily data path.
-- `data/` is user-private and `.gitignore`'d — DB, exports, backups.
+- `data/` is user-private and `.gitignore`'d — DB, exports, backups. **Phase 11:** user-writable data also resolves to `~/Library/Application Support/XGrowthDashboard/` for the native app (path resolver: `XGROWTH_DATA_DIR` env → App Support → legacy `./data`); see §31.5.
 - `tests/` mirrors `app/` layout where it helps.
+- `app/service/` (Phase 11, §31.3) — FastAPI loopback sidecar: a **pure adapter** that wraps the existing backend (agent, forms, exports, jobs, backup, db) over HTTP/SSE for the native app. No business logic lives here.
+- `desktop/` (Phase 11, §31) — Tauri v2 shell (Rust) + Vite/React + TypeScript frontend. Recreates the `theme.py` design system 1:1; charts via Plotly.js.
 
 ---
 
@@ -58,12 +65,13 @@ The user's global rule against React's `useEffect` translates to Streamlit as fo
 - **Use the `/frontend-design` skill before building or revising any UI.** Pages under `app/pages/`, components under `app/components/`, and the `app/main.py` shell all count. Invoke the skill once at the start of UI work and commit to the aesthetic direction it returns; don't ship Streamlit defaults.
 - The dashboard's aesthetic identity is the **dark "instrument-panel" theme** owned by `app/components/theme.py`: deep-ink background, warm bone text, Fraunces display serif, IBM Plex Sans body, JetBrains Mono for every number. Every page calls `apply_theme()` first thing after `st.title`. Don't introduce new color tokens or fonts in page files — extend `theme.py` and reuse.
 - §14.7 fixes the MVP theme as dark-only. Don't add a light variant until the spec says so.
+- **Phase 11 native UI (`desktop/`):** `/frontend-design` still applies before any view work. The design system is recreated **1:1** from `theme.py` as CSS tokens + React components (§31.4) — same `PALETTE`, same fonts (bundled, not Google-fetched), same component helpers, charts via Plotly.js fed the Python figure JSON. Dark-only still holds. Don't fork the aesthetic — mirror it; treat visible drift against the Streamlit views as a bug (§31.7).
 
 ---
 
 ## Scope discipline
 
-- **Comprehensive scope is the default.** MVP scope is exactly what §19 of `spec.md` enumerates — do not silently strip features. If §19 says nine views, ship nine views.
+- **Comprehensive scope is the default.** MVP scope is exactly what §19 of `spec.md` enumerates — do not silently strip features. If §19 says nine views, ship nine views. (The app shipped **18 views** through Phase 6; Phase 11's native port covers all 18 — see §31.7. §19's "nine" is the MVP-era count.)
 - A "minimum" suggestion is only valid if §19 explicitly defers the feature to V1.1+.
 - When unsure, re-read §19 and §25 before scoping down.
 

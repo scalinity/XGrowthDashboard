@@ -172,6 +172,17 @@
       box-shadow: 0 0 0 2px rgba(95,179,161,0.12);
       flex-shrink: 0;
     }
+    /* Planned / not-yet-shipped phase: hollow phosphor ring (Phase 11). */
+    aside.nav ul.phase-list .dot-planned {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: transparent;
+      border: 1.5px solid var(--phosphor);
+      box-shadow: 0 0 0 2px rgba(95,179,161,0.08);
+      flex-shrink: 0;
+      box-sizing: border-box;
+    }
     aside.nav ul.phase-list .num {
       font-family: 'JetBrains Mono', monospace;
       font-size: 12px;
@@ -664,6 +675,7 @@
         <li><a href="#phase-8"><span class="dot-complete" aria-hidden="true"></span><span class="num">8</span><span>X API writes</span></a></li>
         <li><a href="#phase-9"><span class="dot-complete" aria-hidden="true"></span><span class="num">9</span><span>Grok integration</span></a></li>
         <li><a href="#phase-10"><span class="dot-complete" aria-hidden="true"></span><span class="num">10</span><span>Voice Discipline Polish</span></a></li>
+        <li><a href="#phase-11"><span class="dot-planned" aria-hidden="true"></span><span class="num">11</span><span>Native macOS Desktop · planned</span></a></li>
       </ul>
       <div class="add-phase">+ NEXT PHASE GOES HERE</div>
 
@@ -2107,6 +2119,78 @@
           <div class="subsection-body">
             <p>Two natural next steps: (a) the deferred 7th resolver dimension <code>audience_quality_score</code> once Phase 9 Grok calibration produces a clear data-source signal (the dimension's data source is unresolved without Grok-author-classification calibration); (b) further QoL work — a Settings → Growth Agent → Reply discipline → "Calibration report" panel that surfaces (i) <code>screenshot_test_score</code> distribution over shipped drafts, (ii) per-failure-mode bounce rate, (iii) <code>reply_intent</code> distribution across actually-shipped replies.</p>
             <p>Manual workflows remain inviolable. The screenshot test dimension being NULL (offline / no API key) never blocks publish per §28.11 design rule #4. The new reply-quality categories all degrade to "pass" when the lint runs offline and no patterns match — Daniel can always ship a reply that the offline matcher missed; the live Haiku call catches the nuance.</p>
+          </div>
+        </details>
+      </section>
+
+      <section class="phase" id="phase-11" data-phase-id="11" data-phase-title="Native macOS Desktop App">
+        <header class="phase-header">
+          <p class="kicker">Phase 11 · Native desktop · PLANNED (spec-first)</p>
+          <h2>Native macOS <em>Desktop</em> App</h2>
+          <p class="meta"><span data-mono>2026-05-24</span><span class="sep">·</span>spec <span class="spec">31</span> / <span class="spec">7.1</span> / <span class="spec">25</span><span class="sep">·</span>spec landed; implementation pending</p>
+        </header>
+
+        <div class="score-bank" aria-label="Phase 11 counters (planned)">
+          <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Tests (baseline)</p><div class="tile-number">1123</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Gates satisfied</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+        </div>
+
+        <details class="subsection" id="phase-11-completed" data-section-type="completed" open>
+          <summary><span class="caret"></span><span class="label-kicker">01 / Spec-first</span><span class="label-title">Plan locked (done)</span></summary>
+          <div class="subsection-body">
+            <ul>
+              <li><strong>Architecture decision reversed in <code>spec.md</code></strong> — the <span class="spec">7.1</span>/<span class="spec">7.2</span> "<code>streamlit run</code> is the entire deployment story" verdict is superseded. New <span class="spec">0</span> revision note (2026-05-24), revised <span class="spec">3</span> Tauri/Electron/Next.js assumptions, <span class="spec">7.1</span> partial-supersession banner, <span class="spec">7.2</span> comparison row, full new <span class="spec">31</span> architecture section, <span class="spec">25</span> Phase 11 checklist (11.0–11.12), and changelog item 102.</li>
+              <li><strong>Target architecture</strong> — <strong>Tauri v2</strong> (Rust shell + system WKWebView) + <strong>Vite/React + TypeScript</strong> frontend recreating <code>app/components/theme.py</code> 1:1 + the existing Python backend run unchanged as a <strong>FastAPI loopback sidecar</strong> (<code>127.0.0.1</code>, random port + per-launch bearer token, SSE for agent streaming).</li>
+              <li><strong>Chosen on visual-fidelity grounds</strong> — the UI is already CSS/HTML + Plotly, so a web frontend in a native shell is the highest-fidelity port (charts byte-identical via Plotly.js); a pure SwiftUI/AppKit rewrite would not match.</li>
+              <li><strong>Locked sub-decisions</strong> — React+TS · FastAPI sidecar · Python frozen + embedded (PyInstaller/PyOxidizer, self-contained, no external Python/uv at runtime) · user data <em>copied</em> (not moved) to <code>~/Library/Application Support/XGrowthDashboard/</code> · <code>ANTHROPIC_API_KEY</code> → macOS Keychain.</li>
+              <li><strong>Backend reused verbatim</strong> — DB, <span class="spec">28</span> agent + all tools/invariants, <span class="spec">29</span> reply machinery, X/Grok clients, forms, jobs, exports, backups. New code trees only: <code>app/service/</code> (FastAPI adapter) + <code>desktop/</code> (Tauri shell + React frontend). <code>streamlit run app/main.py</code> stays runnable throughout (<span class="spec">31</span>.8).</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-11-gates" data-section-type="gates">
+          <summary><span class="caret"></span><span class="label-kicker">02 / Acceptance</span><span class="label-title">Targets (<span class="spec">25</span> Phase 11, 11.0–11.12)</span></summary>
+          <div class="subsection-body">
+            <ul class="gates-list">
+              <li><strong>11.0 Service extraction</strong> — FastAPI on <code>127.0.0.1</code> (random port, bearer-token auth); read/write/agent endpoints; SSE streaming + visible tool-call blocks; <span class="spec">28.10</span> publish flow preserved server-side; startup invariants run; pytest green; <strong>Streamlit untouched</strong>.</li>
+              <li><strong>11.1 Path migration</strong> — resolver (env → App Support → legacy <code>./data</code>); one-time <em>copy</em> of legacy DB (+ WAL/SHM); bundled resource resolver for <code>migrations/</code> + <code>config/</code>; secrets via Keychain.</li>
+              <li><strong>11.2 Design-system port</strong> — <code>/frontend-design</code> first; <code>PALETTE</code> + <code>LANE_SCATTER_COLORS</code> → tokens; bundled fonts (offline-identical); every <code>theme.py</code> component + <code>badges/</code> + <code>charts/</code> recreated; Plotly.js fed Python figure JSON.</li>
+              <li><strong>11.3 Tauri shell + sidecar lifecycle</strong> — <code>.app</code> skeleton, <code>Info.plist</code> (<code>CFBundleName = "X Growth Dashboard"</code>), spawn/health/shutdown/restart; launches directly into the dashboard.</li>
+              <li><strong>11.4–11.11 View ports</strong> — all 18 views (analytics → forms → agent surfaces → blogs), each passing a visual-fidelity screenshot-diff gate.</li>
+              <li><strong>11.12 Packaging</strong> — frozen sidecar embedded; DMG drag-to-<code>/Applications</code>; ad-hoc signing; <span class="spec">28.10</span> publish-security tests re-expressed against the service API; move-to-<code>/Applications</code> end-to-end smoke.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-11-limitations" data-section-type="limitations">
+          <summary><span class="caret"></span><span class="label-kicker">03 / Honest caveat</span><span class="label-title">Fidelity bound</span></summary>
+          <div class="subsection-body">
+            <ul class="limitations-list">
+              <li><strong>"Exactly the same" = faithful recreation, not byte-identical.</strong> Custom components and all Plotly charts can be made effectively indistinguishable. But Streamlit's built-in widget <em>chrome</em> (stock buttons, inputs, tabs, metric tiles, dataframes, expanders) is only partially themed today and gets <em>reimplemented</em> in the port — so generic controls are matched to the aesthetic, not pixel-copied from Streamlit's React DOM.</li>
+              <li><strong>No business logic moves to the frontend.</strong> Scoring, gating, lint, confidence, cost ceilings, and the <span class="spec">28.10</span> publish gate stay in Python; the frontend renders + collects input only.</li>
+              <li><strong>Not a distribution move.</strong> Single-user/local-only per <span class="spec">1</span>/<span class="spec">7.1</span> unchanged — "native" describes the shell, not the audience. No multi-user, App Store, cloud sync, telemetry, or auto-update.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-11-ambiguity" data-section-type="ambiguity">
+          <summary><span class="caret"></span><span class="label-kicker">04 / Open</span><span class="label-title">Resolve before / during build</span></summary>
+          <div class="subsection-body">
+            <ul>
+              <li><strong>Toolchain install confirmation</strong> — 11.3+ needs Rust + Node + the Tauri CLI (a new tooling category); to be confirmed before installing. 11.0–11.1 are pure Python (uv) and can proceed first.</li>
+              <li><strong>New Python deps</strong> — <code>fastapi</code> + <code>uvicorn</code> (+ an SSE helper) via <code>uv add</code>; <code>pyinstaller</code> (dev group) for the freeze step.</li>
+              <li><strong>Signing depth</strong> — ad-hoc is sufficient for Daniel's machine; Developer-ID + notarization documented as optional (only relevant if the binary crosses Gatekeeper elsewhere — which the non-distribution thesis says it won't).</li>
+              <li><strong>Migration slot</strong> — Phase 11 expects <em>no</em> schema migration (presentation-only). If the path/secret work needs one, it takes "whatever's next" (≥ 024), per the Phase 10 lesson.</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="subsection" id="phase-11-next" data-section-type="next">
+          <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Execution order</span></summary>
+          <div class="subsection-body">
+            <p>Build starts at <strong>11.0 (backend service extraction)</strong> — pure Python, fully testable, requires no native toolchain and leaves Streamlit untouched — then <strong>11.1 (path/secret migration)</strong>. UI work (<strong>11.2</strong> onward) begins only after invoking <code>/frontend-design</code> and is gated behind the Rust/Node/Tauri toolchain confirmation. Each of the 18 views ships behind its own visual-fidelity gate; packaging/signing (<strong>11.12</strong>) is last. This block flips from <span class="dot-planned"></span> planned to shipped, with real counter tiles, as sub-phases land.</p>
           </div>
         </details>
       </section>
