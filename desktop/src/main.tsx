@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Bundled fonts (offline-identical rendering — §31.4). Fraunces is the variable
 // font (all weights via the axis); Plex Sans + JetBrains Mono ship the weights
@@ -19,8 +20,14 @@ import { App } from "./App";
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("root element missing");
 
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { refetchOnWindowFocus: false, staleTime: 30_000 } },
+});
+
 createRoot(rootEl).render(
   <StrictMode>
-    <App />
+    <QueryClientProvider client={queryClient}>
+      <App />
+    </QueryClientProvider>
   </StrictMode>,
 );
