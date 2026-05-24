@@ -1,0 +1,45 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    X Growth Dashboard app icon (spec §31.6). Instrument-panel identity:
+    deep-ink squircle, hairline measurement grid, a phosphor cyan-teal growth
+    sparkline rising to a glowing readout node. Palette from theme.py. No text.
+  -->
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2128"/>
+      <stop offset="1" stop-color="#0e1116"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#5fb3a1" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#5fb3a1" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- squircle body + hairline edge -->
+  <rect x="64" y="64" width="896" height="896" rx="210" fill="url(#surface)"/>
+  <rect x="65.25" y="65.25" width="893.5" height="893.5" rx="208.75"
+        fill="none" stroke="#2a2f37" stroke-width="2.5"/>
+
+  <!-- faint instrument grid -->
+  <g stroke="#2a2f37" stroke-width="2.5" opacity="0.7">
+    <line x1="200" y1="312" x2="824" y2="312"/>
+    <line x1="200" y1="480" x2="824" y2="480"/>
+    <line x1="200" y1="648" x2="824" y2="648"/>
+    <line x1="356" y1="232" x2="356" y2="792"/>
+    <line x1="512" y1="232" x2="512" y2="792"/>
+    <line x1="668" y1="232" x2="668" y2="792"/>
+  </g>
+
+  <!-- baseline (bone_faint) -->
+  <line x1="200" y1="724" x2="824" y2="724" stroke="#6c6960" stroke-width="4"/>
+
+  <!-- phosphor growth sparkline -->
+  <polyline points="208,690 360,604 512,636 664,452 800,318"
+            fill="none" stroke="#5fb3a1" stroke-width="44"
+            stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- glowing readout node at the rising endpoint -->
+  <circle cx="800" cy="318" r="118" fill="url(#glow)"/>
+  <circle cx="800" cy="318" r="38" fill="#5fb3a1"/>
+  <circle cx="800" cy="318" r="38" fill="none" stroke="#0e1116" stroke-width="8"/>
+</svg>
