@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -97,6 +98,7 @@ def create_app(
     conn_factory: ConnFactory | None = None,
     agent_client_factory: AgentClientFactory | None = None,
     run_invariants: bool = True,
+    dev_cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Build the sidecar FastAPI app.
 
@@ -113,6 +115,13 @@ def create_app(
         whose ``_call_model`` skips the network.
     run_invariants
         Run the §28 startup invariants at app creation. Default True.
+    dev_cors_origins
+        DEV-ONLY. When set, allow these browser origins to call the loopback
+        sidecar cross-origin (the §31 Step 0 screenshot-diff loop). The packaged
+        app and ``app.service.__main__`` NEVER set this, so production emits no
+        CORS headers — the §31.10 "no new network surface" guarantee is intact
+        (auth is still the per-launch bearer token; CORS only relaxes the
+        *browser's* same-origin check, not the loopback bind).
     """
     factory = conn_factory or _default_conn_factory
     agent_factory = agent_client_factory or (lambda: AgentClient())
@@ -121,6 +130,15 @@ def create_app(
 
     app = FastAPI(title="X Growth Dashboard — local service", version=SERVICE_VERSION)
     auth = BearerTokenAuth(token)
+
+    if dev_cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=dev_cors_origins,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     def get_conn() -> Iterator[sqlite3.Connection]:
         conn = factory()
