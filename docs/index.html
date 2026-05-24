@@ -675,7 +675,7 @@
         <li><a href="#phase-8"><span class="dot-complete" aria-hidden="true"></span><span class="num">8</span><span>X API writes</span></a></li>
         <li><a href="#phase-9"><span class="dot-complete" aria-hidden="true"></span><span class="num">9</span><span>Grok integration</span></a></li>
         <li><a href="#phase-10"><span class="dot-complete" aria-hidden="true"></span><span class="num">10</span><span>Voice Discipline Polish</span></a></li>
-        <li><a href="#phase-11"><span class="dot-planned" aria-hidden="true"></span><span class="num">11</span><span>Native macOS Desktop · planned</span></a></li>
+        <li><a href="#phase-11"><span class="dot-planned" aria-hidden="true"></span><span class="num">11</span><span>Native macOS Desktop · in progress</span></a></li>
       </ul>
       <div class="add-phase">+ NEXT PHASE GOES HERE</div>
 
@@ -2125,15 +2125,15 @@
 
       <section class="phase" id="phase-11" data-phase-id="11" data-phase-title="Native macOS Desktop App">
         <header class="phase-header">
-          <p class="kicker">Phase 11 · Native desktop · PLANNED (spec-first)</p>
+          <p class="kicker">Phase 11 · Native desktop · IN PROGRESS</p>
           <h2>Native macOS <em>Desktop</em> App</h2>
-          <p class="meta"><span data-mono>2026-05-24</span><span class="sep">·</span>spec <span class="spec">31</span> / <span class="spec">7.1</span> / <span class="spec">25</span><span class="sep">·</span>spec landed; implementation pending</p>
+          <p class="meta"><span data-mono>2026-05-24</span><span class="sep">·</span>spec <span class="spec">31</span> / <span class="spec">7.1</span> / <span class="spec">25</span><span class="sep">·</span>11.0–11.3 + 11.12 shipped · <code>.app</code> + DMG build</p>
         </header>
 
         <div class="score-bank" aria-label="Phase 11 counters (planned)">
           <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
-          <div class="tile"><p class="tile-kicker">Tests (baseline)</p><div class="tile-number">1123</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
-          <div class="tile"><p class="tile-kicker">Gates satisfied</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">1198</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Sub-phases shipped</p><div class="tile-number">05</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
           <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
         </div>
 
@@ -2190,7 +2190,8 @@
         <details class="subsection" id="phase-11-next" data-section-type="next">
           <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Execution order</span></summary>
           <div class="subsection-body">
-            <p>Build starts at <strong>11.0 (backend service extraction)</strong> — pure Python, fully testable, requires no native toolchain and leaves Streamlit untouched — then <strong>11.1 (path/secret migration)</strong>. UI work (<strong>11.2</strong> onward) begins only after invoking <code>/frontend-design</code> and is gated behind the Rust/Node/Tauri toolchain confirmation. Each of the 18 views ships behind its own visual-fidelity gate; packaging/signing (<strong>11.12</strong>) is last. This block flips from <span class="dot-planned"></span> planned to shipped, with real counter tiles, as sub-phases land.</p>
+            <p><strong>Shipped:</strong> 11.0 FastAPI sidecar (reads/writes/settings/agent + SSE/publish), 11.1 Application-Support paths + Keychain, 11.2 design-system port (every <code>theme.py</code> component as React, fonts bundled), 11.3 Tauri v2 shell + sidecar lifecycle, 11.4 shell + 18-view nav (Today / Next Rep / Funnel / Settings wired to live data), and 11.12 packaging — the frozen sidecar runs and a self-contained <code>X&nbsp;Growth&nbsp;Dashboard.app</code> + DMG build (sidecar embedded in <code>Contents/Resources/bin/</code>).</p>
+            <p><strong>Remaining:</strong> flesh the 14 scaffolded views with full per-view layouts + their read endpoints (each behind the §31.7 screenshot-diff gate); the Agent Chat publish-confirmation modal UI + true token-level streaming (swap <code>_call_model</code> for the Anthropic streaming API); Developer-ID signing + notarization (optional — ad-hoc suffices for Daniel's machine).</p>
           </div>
         </details>
       </section>
