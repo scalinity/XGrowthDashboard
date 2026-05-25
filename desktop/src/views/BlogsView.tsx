@@ -5,14 +5,15 @@
  * author, confidence chip. Click opens Blog Editor view.
  * No useEffect — useQuery only.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 
 import { Callout, Hairline, Kicker } from "../components";
 import { ConfidenceBadge, StatusChip } from "../components/badges";
 import { ProgressBar } from "../components";
 import { apiFetch } from "../lib/api";
 import { useNav } from "../lib/nav";
-import { palette } from "../theme/tokens";
+import { palette, fonts } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,12 +64,30 @@ function confidenceTier(label: string | null): "insufficient" | "directional" | 
 // View
 // ---------------------------------------------------------------------------
 export const BlogsView = () => {
-  const nav = useNav();
+  const navigate = useNav();
+  const queryClient = useQueryClient();
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState("");
+  const [notes, setNotes] = useState("");
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["blogs"],
     queryFn: () => apiFetch<BlogsData>("/views/blogs"),
     retry: 1,
+  });
+
+  const createBlog = useMutation({
+    mutationFn: (payload: { title: string; notes?: string }) =>
+      apiFetch<{ blog_id: number; slug: string; status: string }>("/blogs", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      setTitle("");
+      setNotes("");
+      setShowForm(false);
+      queryClient.invalidateQueries({ queryKey: ["blogs"] });
+    },
   });
 
   if (isLoading) return <p className="dim">Reading the local service...</p>;
@@ -86,13 +105,59 @@ export const BlogsView = () => {
 
   return (
     <>
-      <Kicker>BLOGS</Kicker>
+      <Kicker>BLOG PIPELINE</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Blogs</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Long-form pipeline + repurposing. Same unified identity surface as X
         drafting — the agent's niche, voice profile, and personality lore feed
         blog drafting exactly as they feed X drafting.
       </p>
+
+      <div style={{ margin: "0.6rem 0 1rem" }}>
+        <button
+          onClick={() => setShowForm((p) => !p)}
+          style={{
+            padding: "0.4rem 1rem",
+            background: palette.phosphor,
+            color: palette.ink,
+            border: "none",
+            borderRadius: "2px",
+            fontFamily: fonts.body,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          {showForm ? "Cancel" : "+ New Blog"}
+        </button>
+        {showForm && (
+          <div style={{ marginTop: "0.5rem", padding: "0.6rem", background: palette.surface, borderRadius: "2px" }}>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Blog title (required)"
+              style={{ width: "100%", marginBottom: "0.4rem" }}
+            />
+            <input
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Notes (optional)"
+              style={{ width: "100%", marginBottom: "0.4rem" }}
+            />
+            <button
+              className="primary"
+              onClick={() => title.trim() && createBlog.mutate({ title: title.trim(), notes: notes.trim() || undefined })}
+              disabled={createBlog.isPending || !title.trim()}
+            >
+              {createBlog.isPending ? "Creating…" : "Create"}
+            </button>
+            {createBlog.isError && (
+              <span style={{ color: palette.warnAmber, fontSize: "0.82rem", marginLeft: "0.5rem" }}>
+                {String((createBlog.error as Error).message ?? createBlog.error)}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
 
       <Hairline />
 
@@ -111,7 +176,7 @@ export const BlogsView = () => {
           return (
             <div
               key={blog.blog_id}
-              onClick={() => nav("blog-editor", { blogId: blog.blog_id })}
+              onClick={() => navigate("blog-editor", { blogId: blog.blog_id })}
               style={{
                 padding: "0.6rem 0.85rem",
                 margin: "0.4rem 0",

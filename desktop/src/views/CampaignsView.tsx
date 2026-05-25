@@ -5,13 +5,14 @@
  * Each campaign: name, hypothesis, success criteria, items with StatusChip, progress bar.
  * No useEffect — useQuery only.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
 import { ProgressBar } from "../components";
 import { StatusChip } from "../components/badges";
 import { apiFetch } from "../lib/api";
-import { palette } from "../theme/tokens";
+import { palette, fonts } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,10 +70,43 @@ const ITEM_STATUS_TONE: Record<string, "neutral" | "active" | "done" | "warn"> =
 // View
 // ---------------------------------------------------------------------------
 export const CampaignsView = () => {
+  const queryClient = useQueryClient();
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState("");
+  const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
+  const [endDate, setEndDate] = useState("");
+  const [metric, setMetric] = useState("");
+  const [target, setTarget] = useState("");
+  const [hypothesis, setHypothesis] = useState("");
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["campaigns"],
     queryFn: () => apiFetch<CampaignsData>("/views/campaigns"),
     retry: 1,
+  });
+
+  const createCampaign = useMutation({
+    mutationFn: (payload: Record<string, unknown>) =>
+      apiFetch<{ campaign_id: number }>("/campaigns", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      setName("");
+      setStartDate(new Date().toISOString().slice(0, 10));
+      setEndDate("");
+      setMetric("");
+      setTarget("");
+      setHypothesis("");
+      setShowForm(false);
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+  });
+
+  const activateCampaign = useMutation({
+    mutationFn: (campaignId: number) =>
+      apiFetch(`/campaigns/${campaignId}/activate`, { method: "PUT" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["campaigns"] }),
   });
 
   if (isLoading) return <p className="dim">Reading the local service...</p>;
@@ -103,6 +137,59 @@ export const CampaignsView = () => {
         {sectionOrder.map((s) => `${s}: ${summary[s] ?? 0}`).join("  ·  ")}
       </div>
 
+      <div style={{ margin: "0.6rem 0 1rem" }}>
+        <button
+          onClick={() => setShowForm((p) => !p)}
+          style={{
+            padding: "0.4rem 1rem",
+            background: palette.phosphor,
+            color: palette.ink,
+            border: "none",
+            borderRadius: "2px",
+            fontFamily: fonts.body,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          {showForm ? "Cancel" : "+ New Campaign"}
+        </button>
+        {showForm && (
+          <div style={{ marginTop: "0.5rem", padding: "0.6rem", background: palette.surface, borderRadius: "2px" }}>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Campaign name (required)" style={{ width: "100%", marginBottom: "0.4rem" }} />
+            <input value={hypothesis} onChange={(e) => setHypothesis(e.target.value)} placeholder="Hypothesis (optional)" style={{ width: "100%", marginBottom: "0.4rem" }} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.4rem", marginBottom: "0.4rem" }}>
+              <div><label className="kicker" style={{ fontSize: "0.72rem" }}>Start</label><input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ width: "100%" }} /></div>
+              <div><label className="kicker" style={{ fontSize: "0.72rem" }}>End</label><input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={{ width: "100%" }} /></div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "0.4rem", marginBottom: "0.4rem" }}>
+              <input value={metric} onChange={(e) => setMetric(e.target.value)} placeholder="Success metric (e.g. replies_per_post)" />
+              <input type="number" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="Target" />
+            </div>
+            <button
+              className="primary"
+              onClick={() => {
+                if (!name.trim() || !startDate || !endDate || !metric.trim() || !target) return;
+                createCampaign.mutate({
+                  name: name.trim(),
+                  hypothesis: hypothesis.trim() || null,
+                  start_date: startDate,
+                  end_date: endDate,
+                  success_criteria: { distribution: [{ metric: metric.trim(), target: Number(target) }] },
+                });
+              }}
+              disabled={createCampaign.isPending || !name.trim() || !startDate || !endDate}
+            >
+              {createCampaign.isPending ? "Creating…" : "Create"}
+            </button>
+            {createCampaign.isError && (
+              <span style={{ color: palette.warnAmber, fontSize: "0.82rem", marginLeft: "0.5rem" }}>
+                {String((createCampaign.error as Error).message ?? createCampaign.error)}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
       <Hairline />
 
       {/* Status sections */}
@@ -117,7 +204,28 @@ export const CampaignsView = () => {
               <p className="faint">No {status} campaigns.</p>
             ) : (
               campaigns.map((camp) => (
-                <CampaignCard key={camp.id} campaign={camp} />
+                <div key={camp.id}>
+                  <CampaignCard campaign={camp} />
+                  {(camp.status === "planned" || camp.status === "draft") && (
+                    <button
+                      onClick={() => activateCampaign.mutate(camp.id)}
+                      disabled={activateCampaign.isPending}
+                      style={{
+                        marginBottom: "0.5rem",
+                        padding: "0.3rem 0.8rem",
+                        background: palette.phosphorDim,
+                        color: palette.bone,
+                        border: "none",
+                        borderRadius: "2px",
+                        fontFamily: fonts.body,
+                        fontSize: "0.82rem",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Activate campaign
+                    </button>
+                  )}
+                </div>
               ))
             )}
           </div>
