@@ -26,6 +26,11 @@ from pydantic import BaseModel
 from app.agent import _internal_tools, confirmation, invariants
 from app.agent.client import AgentClient, start_conversation
 from app.agent.content_types import get_content_type_gaps, get_recommendation_window_days
+from app.agent.velocity import (
+    get_noise_floor,
+    get_velocity_projection,
+)
+from app.components.charts.follower_trend import FollowerPoint, follower_trend_chart
 from app.db import apply_migrations, connect
 from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
@@ -257,6 +262,113 @@ def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _progress_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Progress view (§14.3) needs."""
+    # 1. Milestones.
+    dist = conn.execute(
+        "SELECT * FROM milestones WHERE category = 'distribution' ORDER BY ladder_position ASC"
+    ).fetchall()
+    val = conn.execute(
+        "SELECT * FROM milestones WHERE category = 'validation' ORDER BY ladder_position ASC"
+    ).fetchall()
+
+    # 2. Current followers.
+    latest = conn.execute(
+        "SELECT followers_count FROM v_account_daily ORDER BY snapshot_date DESC LIMIT 1"
+    ).fetchone()
+    current_followers = int(latest["followers_count"]) if latest else None
+
+    # Compute milestone progress for distribution milestones (server-side §31.10).
+    dist_out = []
+    for m in dist:
+        md = dict(m)
+        target = m["target_value"]
+        start = m["start_value"] or 0
+        if m["status"] == "achieved":
+            md["progress"] = 1.0
+            md["progress_label"] = "achieved"
+        elif target and current_followers is not None and target > start:
+            p = max(0.0, min(1.0, (current_followers - start) / max(1, target - start)))
+            md["progress"] = p
+            md["progress_label"] = f"{p * 100:.1f}%"
+        else:
+            md["progress"] = 0.0
+            md["progress_label"] = "not yet"
+        dist_out.append(md)
+
+    val_out = []
+    for m in val:
+        md = dict(m)
+        md["progress"] = 1.0 if m["status"] == "achieved" else 0.0
+        md["progress_label"] = "achieved" if m["status"] == "achieved" else "not yet"
+        val_out.append(md)
+
+    # 3. Velocity projection.
+    proj = get_velocity_projection(conn)
+    noise_floor = get_noise_floor(conn)
+
+    # 4. Weekly post/reply counts (last 8 ISO weeks).
+    today = _date_t.today()
+    monday = today - __import__("datetime").timedelta(days=today.weekday())
+    earliest = (monday - __import__("datetime").timedelta(weeks=7)).isoformat()
+    latest_date = (monday + __import__("datetime").timedelta(days=6)).isoformat()
+    week_rows = conn.execute(
+        """
+        SELECT
+            DATE(created_date,
+                 '-' || ((CAST(strftime('%w', created_date) AS INTEGER) + 6) % 7)
+                 || ' days') AS week_start,
+            SUM(CASE WHEN type IN ('standalone','thread_root','thread_child','quote')
+                      THEN 1 ELSE 0 END) AS posts,
+            SUM(CASE WHEN type = 'reply' THEN 1 ELSE 0 END) AS replies
+        FROM posts
+        WHERE created_date BETWEEN ? AND ?
+        GROUP BY week_start ORDER BY week_start ASC
+        """,
+        (earliest, latest_date),
+    ).fetchall()
+    by_week = {r["week_start"]: (int(r["posts"] or 0), int(r["replies"] or 0)) for r in week_rows}
+    weekly: list[dict[str, Any]] = []
+    for w in range(7, -1, -1):
+        ws = (monday - __import__("datetime").timedelta(weeks=w)).isoformat()
+        posts, replies = by_week.get(ws, (0, 0))
+        weekly.append({"week_start": ws, "posts": posts, "replies": replies})
+
+    # 5. Settings.
+    post_target = int(get_setting(conn, "daily_post_target", 1) or 1)
+    reply_target = int(get_setting(conn, "daily_reply_target", 12) or 12)
+    session_target = int(get_setting(conn, "daily_reply_session_target", 1) or 1)
+    operational_ceiling = int(get_setting(conn, "operational_ceiling", 5000) or 5000)
+    long_arc = int(get_setting(conn, "long_arc_reminder", 500000) or 500000)
+
+    return {
+        "slice": "progress",
+        "current_followers": current_followers,
+        "distribution_milestones": dist_out,
+        "validation_milestones": val_out,
+        "velocity_projection": proj.to_dict() if proj else None,
+        "noise_floor": noise_floor,
+        "weekly_counts": weekly,
+        "targets": {
+            "post_target": post_target,
+            "reply_target": reply_target,
+            "session_target": session_target,
+        },
+        "operational_ceiling": operational_ceiling,
+        "long_arc_reminder": long_arc,
+    }
+
+
+def _follower_trend_figure(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Build the follower-trend Plotly figure and return it as a JSON-safe dict."""
+    rows = conn.execute(
+        "SELECT snapshot_date, followers_count FROM v_account_daily ORDER BY snapshot_date ASC"
+    ).fetchall()
+    points = [FollowerPoint(r["snapshot_date"], int(r["followers_count"])) for r in rows]
+    fig = follower_trend_chart(points)
+    return json.loads(fig.to_json())
+
+
 def create_app(
     *,
     token: str,
@@ -339,6 +451,24 @@ def create_app(
             "SELECT * FROM v_funnel_daily ORDER BY event_date DESC LIMIT 7"
         ).fetchall()
         return {"slice": "validation_status", "funnel_last_7": [dict(r) for r in rows]}
+
+    @app.get("/views/progress", dependencies=[Depends(auth)])
+    def view_progress(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.3 Progress slice — mirrors the Streamlit page's primary reads.
+
+        Returns every data piece the Progress view needs so the frontend renders
+        without any business logic (§31.10). See ``_progress_slice`` for details.
+        """
+        return _progress_slice(conn)
+
+    @app.get("/charts/follower-trend", dependencies=[Depends(auth)])
+    def view_follower_trend(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.4 Follower trend — mirrors the Streamlit page's primary reads.
+
+        Returns every data piece the Follower trend view needs so the frontend renders
+        without any business logic (§31.10). See ``_follower_trend_figure`` for details.
+        """
+        return _follower_trend_figure(conn)
 
     # ----- Manual entry write endpoints (§15) -----
     # Wrap the pure forms submit functions. Validation + FormError semantics

@@ -12,6 +12,7 @@ import { api } from "../lib/api";
 import { Callout, Hairline, Kicker } from "../components";
 import { ConfidenceBadge, type ConfidenceTier } from "../components/badges";
 import { TodayView } from "./TodayView";
+import { ProgressView } from "./ProgressView";
 
 export interface ViewDef {
   id: string;
@@ -189,7 +190,7 @@ function scaffold(kicker: string, title: string, blurb: string): FC {
 export const VIEWS: ViewDef[] = [
   { id: "today", label: "Today", group: "Analytics", Component: TodayView },
   { id: "next-rep", label: "Next Rep", group: "Analytics", Component: NextRepView },
-  { id: "progress", label: "Progress", group: "Analytics", Component: scaffold("§14.3", "Progress", "Distribution + validation ladders, velocity projection.") },
+  { id: "progress", label: "Progress", group: "Analytics", Component: ProgressView },
   { id: "content-performance", label: "Content Performance", group: "Analytics", Component: scaffold("§14.4", "Content Performance", "Lane scatter, content-type tab, pre-publish calibration.") },
   { id: "funnel", label: "Funnel", group: "Analytics", Component: FunnelView },
   { id: "weekly-review", label: "Weekly Review", group: "Analytics", Component: scaffold("§14.6", "Weekly Review", "The same questions every week + Markdown export.") },
