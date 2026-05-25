@@ -41,6 +41,10 @@ from app.components.charts.lane_grid import confidence_color_for_ui_label, count
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.agent.reply_targets import engagement_footnote as _engagement_footnote
 from app.agent.tools import _load_engagement_surface_settings
+from app.agent import blogs as _blogs
+from app.agent import calendar as _calendar
+from app.agent import campaigns as _campaigns
+from app.agent import inspiration as _inspiration
 from app.db import apply_migrations, connect
 from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
@@ -174,6 +178,325 @@ def _weekly_review_slice(conn: sqlite3.Connection) -> dict[str, Any]:
         "existing_review": existing_review,
         "counterfactual_required": counterfactual_required,
         "past_reviews": past_reviews,
+    }
+
+
+def _reply_queue_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Reply Target Queue view (§29.7) needs."""
+    eng_settings = _load_engagement_surface_settings(conn)
+
+    # Counters.
+    ctr_row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END) AS candidates,
+            SUM(CASE WHEN status = 'drafted' THEN 1 ELSE 0 END) AS drafted,
+            SUM(CASE WHEN status = 'posted'
+                      AND DATE(last_checked_at_utc) = DATE('now') THEN 1 ELSE 0 END) AS posted_today,
+            SUM(CASE WHEN status = 'skipped'
+                      AND DATE(last_checked_at_utc) = DATE('now') THEN 1 ELSE 0 END) AS skipped_today
+        FROM reply_targets
+        """
+    ).fetchone()
+    counters = {
+        "candidates": int(ctr_row["candidates"] or 0),
+        "drafted": int(ctr_row["drafted"] or 0),
+        "posted_today": int(ctr_row["posted_today"] or 0),
+        "skipped_today": int(ctr_row["skipped_today"] or 0),
+    }
+
+    # Candidate rows (default: status='candidate', sorted by action score).
+    rows = conn.execute(
+        """SELECT id, target_post_url, target_text, target_author_handle,
+                  target_author_follower_count, like_count, reply_count,
+                  repost_count, relevance_score, engagement_surface_score,
+                  saturation_score, reply_opportunity_score,
+                  recommended_action_label, recommended_action_score,
+                  score_rationale, pillar, reply_intent, status,
+                  discovered_at_utc, discovered_via
+           FROM reply_targets
+           WHERE status = 'candidate'
+           ORDER BY COALESCE(recommended_action_score, -1) DESC,
+                    last_checked_at_utc DESC
+           LIMIT 50"""
+    ).fetchall()
+
+    items = []
+    for r in rows:
+        handle = (r["target_author_handle"] or "unknown").lstrip("@")
+        text = (r["target_text"] or "").strip().replace("\n", " ")
+        if len(text) > 220:
+            text = text[:219] + "…"
+        items.append({
+            "id": int(r["id"]),
+            "handle": handle,
+            "text_excerpt": text or None,
+            "target_post_url": r["target_post_url"],
+            "like_count": int(r["like_count"] or 0),
+            "reply_count": int(r["reply_count"] or 0),
+            "repost_count": int(r["repost_count"] or 0),
+            "relevance_score": r["relevance_score"],
+            "engagement_surface_score": r["engagement_surface_score"],
+            "saturation_score": r["saturation_score"],
+            "reply_opportunity_score": r["reply_opportunity_score"],
+            "recommended_action_label": r["recommended_action_label"],
+            "score_rationale": r["score_rationale"],
+            "pillar": r["pillar"],
+            "reply_intent": r["reply_intent"],
+            "discovered_via": r["discovered_via"],
+            "engagement_footnote": _engagement_footnote(
+                r["target_author_follower_count"], eng_settings
+            ),
+        })
+
+    return {
+        "slice": "reply_queue",
+        "counters": counters,
+        "items": items,
+    }
+
+
+def _content_calendar_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Content Calendar view (§14.11) needs."""
+    from datetime import timedelta
+
+    today = _date_t.today()
+    # Two weeks back + two weeks forward.
+    window_start = today - timedelta(days=14)
+    window_end = today + timedelta(days=14)
+
+    cells = _calendar.get_calendar_window(
+        conn,
+        start_date=window_start,
+        end_date=window_end,
+    )
+
+    # Group cells by date.
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for cell in cells:
+        entry = {
+            "provenance": cell.provenance,
+            "source_id": cell.source_id,
+            "slot": cell.slot,
+            "pillar": cell.pillar,
+            "content_type": cell.content_type,
+            "title": cell.title,
+            "campaign_id": cell.campaign_id,
+        }
+        by_date.setdefault(cell.date, []).append(entry)
+
+    # Active campaigns in this window.
+    active_campaigns = _calendar.get_active_campaigns_in_window(
+        conn, start_date=window_start, end_date=window_end
+    )
+
+    return {
+        "slice": "content_calendar",
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "by_date": by_date,
+        "active_campaigns": active_campaigns,
+    }
+
+
+def _campaigns_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Campaigns view (§14.12) needs."""
+    all_campaigns = _campaigns.list_campaigns(conn)
+
+    by_status: dict[str, list[dict[str, Any]]] = {
+        s: [] for s in ("active", "planning", "completed", "abandoned")
+    }
+    for camp in all_campaigns:
+        items = _campaigns.list_items(conn, campaign_id=camp.id)
+        progress_row = conn.execute(
+            """SELECT items_total, items_shipped, percent_shipped, days_until_end
+               FROM v_campaign_progress WHERE campaign_id = ?""",
+            (camp.id,),
+        ).fetchone()
+        pct = (
+            progress_row["percent_shipped"]
+            if progress_row and progress_row["percent_shipped"] is not None
+            else None
+        )
+        items_shipped = int(progress_row["items_shipped"] or 0) if progress_row else 0
+        items_total = int(progress_row["items_total"] or 0) if progress_row else 0
+        days_until_end = (
+            int(progress_row["days_until_end"])
+            if progress_row and progress_row["days_until_end"] is not None
+            else None
+        )
+
+        success_lines = []
+        for stream in ("distribution", "validation"):
+            for entry in camp.success_criteria.get(stream, []):
+                actual = entry.get("actual")
+                target = entry.get("target")
+                metric = entry.get("metric")
+                success_lines.append({
+                    "stream": stream,
+                    "metric": metric,
+                    "target": target,
+                    "actual": actual,
+                })
+
+        item_list = []
+        for it in items:
+            item_list.append({
+                "id": it.id,
+                "item_type": it.item_type,
+                "status": it.status,
+                "planned_for_date": it.planned_for_date,
+                "planned_text": (it.planned_text or "")[:200] or None,
+            })
+
+        camp_dict = {
+            "id": camp.id,
+            "name": camp.name,
+            "theme": camp.theme,
+            "hypothesis": camp.hypothesis,
+            "start_date": camp.start_date,
+            "end_date": camp.end_date,
+            "status": camp.status,
+            "pillar": camp.pillar,
+            "content_type": camp.content_type,
+            "items_shipped": items_shipped,
+            "items_total": items_total,
+            "percent_shipped": pct,
+            "days_until_end": days_until_end,
+            "success_criteria": success_lines,
+            "items": item_list,
+            "lesson": camp.lesson,
+            "counterfactual_note": camp.counterfactual_note,
+            "abandon_reason": camp.abandon_reason,
+        }
+        by_status[camp.status].append(camp_dict)
+
+    return {
+        "slice": "campaigns",
+        "by_status": by_status,
+        "summary": {s: len(v) for s, v in by_status.items()},
+    }
+
+
+def _inspiration_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Inspiration Library view (§14.13) needs."""
+    items = _inspiration.list_inspirations(conn, status="active")
+
+    # For each item, also grab its transforms.
+    for item in items:
+        transforms = _inspiration.list_transforms(
+            conn, saved_inspiration_id=item["id"]
+        )
+        item["transforms"] = transforms
+
+    return {
+        "slice": "inspiration",
+        "items": items,
+    }
+
+
+def _blogs_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Blogs view (§14.14) needs."""
+    rows = _blogs.list_blogs(conn)
+    return {
+        "slice": "blogs",
+        "blogs": rows,
+    }
+
+
+def _blog_detail_slice(conn: sqlite3.Connection, blog_id: int) -> dict[str, Any]:
+    """Gather every data slice the Blog Editor view (§14.15) needs."""
+    blog = _blogs.get_blog(conn, blog_id)
+    versions = _blogs.list_versions(conn, blog_id=blog_id)
+    return {
+        "slice": "blog_detail",
+        "blog": {
+            "id": blog.id,
+            "slug": blog.slug,
+            "title": blog.title,
+            "status": blog.status,
+            "pillar": blog.pillar,
+            "audience": blog.audience,
+            "current_body_markdown": blog.current_body_markdown,
+            "outline_markdown": blog.outline_markdown,
+            "actual_length_words": blog.actual_length_words,
+            "target_length_words": blog.target_length_words,
+            "agent_assisted": blog.agent_assisted,
+            "created_at_utc": blog.created_at_utc,
+            "updated_at_utc": blog.updated_at_utc,
+        },
+        "versions": [
+            {
+                "id": v.id,
+                "version_number": v.version_number,
+                "title_at_version": v.title_at_version,
+                "status_at_version": v.status_at_version,
+                "created_by": v.created_by,
+                "confidence_label_at_version": v.confidence_label_at_version,
+                "created_at_utc": v.created_at_utc,
+            }
+            for v in versions
+        ],
+    }
+
+
+def _brain_dump_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather data for the Brain Dump view (§14.9)."""
+    # Recent brain-dump conversations.
+    rows = conn.execute(
+        """SELECT id, title, context_seed, created_at
+           FROM agent_conversations
+           WHERE context_seed = 'brain_dump' OR title LIKE '%brain%dump%'
+           ORDER BY id DESC LIMIT 20"""
+    ).fetchall()
+    conversations = [dict(r) for r in rows]
+
+    # Recent agent drafts marked as brain_dump.
+    drafts = conn.execute(
+        """SELECT ad.id, ad.text, ad.draft_kind, ad.pillar,
+                  ad.similarity_warning_json, ps.composite_label, ad.status
+           FROM agent_drafts ad
+           LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
+           WHERE ad.draft_kind = 'brain_dump'
+           ORDER BY ad.id DESC LIMIT 10"""
+    ).fetchall()
+    draft_list = []
+    for d in drafts:
+        preview = (d["text"] or "").strip()
+        draft_list.append({
+            "id": d["id"],
+            "text": preview,
+            "pillar": d["pillar"],
+            "composite_label": d["composite_label"],
+            "status": d["status"],
+            "similarity_warning_json": d["similarity_warning_json"],
+        })
+
+    return {
+        "slice": "brain_dump",
+        "conversations": conversations,
+        "drafts": draft_list,
+    }
+
+
+def _account_researcher_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather data for the Account Researcher view (§28.24)."""
+    has_ata = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_target_accounts'"
+    ).fetchone()
+    accounts = []
+    if has_ata:
+        rows = conn.execute(
+            """SELECT x_handle, display_name, lane, priority, notes,
+                      is_active, last_engaged_at, created_at_utc
+               FROM agent_target_accounts
+               ORDER BY created_at_utc DESC LIMIT 30"""
+        ).fetchall()
+        accounts = [dict(r) for r in rows]
+
+    return {
+        "slice": "account_researcher",
+        "accounts": accounts,
     }
 
 
@@ -1032,6 +1355,46 @@ def create_app(
     def view_weekly_review(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         """§14.6 Weekly Review — summary metrics, existing review, history."""
         return _weekly_review_slice(conn)
+
+    @app.get("/views/reply-queue", dependencies=[Depends(auth)])
+    def view_reply_queue(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§29.7 Reply Target Queue — scored candidates with R/E/S/O cluster."""
+        return _reply_queue_slice(conn)
+
+    @app.get("/views/content-calendar", dependencies=[Depends(auth)])
+    def view_content_calendar(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.11 Content Calendar — posted + drafted + planned in a date grid."""
+        return _content_calendar_slice(conn)
+
+    @app.get("/views/campaigns", dependencies=[Depends(auth)])
+    def view_campaigns(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.12 Campaigns — dual-stream success criteria, item state machine."""
+        return _campaigns_slice(conn)
+
+    @app.get("/views/inspiration", dependencies=[Depends(auth)])
+    def view_inspiration(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.13 Inspiration Library — saved posts + transforms."""
+        return _inspiration_slice(conn)
+
+    @app.get("/views/blogs", dependencies=[Depends(auth)])
+    def view_blogs(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.14 Blogs index — pipeline state, version info."""
+        return _blogs_slice(conn)
+
+    @app.get("/views/blog/{blog_id}", dependencies=[Depends(auth)])
+    def view_blog_detail(blog_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.15 Blog Editor — body, outline, versions."""
+        return _blog_detail_slice(conn, blog_id)
+
+    @app.get("/views/brain-dump", dependencies=[Depends(auth)])
+    def view_brain_dump(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.9 Brain Dump — recent conversations + drafts."""
+        return _brain_dump_slice(conn)
+
+    @app.get("/views/account-researcher", dependencies=[Depends(auth)])
+    def view_account_researcher(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§28.24 Account Researcher — analyzed target accounts."""
+        return _account_researcher_slice(conn)
 
     @app.post("/forms/weekly-review", dependencies=[Depends(auth)])
     def post_weekly_review(
