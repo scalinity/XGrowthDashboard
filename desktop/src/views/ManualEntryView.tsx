@@ -108,7 +108,7 @@ function SnapshotTab() {
 function PostReplyTab() {
   const queryClient = useQueryClient();
   const [text, setText] = useState("");
-  const [postType, setPostType] = useState("standalone");
+  const [postType, setPostType] = useState("post");
 
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
@@ -139,10 +139,8 @@ function PostReplyTab() {
       <div style={{ marginBottom: "0.5rem" }}>
         <label className="kicker" style={{ display: "block", marginBottom: "0.2rem" }}>Type</label>
         <select value={postType} onChange={(e) => setPostType(e.target.value)}>
-          <option value="standalone">standalone</option>
+          <option value="post">standalone</option>
           <option value="reply">reply</option>
-          <option value="thread_root">thread_root</option>
-          <option value="thread_child">thread_child</option>
           <option value="quote">quote</option>
         </select>
       </div>
