@@ -16,6 +16,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import date as _date_t
+from datetime import timedelta as _timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -61,12 +62,12 @@ def _weekly_review_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     existing review row, counterfactual_required setting, and past review
     history — all computed server-side (§31.10).
     """
-    from datetime import timedelta
+
 
     today = _date_t.today()
     # Monday-anchored week.
-    week_start = today - timedelta(days=today.weekday())
-    week_end = week_start + timedelta(days=6)
+    week_start = today - _timedelta(days=today.weekday())
+    week_end = week_start + _timedelta(days=6)
 
     # 1. Summary metrics (same SQL as _summary_for_week in 6_Weekly_Review.py).
     ws_iso = week_start.isoformat()
@@ -258,12 +259,12 @@ def _reply_queue_slice(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def _content_calendar_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     """Gather every data slice the Content Calendar view (§14.11) needs."""
-    from datetime import timedelta
+
 
     today = _date_t.today()
     # Two weeks back + two weeks forward.
-    window_start = today - timedelta(days=14)
-    window_end = today + timedelta(days=14)
+    window_start = today - _timedelta(days=14)
+    window_end = today + _timedelta(days=14)
 
     cells = _calendar.get_calendar_window(
         conn,
@@ -549,15 +550,16 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 def _default_conn_factory() -> sqlite3.Connection:
-    """Open the resolved DB (§31.5) and ensure migrations are applied.
+    """Open a connection to the resolved DB (§31.5).
 
     Resolves the path fresh on each call so a runtime migration to Application
     Support (performed by the sidecar before it serves) is picked up — the
     import-time ``DEFAULT_DB_PATH`` constant would be stale across that move.
+
+    RV5-W3: migrations are now applied once at startup (in create_app), not
+    per-request — avoids ~2-5ms overhead per call and concurrent-migration races.
     """
-    conn = connect(resolve_db_path())
-    apply_migrations(conn)
-    return conn
+    return connect(resolve_db_path())
 
 
 def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -772,9 +774,9 @@ def _progress_slice(conn: sqlite3.Connection) -> dict[str, Any]:
 
     # 4. Weekly post/reply counts (last 8 ISO weeks).
     today = _date_t.today()
-    monday = today - __import__("datetime").timedelta(days=today.weekday())
-    earliest = (monday - __import__("datetime").timedelta(weeks=7)).isoformat()
-    latest_date = (monday + __import__("datetime").timedelta(days=6)).isoformat()
+    monday = today - _timedelta(days=today.weekday())
+    earliest = (monday - _timedelta(weeks=7)).isoformat()
+    latest_date = (monday + _timedelta(days=6)).isoformat()
     week_rows = conn.execute(
         """
         SELECT
@@ -793,7 +795,7 @@ def _progress_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     by_week = {r["week_start"]: (int(r["posts"] or 0), int(r["replies"] or 0)) for r in week_rows}
     weekly: list[dict[str, Any]] = []
     for w in range(7, -1, -1):
-        ws = (monday - __import__("datetime").timedelta(weeks=w)).isoformat()
+        ws = (monday - _timedelta(weeks=w)).isoformat()
         posts, replies = by_week.get(ws, (0, 0))
         weekly.append({"week_start": ws, "posts": posts, "replies": replies})
 
@@ -932,10 +934,10 @@ def _content_performance_slice(conn: sqlite3.Connection) -> dict[str, Any]:
 def _lane_scatter_figure(conn: sqlite3.Connection) -> dict[str, Any]:
     """Build the lane-scatter Plotly figure (§14.4) and return JSON-safe dict."""
     import plotly.graph_objects as go
-    from datetime import timedelta
+
     from app.components.theme import LANE_SCATTER_COLORS, PALETTE
 
-    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+    cutoff = (_date_t.today() - _timedelta(days=30)).isoformat()
     rows = conn.execute(
         """SELECT plm.post_id, p.created_date, plm.impressions,
                   plm.pillar, plm.audience, plm.cta, plm.engagement_rate
@@ -996,9 +998,9 @@ def _follower_trend_figure(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def _funnel_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     """Gather every data slice the Funnel view (§14.5) needs."""
-    from datetime import timedelta
 
-    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+
+    cutoff = (_date_t.today() - _timedelta(days=30)).isoformat()
     agg_row = conn.execute(
         """SELECT COALESCE(SUM(x_impressions_estimate),0) AS x_impressions_estimate,
                   COALESCE(SUM(profile_visits),0) AS profile_visits,
@@ -1031,8 +1033,8 @@ def _funnel_slice(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def _funnel_chart_figure(conn: sqlite3.Connection) -> dict[str, Any]:
     """Build the funnel Plotly figure and return as JSON-safe dict."""
-    from datetime import timedelta
-    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+
+    cutoff = (_date_t.today() - _timedelta(days=30)).isoformat()
     row = conn.execute(
         """SELECT COALESCE(SUM(x_impressions_estimate),0) AS x_impressions_estimate,
                   COALESCE(SUM(profile_visits),0) AS profile_visits,
@@ -1056,10 +1058,10 @@ def _funnel_chart_figure(conn: sqlite3.Connection) -> dict[str, Any]:
 def _funnel_daily_chart_figure(conn: sqlite3.Connection) -> dict[str, Any]:
     """Build the daily-breakdown stacked bar figure."""
     import plotly.graph_objects as go
-    from datetime import timedelta
+
     from app.components.theme import PALETTE as _P
 
-    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+    cutoff = (_date_t.today() - _timedelta(days=30)).isoformat()
     rows = conn.execute(
         """SELECT event_date, profile_visits, link_clicks, getstir_visits, downloads
            FROM v_funnel_daily WHERE event_date >= ? ORDER BY event_date ASC""",
@@ -1104,10 +1106,10 @@ def _funnel_daily_chart_figure(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def _next_rep_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     """Gather every data slice the Next Rep view (§14.2) needs."""
-    from datetime import timedelta
+
 
     # 1. Lane coverage this week (7-day window).
-    cutoff = (_date_t.today() - timedelta(days=7)).isoformat()
+    cutoff = (_date_t.today() - _timedelta(days=7)).isoformat()
     cov_rows = conn.execute(
         """SELECT plm.pillar, plm.audience, plm.cta, COUNT(*) AS n
            FROM v_post_latest_metrics plm JOIN posts p ON p.id = plm.post_id
@@ -1265,6 +1267,14 @@ def create_app(
     """
     factory = conn_factory or _default_conn_factory
     agent_factory = agent_client_factory or (lambda: AgentClient())
+
+    # RV5-W3: apply migrations once at startup instead of per-request.
+    boot_conn = factory()
+    try:
+        apply_migrations(boot_conn)
+    finally:
+        boot_conn.close()
+
     if run_invariants:
         invariants.run_all()
 
@@ -1453,6 +1463,12 @@ def create_app(
     def update_setting(
         key: str, body: SettingValue, conn: sqlite3.Connection = Depends(get_conn)
     ) -> dict[str, Any]:
+        # RV5-W9: reject unknown keys so typos surface immediately instead of
+        # silently creating dead rows in the settings table.
+        known = conn.execute("SELECT key FROM settings").fetchall()
+        known_keys = {r["key"] for r in known}
+        if key not in known_keys:
+            raise HTTPException(status_code=400, detail=f"Unknown setting key: {key!r}")
         # set_setting handles the JSON encode + §28.30 audit-log write-through.
         set_setting(conn, key, body.value)
         return {"ok": True, "key": key, "value": body.value}
@@ -1477,7 +1493,7 @@ def create_app(
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict[str, Any]:
         rows = conn.execute(
-            "SELECT * FROM agent_conversations ORDER BY id DESC"
+            "SELECT * FROM agent_conversations ORDER BY id DESC LIMIT 100"
         ).fetchall()
         return {"conversations": [dict(r) for r in rows]}
 
@@ -1603,20 +1619,29 @@ def create_app(
         # Same sequence as the Streamlit modal's confirm handler: write the
         # (possibly edited) text, invalidate stale tokens, mint a fresh
         # single-use token, publish atomically, drop the raw token.
-        confirmation.update_post_text_for_publish(
-            conn, post_id=body.post_id, new_text=body.text, message_id=body.message_id
-        )
-        confirmation.invalidate_unconsumed_tokens_for_post(conn, post_id=body.post_id)
-        minted = confirmation.mint_confirmation_token(
-            conn, post_id=body.post_id, draft_text=body.text
-        )
-        result = _internal_tools.publish_post_to_x(
-            conn,
-            post_id=body.post_id,
-            confirmation_token=minted.raw_token,
-            message_id=body.message_id,
-        )
-        del minted  # the raw token is gone from this frame.
+        # RV5-W2: wrapped in try/except so failures return structured errors
+        # instead of raw 500s with Python tracebacks.
+        try:
+            confirmation.update_post_text_for_publish(
+                conn, post_id=body.post_id, new_text=body.text, message_id=body.message_id
+            )
+            confirmation.invalidate_unconsumed_tokens_for_post(conn, post_id=body.post_id)
+            minted = confirmation.mint_confirmation_token(
+                conn, post_id=body.post_id, draft_text=body.text
+            )
+            result = _internal_tools.publish_post_to_x(
+                conn,
+                post_id=body.post_id,
+                confirmation_token=minted.raw_token,
+                message_id=body.message_id,
+            )
+            del minted  # the raw token is gone from this frame.
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — surface safely
+            raise HTTPException(
+                status_code=502, detail=f"Publish failed: {type(exc).__name__}: {exc}"
+            ) from exc
         return {
             "success": result.success,
             "post_id": result.post_id,
