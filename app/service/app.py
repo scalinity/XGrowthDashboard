@@ -590,9 +590,11 @@ def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
         foll = int(snapshot["followers_count"])
         milestone_progress_pct = max(0.0, min(1.0, (foll - start) / max(1, end - start)))
 
-    # 3. Velocity gating (§13 rule 6).
+    # 3. Velocity gating (§13 rule 6). Uses get_noise_floor so the threshold
+    # is consistent with Progress view (RV5-C3 fix — was hardcoded at 10).
     delta_7d = snapshot["delta_7d"] if snapshot else None
-    velocity_measurable = delta_7d is not None and abs(delta_7d) >= 10
+    noise_floor = get_noise_floor(conn)
+    velocity_measurable = delta_7d is not None and abs(delta_7d) >= noise_floor
     velocity_7d = snapshot["velocity_7d_per_day"] if snapshot else None
 
     # 4. Content-type recommendation (§28.17).
