@@ -33,11 +33,17 @@ PORT_PREFIX = "XGROWTH_PORT="
 TOKEN_PREFIX = "XGROWTH_TOKEN="  # noqa: S105 - this is a prefix label, not a secret
 
 
-def _pick_free_loopback_port() -> int:
-    """Bind :0 on loopback to let the OS choose a free port, then release it."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _bind_free_loopback_socket() -> socket.socket:
+    """Bind :0 on loopback and return the socket (kept open to avoid TOCTOU).
+
+    RV5-C6 fix: the prior version released the socket before uvicorn bound it,
+    creating a race window where another process could claim the port. Now the
+    caller passes the bound socket directly to uvicorn so it's never released.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    return sock
 
 
 def main() -> int:
@@ -59,14 +65,32 @@ def main() -> int:
     migrate_legacy_db_if_needed()
 
     token = generate_launch_token()
-    port = _pick_free_loopback_port()
+    sock = _bind_free_loopback_socket()
+    port = int(sock.getsockname()[1])
 
     # Handshake — the shell parses these two stdout lines before connecting.
     print(f"{PORT_PREFIX}{port}", flush=True)
     print(f"{TOKEN_PREFIX}{token}", flush=True)
 
-    app = create_app(token=token)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    # RV5-C7 fix: wrap create_app so an invariant failure (AssertionError)
+    # surfaces a clear message instead of silently dying (no handshake → the
+    # Tauri shell times out with a "stuck loading" state).
+    try:
+        app = create_app(token=token)
+    except Exception as exc:  # noqa: BLE001 — must never crash silently
+        print(
+            f"[sidecar] FATAL: create_app failed: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sock.close()
+        return 1
+
+    # RV5-C6 fix: pass the already-bound socket via `fd` so uvicorn never
+    # re-binds — eliminates the TOCTOU race where another process claims the
+    # port between our bind and uvicorn's.
+    sock.listen(128)
+    uvicorn.run(app, fd=sock.fileno(), log_level="warning")
     return 0
 
 
