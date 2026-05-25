@@ -10,7 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
 import { ConsoleLogRow } from "../components/cards";
-import { apiFetch } from "../lib/api";
+import { apiFetch, waitForSidecar, apiBaseUrl } from "../lib/api";
 import { palette, fonts } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
@@ -34,17 +34,6 @@ interface Message {
   confidence_label: string | null;
 }
 
-interface TurnResponse {
-  user_text: string;
-  assistant_text: string | null;
-  tool_calls: Array<Record<string, unknown>>;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cost_usd: number | null;
-  model: string | null;
-  error: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
@@ -52,6 +41,8 @@ export const AgentChatView = () => {
   const qc = useQueryClient();
   const [activeConvoId, setActiveConvoId] = useState<number | null>(null);
   const [inputText, setInputText] = useState("");
+  const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
 
   // List conversations.
   const { data: convos } = useQuery({
@@ -85,16 +76,62 @@ export const AgentChatView = () => {
     },
   });
 
-  // Send message mutation (sync endpoint).
+  // Send message via SSE stream — tokens arrive in real time.
   const sendMessage = useMutation({
-    mutationFn: (text: string) =>
-      apiFetch<TurnResponse>(
-        `/agent/conversations/${activeConvoId}/messages`,
-        { method: "POST", body: JSON.stringify({ text }) },
-      ),
+    mutationFn: async (text: string) => {
+      setStreamingText("");
+      setStreamError(null);
+      const info = await waitForSidecar();
+      const url = `${apiBaseUrl(info)}/agent/conversations/${activeConvoId}/stream`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${info.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let accumulated = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Parse SSE frames: "event: <type>\ndata: <json>\n\n"
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const eventMatch = frame.match(/^event:\s*(.+)$/m);
+          const dataMatch = frame.match(/^data:\s*(.+)$/m);
+          if (!eventMatch || !dataMatch) continue;
+          const eventType = eventMatch[1].trim();
+          const payload = JSON.parse(dataMatch[1]);
+          if (eventType === "text_delta") {
+            accumulated += payload.text;
+            setStreamingText(accumulated);
+          } else if (eventType === "error") {
+            setStreamError(payload.error);
+          } else if (eventType === "tool_call") {
+            // Show tool call inline during streaming.
+            accumulated += `\n[tool: ${payload.name}]\n`;
+            setStreamingText(accumulated);
+          }
+        }
+      }
+      return accumulated;
+    },
     onSuccess: () => {
       setInputText("");
+      setStreamingText(null);
       qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
+    },
+    onError: () => {
+      setStreamingText(null);
     },
   });
 
@@ -252,6 +289,25 @@ export const AgentChatView = () => {
                     No messages in this conversation yet.
                   </p>
                 )}
+                {/* Live streaming assistant response */}
+                {streamingText != null && (
+                  <div
+                    style={{
+                      padding: "0.5rem 0.7rem",
+                      margin: "0.3rem 0",
+                      background: palette.surface,
+                      borderLeft: `2px solid ${palette.phosphor}`,
+                      borderRadius: "2px",
+                    }}
+                  >
+                    <div className="kicker" style={{ color: palette.phosphor, marginBottom: "0.2rem" }}>
+                      ASSISTANT <span className="numeric" style={{ fontSize: "0.68rem", color: palette.boneFaint, marginLeft: "0.5rem" }}>streaming…</span>
+                    </div>
+                    <div style={{ color: palette.bone, fontSize: "0.92rem", lineHeight: 1.5, whiteSpace: "pre-wrap", wordWrap: "break-word" }}>
+                      {streamingText || "⏳"}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Input */}
@@ -305,14 +361,14 @@ export const AgentChatView = () => {
                   {sendMessage.isPending ? "..." : "Send"}
                 </button>
               </div>
+              {streamError && (
+                <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
+                  {streamError}
+                </p>
+              )}
               {sendMessage.error && (
                 <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
                   {String((sendMessage.error as Error).message ?? sendMessage.error)}
-                </p>
-              )}
-              {sendMessage.data?.error && (
-                <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
-                  {sendMessage.data.error}
                 </p>
               )}
             </>

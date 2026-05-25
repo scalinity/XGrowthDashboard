@@ -1896,42 +1896,102 @@ def create_app(
     ) -> StreamingResponse:
         """SSE surface for the Agent Chat view (§14.8, §31.3).
 
-        Emits lifecycle events: ``start`` → ``assistant`` (full text) → one
-        ``tool_call`` per dispatched tool → ``done`` (token/cost totals), or
-        ``error``. The agent client is synchronous today (client.py S11), so
-        this frames the completed turn rather than incremental tokens; true
-        token-by-token streaming is a follow-up that swaps _call_model for the
-        Anthropic streaming API. The frontend consumes the same event shape
-        either way.
-
-        Opens its own connection inside the generator (not via the request
-        dependency) so the connection outlives the handler return for the
-        duration of the stream.
+        Streams tokens in real time via the Anthropic streaming API. Events:
+        ``start`` → ``text_delta`` (per chunk) → ``done`` (totals), or
+        ``error``. Opens its own DB connection inside the generator so it
+        outlives the handler return.
         """
-        client = agent_factory()
 
         def event_gen() -> Iterator[str]:
             conn = factory()
             try:
                 yield _sse("start", {"conversation_id": conversation_id})
-                turn = client.send_message_sync(
-                    conn, conversation_id=conversation_id, user_text=body.text
+
+                api_key = os.environ.get("ANTHROPIC_API_KEY")
+                if not api_key:
+                    yield _sse("error", {"error": "Anthropic API key not configured. Set it in Settings → API keys."})
+                    return
+
+                import anthropic as _anthropic
+                from app.agent import prompt_builder
+                from app.agent import tools as _agent_tools
+
+                # Check coach mode.
+                ctx = conn.execute(
+                    "SELECT context_seed FROM agent_conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                is_coach = ctx and ctx["context_seed"] == "coach"
+
+                # Persist user message.
+                conn.execute(
+                    "INSERT INTO agent_messages (conversation_id, role, content) "
+                    "VALUES (?, 'user', ?)",
+                    (conversation_id, body.text),
                 )
-                if turn.error:
-                    yield _sse("error", {"error": turn.error})
-                else:
-                    yield _sse("assistant", {"text": turn.assistant_text})
-                    for tc in turn.tool_calls:
-                        yield _sse("tool_call", tc)
-                yield _sse(
-                    "done",
-                    {
-                        "input_tokens": turn.input_tokens,
-                        "output_tokens": turn.output_tokens,
-                        "cost_usd": turn.cost_usd,
-                        "error": turn.error,
-                    },
+                conn.commit()
+
+                # Load conversation history + system prompt.
+                rows = conn.execute(
+                    "SELECT role, content FROM agent_messages "
+                    "WHERE conversation_id = ? ORDER BY id",
+                    (conversation_id,),
+                ).fetchall()
+                messages = [{"role": r["role"], "content": r["content"]} for r in rows]
+                system_prompt = prompt_builder.build_system_prompt(conn)
+                model = "claude-sonnet-4-20250514"
+
+                api_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "max_tokens": 4096,
+                    "system": system_prompt,
+                    "messages": messages,
+                }
+                if not is_coach:
+                    api_kwargs["tools"] = [
+                        t.to_anthropic_spec() for t in _agent_tools.AGENT_TOOLS
+                    ]
+
+                client_api = _anthropic.Anthropic(api_key=api_key, timeout=120.0)
+
+                # Stream tokens.
+                full_text: list[str] = []
+                in_tok = 0
+                out_tok = 0
+                with client_api.messages.stream(**api_kwargs) as stream:
+                    for text in stream.text_stream:
+                        full_text.append(text)
+                        yield _sse("text_delta", {"text": text})
+                    final = stream.get_final_message()
+                    in_tok = final.usage.input_tokens
+                    out_tok = final.usage.output_tokens
+                    # Report tool calls (if any — agent mode).
+                    for block in final.content:
+                        if getattr(block, "type", None) == "tool_use":
+                            yield _sse("tool_call", {
+                                "name": block.name,
+                                "input": block.input,
+                            })
+
+                assistant_text = "".join(full_text)
+
+                # Persist assistant message.
+                conn.execute(
+                    "INSERT INTO agent_messages "
+                    "(conversation_id, role, content, model, input_tokens, output_tokens) "
+                    "VALUES (?, 'assistant', ?, ?, ?, ?)",
+                    (conversation_id, assistant_text, model, in_tok, out_tok),
                 )
+                conn.commit()
+
+                yield _sse("done", {
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "cost_usd": None,
+                    "error": None,
+                })
+            except Exception as exc:  # noqa: BLE001
+                yield _sse("error", {"error": f"{type(exc).__name__}: {exc}"})
             finally:
                 conn.close()
 
