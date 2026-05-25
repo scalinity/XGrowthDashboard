@@ -2132,8 +2132,8 @@
 
         <div class="score-bank" aria-label="Phase 11 counters (planned)">
           <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
-          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">1198</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-          <div class="tile"><p class="tile-kicker">Sub-phases shipped</p><div class="tile-number">05</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
+          <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">1199</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Views ported</p><div class="tile-number">09</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
           <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
         </div>
 
@@ -2190,8 +2190,8 @@
         <details class="subsection" id="phase-11-next" data-section-type="next">
           <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Execution order</span></summary>
           <div class="subsection-body">
-            <p><strong>Shipped:</strong> 11.0 FastAPI sidecar (reads/writes/settings/agent + SSE/publish), 11.1 Application-Support paths + Keychain, 11.2 design-system port (every <code>theme.py</code> component as React, fonts bundled), 11.3 Tauri v2 shell + sidecar lifecycle, 11.4 shell + 18-view nav (Today / Next Rep / Funnel / Settings wired to live data), and 11.12 packaging — the frozen sidecar runs and a self-contained <code>X&nbsp;Growth&nbsp;Dashboard.app</code> + DMG build (sidecar embedded in <code>Contents/Resources/bin/</code>).</p>
-            <p><strong>Remaining:</strong> flesh the 14 scaffolded views with full per-view layouts + their read endpoints (each behind the §31.7 screenshot-diff gate); the Agent Chat publish-confirmation modal UI + true token-level streaming (swap <code>_call_model</code> for the Anthropic streaming API); Developer-ID signing + notarization (optional — ad-hoc suffices for Daniel's machine).</p>
+            <p><strong>Shipped:</strong> 11.0 FastAPI sidecar; 11.1 path migration; 11.2 design-system port; 11.3 Tauri v2 shell; 11.12 packaging (.app + DMG); Step 0 dev fallback (browser screenshot-diff loop); and <strong>9 of 18 views fully ported:</strong> Today (§14.1), Progress (§14.3 — Plotly follower-trend chart + dual ladders + velocity), Content Performance (§14.4 — lane grid + Plotly scatter + calibration), Next Rep (§14.2 — lane scoreboard + ScoreBank + RecommendedActionBadge), Funnel (§14.5 — two Plotly charts + attribution gap), Weekly Review (§14.6 — summary + form + history), Manual Entry (§15 — tabbed hub with 3 wired forms), Settings (§14.7 — grouped panels with inline edit).</p>
+            <p><strong>Remaining:</strong> 9 views (Agent Chat, Reply Target Queue, Brain Dump, Coach, Account Researcher, Content Calendar, Campaigns, Inspiration Library, Blogs/Blog Editor) + true token-level SSE streaming + Developer-ID signing (optional).</p>
           </div>
         </details>
       </section>
