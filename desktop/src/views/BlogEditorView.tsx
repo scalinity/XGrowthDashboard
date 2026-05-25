@@ -58,6 +58,18 @@ interface StatusTransitionResponse {
   version_number: number;
 }
 
+interface AgentOutlineResponse {
+  outline: string;
+}
+
+interface AgentDraftResponse {
+  draft: string;
+}
+
+interface AgentSuggestEditsResponse {
+  suggestions: string;
+}
+
 // Ordered status pipeline per spec.
 const STATUS_PIPELINE = [
   "idea",
@@ -109,6 +121,7 @@ export const BlogEditorView = () => {
   const [editBody, setEditBody] = useState<string | null>(null);
   const [targetStatus, setTargetStatus] = useState<string>("");
   const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+  const [agentSuggestions, setAgentSuggestions] = useState<string | null>(null);
 
   // --- Mutations ---
   const saveMutation = useMutation({
@@ -147,6 +160,54 @@ export const BlogEditorView = () => {
     },
     onError: (err: Error) => {
       setFeedback({ type: "err", msg: err.message });
+    },
+  });
+
+  // --- Agent action mutations ---
+  const outlineMutation = useMutation({
+    mutationFn: async () =>
+      apiFetch<AgentOutlineResponse>(`/blogs/${firstBlogId}/outline`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    onSuccess: () => {
+      setFeedback({ type: "ok", msg: "Outline generated." });
+      qc.invalidateQueries({ queryKey: ["blog-detail", firstBlogId] });
+    },
+    onError: (err: Error) => {
+      setFeedback({ type: "err", msg: `Outline failed: ${err.message}` });
+    },
+  });
+
+  const draftMutation = useMutation({
+    mutationFn: async () =>
+      apiFetch<AgentDraftResponse>(`/blogs/${firstBlogId}/draft`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    onSuccess: () => {
+      setFeedback({ type: "ok", msg: "Draft generated." });
+      setEditTitle(null);
+      setEditBody(null);
+      qc.invalidateQueries({ queryKey: ["blog-detail", firstBlogId] });
+      qc.invalidateQueries({ queryKey: ["blog-versions", firstBlogId] });
+    },
+    onError: (err: Error) => {
+      setFeedback({ type: "err", msg: `Draft failed: ${err.message}` });
+    },
+  });
+
+  const suggestEditsMutation = useMutation({
+    mutationFn: async () =>
+      apiFetch<AgentSuggestEditsResponse>(`/blogs/${firstBlogId}/suggest-edits`, {
+        method: "POST",
+      }),
+    onSuccess: (res) => {
+      setFeedback({ type: "ok", msg: "Edit suggestions ready." });
+      setAgentSuggestions(res.suggestions);
+    },
+    onError: (err: Error) => {
+      setFeedback({ type: "err", msg: `Suggest edits failed: ${err.message}` });
     },
   });
 
@@ -407,6 +468,119 @@ export const BlogEditorView = () => {
           {editTitle !== null || editBody !== null ? "unsaved changes" : ""}
         </span>
       </div>
+
+      {/* Agent Actions */}
+      <div
+        style={{
+          marginTop: "1rem",
+          padding: "0.7rem 0.9rem",
+          background: palette.surfaceRaised,
+          borderRadius: "4px",
+          border: `1px solid ${palette.hairline}`,
+        }}
+      >
+        <span
+          style={{
+            fontSize: "0.72rem",
+            fontFamily: fonts.mono,
+            color: palette.boneDim,
+            textTransform: "uppercase",
+            letterSpacing: "0.04em",
+          }}
+        >
+          Agent Actions
+        </span>
+        <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+          <button
+            onClick={() => outlineMutation.mutate()}
+            disabled={outlineMutation.isPending}
+            style={{
+              background: palette.phosphorDim,
+              color: palette.bone,
+              border: "none",
+              borderRadius: "3px",
+              padding: "0.4rem 0.9rem",
+              fontFamily: fonts.body,
+              fontWeight: 600,
+              fontSize: "0.82rem",
+              cursor: outlineMutation.isPending ? "not-allowed" : "pointer",
+              opacity: outlineMutation.isPending ? 0.6 : 1,
+            }}
+          >
+            {outlineMutation.isPending ? "Generating..." : "Generate Outline"}
+          </button>
+          <button
+            onClick={() => draftMutation.mutate()}
+            disabled={draftMutation.isPending}
+            style={{
+              background: palette.phosphorDim,
+              color: palette.bone,
+              border: "none",
+              borderRadius: "3px",
+              padding: "0.4rem 0.9rem",
+              fontFamily: fonts.body,
+              fontWeight: 600,
+              fontSize: "0.82rem",
+              cursor: draftMutation.isPending ? "not-allowed" : "pointer",
+              opacity: draftMutation.isPending ? 0.6 : 1,
+            }}
+          >
+            {draftMutation.isPending ? "Generating..." : "Draft Blog"}
+          </button>
+          <button
+            onClick={() => suggestEditsMutation.mutate()}
+            disabled={suggestEditsMutation.isPending}
+            style={{
+              background: palette.phosphorDim,
+              color: palette.bone,
+              border: "none",
+              borderRadius: "3px",
+              padding: "0.4rem 0.9rem",
+              fontFamily: fonts.body,
+              fontWeight: 600,
+              fontSize: "0.82rem",
+              cursor: suggestEditsMutation.isPending ? "not-allowed" : "pointer",
+              opacity: suggestEditsMutation.isPending ? 0.6 : 1,
+            }}
+          >
+            {suggestEditsMutation.isPending ? "Generating..." : "Suggest Edits"}
+          </button>
+        </div>
+      </div>
+
+      {/* Agent suggestions callout */}
+      {agentSuggestions && (
+        <div
+          style={{
+            marginTop: "0.6rem",
+            padding: "0.6rem 0.8rem",
+            background: palette.surfaceRaised,
+            borderLeft: `3px solid ${palette.phosphor}`,
+            borderRadius: "2px",
+            fontSize: "0.88rem",
+            color: palette.bone,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            maxHeight: "14rem",
+            overflowY: "auto",
+          }}
+        >
+          <span
+            style={{
+              display: "block",
+              fontSize: "0.72rem",
+              fontFamily: fonts.mono,
+              color: palette.phosphor,
+              marginBottom: "0.3rem",
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            Edit Suggestions
+          </span>
+          {agentSuggestions}
+        </div>
+      )}
 
       <Hairline />
 

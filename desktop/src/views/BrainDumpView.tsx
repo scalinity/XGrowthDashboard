@@ -39,6 +39,12 @@ interface BrainDumpData {
   drafts: BrainDumpDraft[];
 }
 
+interface ProcessResponse {
+  ok: boolean;
+  brain_dump_id: number;
+  candidates: unknown[];
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
@@ -46,6 +52,7 @@ export const BrainDumpView = () => {
   const qc = useQueryClient();
   const [rawText, setRawText] = useState("");
   const [submittedText, setSubmittedText] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["brain-dump"],
@@ -53,31 +60,22 @@ export const BrainDumpView = () => {
     retry: 1,
   });
 
-  // Create a brain-dump conversation + send the raw text.
+  // Process a brain dump via the dedicated endpoint.
   const submitDump = useMutation({
     mutationFn: async (text: string) => {
-      // 1. Create conversation with brain_dump seed.
-      const { conversation_id } = await apiFetch<{ conversation_id: number }>(
-        "/agent/conversations",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            title: "Brain dump",
-            context_seed: "brain_dump",
-          }),
-        },
-      );
-      // 2. Send the raw text.
-      const turn = await apiFetch<{ assistant_text: string | null; error: string | null }>(
-        `/agent/conversations/${conversation_id}/messages`,
-        { method: "POST", body: JSON.stringify({ text }) },
-      );
-      return { conversation_id, turn };
+      return apiFetch<ProcessResponse>("/brain-dumps", {
+        method: "POST",
+        body: JSON.stringify({ raw_text: text }),
+      });
     },
-    onSuccess: (_data, text) => {
+    onSuccess: (resp, text) => {
       setSubmittedText(text);
       setRawText("");
+      setSuccessMsg(`Processed — ${resp.candidates.length} candidates generated`);
       qc.invalidateQueries({ queryKey: ["brain-dump"] });
+    },
+    onError: () => {
+      setSuccessMsg(null);
     },
   });
 
@@ -145,11 +143,16 @@ export const BrainDumpView = () => {
             opacity: submitDump.isPending ? 0.5 : 1,
           }}
         >
-          {submitDump.isPending ? "Processing..." : "Submit to agent"}
+          {submitDump.isPending ? "Processing..." : "Process brain dump"}
         </button>
         {submitDump.error && (
           <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
             {String((submitDump.error as Error).message ?? submitDump.error)}
+          </p>
+        )}
+        {successMsg && !submitDump.isPending && (
+          <p style={{ color: palette.phosphor, fontSize: "0.82rem", marginTop: "0.3rem" }}>
+            {successMsg}
           </p>
         )}
       </div>

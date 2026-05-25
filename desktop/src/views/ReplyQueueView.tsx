@@ -5,7 +5,8 @@
  * Actions: Skip, Mark posted (mutations that update status server-side).
  * No useEffect — useQuery + useMutation only.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
 import { RecommendedActionBadge } from "../components/badges";
@@ -55,20 +56,66 @@ const ACTION_KEYLINE: Record<string, string> = {
   skip: palette.hairline,
 };
 
+const SKIP_REASONS = [
+  { value: "not_relevant", label: "Not relevant" },
+  { value: "too_old", label: "Too old" },
+  { value: "already_replied", label: "Already replied" },
+  { value: "low_quality", label: "Low quality" },
+  { value: "other", label: "Other" },
+] as const;
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 export const ReplyQueueView = () => {
+  const queryClient = useQueryClient();
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["reply-queue"],
     queryFn: () => apiFetch<ReplyQueueData>("/views/reply-queue"),
     retry: 1,
   });
 
-  // Skip mutation — PATCH-like via POST to agent endpoint (simplified: update via settings for now).
-  // For the initial port we don't wire skip/mark-posted mutations since the existing
-  // app.py doesn't expose them yet. The UI renders read-only with action buttons that
-  // will be wired in a follow-up.
+  // --- Mutations -----------------------------------------------------------
+
+  const scoreMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ ok: boolean; scored_count: number }>("/agent/score-candidates", {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reply-queue"] });
+    },
+  });
+
+  const skipMutation = useMutation({
+    mutationFn: ({ id, skip_reason }: { id: number; skip_reason: string }) =>
+      apiFetch<{ ok: boolean; status: string }>(`/reply-targets/${id}/skip`, {
+        method: "PUT",
+        body: JSON.stringify({ skip_reason }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reply-queue"] });
+    },
+  });
+
+  const markPostedMutation = useMutation({
+    mutationFn: ({ id, posted_url }: { id: number; posted_url?: string }) =>
+      apiFetch<{ ok: boolean; status: string }>(`/reply-targets/${id}/mark-posted`, {
+        method: "PUT",
+        body: JSON.stringify({ posted_url: posted_url || undefined }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reply-queue"] });
+    },
+  });
+
+  // --- Local UI state (no effects — driven by handlers only) ---------------
+
+  const [skipOpen, setSkipOpen] = useState<number | null>(null);
+  const [skipReason, setSkipReason] = useState("not_relevant");
+  const [markPostedOpen, setMarkPostedOpen] = useState<number | null>(null);
+  const [postedUrl, setPostedUrl] = useState("");
 
   if (isLoading) return <p className="dim">Reading the local service...</p>;
   if (error) {
@@ -92,6 +139,50 @@ export const ReplyQueueView = () => {
         The recommended action is deterministic from the scores. Sort order is
         reply_now, reply_if_time, consider, skip — then by recency.
       </p>
+
+      {/* Score Candidates action */}
+      <div style={{ margin: "0.5rem 0 0.7rem" }}>
+        <button
+          onClick={() => scoreMutation.mutate()}
+          disabled={scoreMutation.isPending}
+          style={{
+            padding: "0.45rem 1rem",
+            background: palette.phosphor,
+            color: palette.ink,
+            border: "none",
+            borderRadius: "3px",
+            fontFamily: fonts.body,
+            fontWeight: 600,
+            fontSize: "0.85rem",
+            cursor: scoreMutation.isPending ? "wait" : "pointer",
+            opacity: scoreMutation.isPending ? 0.6 : 1,
+          }}
+        >
+          {scoreMutation.isPending ? "Scoring..." : "Score candidates"}
+        </button>
+        {scoreMutation.isSuccess && (
+          <span
+            style={{
+              marginLeft: "0.6rem",
+              color: palette.phosphor,
+              fontSize: "0.82rem",
+            }}
+          >
+            Scored {scoreMutation.data.scored_count} candidates
+          </span>
+        )}
+        {scoreMutation.isError && (
+          <span
+            style={{
+              marginLeft: "0.6rem",
+              color: palette.warnAmber,
+              fontSize: "0.82rem",
+            }}
+          >
+            {String((scoreMutation.error as Error).message ?? "Scoring failed")}
+          </span>
+        )}
+      </div>
 
       {/* Counter strip */}
       <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
@@ -220,7 +311,7 @@ export const ReplyQueueView = () => {
               )}
 
               {/* Action buttons */}
-              <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.3rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.3rem", flexWrap: "wrap", alignItems: "center" }}>
                 <a
                   href={item.target_post_url}
                   target="_blank"
@@ -237,7 +328,181 @@ export const ReplyQueueView = () => {
                 >
                   Open original
                 </a>
+
+                {/* Skip button + dropdown */}
+                {skipOpen === item.id ? (
+                  <span style={{ display: "inline-flex", gap: "0.3rem", alignItems: "center" }}>
+                    <select
+                      value={skipReason}
+                      onChange={(e) => setSkipReason(e.target.value)}
+                      style={{
+                        padding: "0.25rem 0.4rem",
+                        background: palette.surfaceRaised,
+                        color: palette.bone,
+                        border: `1px solid ${palette.hairline}`,
+                        borderRadius: "2px",
+                        fontSize: "0.78rem",
+                        fontFamily: fonts.body,
+                      }}
+                    >
+                      {SKIP_REASONS.map((r) => (
+                        <option key={r.value} value={r.value}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => {
+                        skipMutation.mutate({ id: item.id, skip_reason: skipReason });
+                        setSkipOpen(null);
+                      }}
+                      disabled={skipMutation.isPending}
+                      style={{
+                        padding: "0.25rem 0.5rem",
+                        background: palette.warnAmber,
+                        color: palette.ink,
+                        border: "none",
+                        borderRadius: "2px",
+                        fontSize: "0.78rem",
+                        fontFamily: fonts.body,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => setSkipOpen(null)}
+                      style={{
+                        padding: "0.25rem 0.5rem",
+                        background: "transparent",
+                        color: palette.boneDim,
+                        border: `1px solid ${palette.hairline}`,
+                        borderRadius: "2px",
+                        fontSize: "0.78rem",
+                        fontFamily: fonts.body,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setSkipOpen(item.id);
+                      setMarkPostedOpen(null);
+                    }}
+                    style={{
+                      padding: "0.3rem 0.7rem",
+                      background: palette.surfaceRaised,
+                      color: palette.boneDim,
+                      border: `1px solid ${palette.hairline}`,
+                      borderRadius: "2px",
+                      fontSize: "0.8rem",
+                      fontFamily: fonts.body,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Skip
+                  </button>
+                )}
+
+                {/* Mark posted button + URL input */}
+                {markPostedOpen === item.id ? (
+                  <span style={{ display: "inline-flex", gap: "0.3rem", alignItems: "center" }}>
+                    <input
+                      type="text"
+                      placeholder="Posted URL (optional)"
+                      value={postedUrl}
+                      onChange={(e) => setPostedUrl(e.target.value)}
+                      style={{
+                        padding: "0.25rem 0.4rem",
+                        background: palette.surfaceRaised,
+                        color: palette.bone,
+                        border: `1px solid ${palette.hairline}`,
+                        borderRadius: "2px",
+                        fontSize: "0.78rem",
+                        fontFamily: fonts.body,
+                        width: "14rem",
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        markPostedMutation.mutate({
+                          id: item.id,
+                          posted_url: postedUrl || undefined,
+                        });
+                        setMarkPostedOpen(null);
+                        setPostedUrl("");
+                      }}
+                      disabled={markPostedMutation.isPending}
+                      style={{
+                        padding: "0.25rem 0.5rem",
+                        background: palette.phosphor,
+                        color: palette.ink,
+                        border: "none",
+                        borderRadius: "2px",
+                        fontSize: "0.78rem",
+                        fontFamily: fonts.body,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMarkPostedOpen(null);
+                        setPostedUrl("");
+                      }}
+                      style={{
+                        padding: "0.25rem 0.5rem",
+                        background: "transparent",
+                        color: palette.boneDim,
+                        border: `1px solid ${palette.hairline}`,
+                        borderRadius: "2px",
+                        fontSize: "0.78rem",
+                        fontFamily: fonts.body,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setMarkPostedOpen(item.id);
+                      setSkipOpen(null);
+                    }}
+                    style={{
+                      padding: "0.3rem 0.7rem",
+                      background: palette.surfaceRaised,
+                      color: palette.phosphor,
+                      border: `1px solid ${palette.phosphorDim}`,
+                      borderRadius: "2px",
+                      fontSize: "0.8rem",
+                      fontFamily: fonts.body,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Mark posted
+                  </button>
+                )}
               </div>
+
+              {/* Inline mutation feedback */}
+              {skipMutation.isError && (
+                <div style={{ color: palette.warnAmber, fontSize: "0.78rem", marginTop: "0.2rem" }}>
+                  Skip failed: {String((skipMutation.error as Error).message ?? "unknown error")}
+                </div>
+              )}
+              {markPostedMutation.isError && (
+                <div style={{ color: palette.warnAmber, fontSize: "0.78rem", marginTop: "0.2rem" }}>
+                  Mark-posted failed: {String((markPostedMutation.error as Error).message ?? "unknown error")}
+                </div>
+              )}
 
               <Hairline />
             </div>
