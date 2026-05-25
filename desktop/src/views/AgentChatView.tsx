@@ -113,7 +113,7 @@ export const AgentChatView = () => {
 
   return (
     <>
-      <Kicker>§14.8 · GROWTH AGENT</Kicker>
+      <Kicker>GROWTH AGENT</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Agent Chat</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Streaming chat with visible tool calls and publish confirmation.
@@ -308,6 +308,11 @@ export const AgentChatView = () => {
               {sendMessage.error && (
                 <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
                   {String((sendMessage.error as Error).message ?? sendMessage.error)}
+                </p>
+              )}
+              {sendMessage.data?.error && (
+                <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
+                  {sendMessage.data.error}
                 </p>
               )}
             </>

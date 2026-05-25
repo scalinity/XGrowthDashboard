@@ -86,12 +86,12 @@ export const BlogsView = () => {
 
   return (
     <>
-      <Kicker>§14.14 · BLOGS</Kicker>
+      <Kicker>BLOGS</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Blogs</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Long-form pipeline + repurposing. Same unified identity surface as X
         drafting — the agent's niche, voice profile, and personality lore feed
-        blog drafting exactly as they feed X drafting (§28.31).
+        blog drafting exactly as they feed X drafting.
       </p>
 
       <Hairline />

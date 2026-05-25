@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import html as _html
 
-import streamlit as st
+from app._optional_streamlit import st
 
 # ---------------------------------------------------------------------------
 # Palette — referenced by chart/badge modules. Adding a new color? Add it

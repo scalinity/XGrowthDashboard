@@ -91,11 +91,11 @@ export const CampaignsView = () => {
 
   return (
     <>
-      <Kicker>§14.12 · CAMPAIGNS</Kicker>
+      <Kicker>CAMPAIGNS</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Campaigns</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Multi-week themed pushes. Hypothesis + dual-stream success criteria +
-        items + retro. See spec §14.12 / §28.26.
+        items + retro.
       </p>
 
       {/* Summary strip */}

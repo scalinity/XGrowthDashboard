@@ -8,7 +8,7 @@ hovering over any aggregate is enough to know whether to trust the number.
 
 from __future__ import annotations
 
-import streamlit as st
+from app._optional_streamlit import st
 
 from app.components.badges.confidence_label import SAMPLE_SIZE_TOOLTIP
 from app.components.theme import PALETTE

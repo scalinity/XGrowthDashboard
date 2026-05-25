@@ -73,7 +73,7 @@ function PostReplyTab() {
     <div>
       <h3>Log a post or reply</h3>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-        §15.3 — paste the text you published. Classification happens in the Classify tab.
+        Paste the text you published. Classification happens in the Classify tab.
       </p>
       <div style={{ marginBottom: "0.5rem" }}>
         <label className="kicker" style={{ display: "block", marginBottom: "0.2rem" }}>Type</label>
@@ -146,7 +146,7 @@ function CorrectionTab() {
     <div>
       <h3>Record a correction</h3>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-        §13 hard rule 2 — snapshots are immutable. Corrections are additive (original preserved).
+        Snapshots are immutable. Corrections are additive (original preserved).
       </p>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginBottom: "0.5rem" }}>
         <div>
@@ -220,10 +220,10 @@ export const ManualEntryView = () => {
 
   return (
     <>
-      <Kicker>DATA ENTRY HUB · §15</Kicker>
+      <Kicker>DATA ENTRY HUB</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Manual entry</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem", fontStyle: "italic", fontSize: "0.82rem" }}>
-        Spec §15.1–§15.4. Every form here writes directly to the SQLite store.
+        Every form here writes directly to the SQLite store.
       </p>
 
       {/* Tab bar */}

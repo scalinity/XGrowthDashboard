@@ -136,7 +136,7 @@ export const CoachView = () => {
 
   return (
     <>
-      <Kicker>§14.10 · COACH</Kicker>
+      <Kicker>COACH</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Coach</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Advice-only mode with citation-grounded responses. The coach cannot
@@ -297,6 +297,11 @@ export const CoachView = () => {
               {sendMessage.error && (
                 <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
                   {String((sendMessage.error as Error).message ?? sendMessage.error)}
+                </p>
+              )}
+              {sendMessage.data?.error && (
+                <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
+                  {sendMessage.data.error}
                 </p>
               )}
             </>

@@ -17,7 +17,7 @@ import sqlite3
 from datetime import date as _date_t
 from typing import Any
 
-import streamlit as st
+from app._optional_streamlit import st
 
 from app.forms import FormError, get_setting
 

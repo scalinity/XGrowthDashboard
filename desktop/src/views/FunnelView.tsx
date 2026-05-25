@@ -57,7 +57,7 @@ export const FunnelView = () => {
 
   return (
     <>
-      <Kicker>X → STIR · §14.5</Kicker>
+      <Kicker>X → STIR</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Funnel</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem", fontStyle: "italic", fontSize: "0.82rem" }}>
         Distribution signal (top of funnel) is one epistemic category; validation signal
@@ -88,7 +88,7 @@ export const FunnelView = () => {
       {/* What we know / what we don't */}
       <h2>What we know · what we don't</h2>
       <p className="faint">
-        The §13 hard rules made visible. Hover any row in the funnel above to see the source
+        The hard rules made visible. Hover any row in the funnel above to see the source
         of that stage's number.
       </p>
       <table>

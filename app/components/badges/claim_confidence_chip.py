@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import streamlit as st
+from app._optional_streamlit import st
 
 from app.components.theme import PALETTE
 

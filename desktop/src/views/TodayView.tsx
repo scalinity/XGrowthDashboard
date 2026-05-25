@@ -202,8 +202,8 @@ function SnapshotForm({
     <div style={{ margin: "0.6rem 0 1rem" }}>
       <h3>Pinned daily snapshot</h3>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-        Spec §15.1 — designed to take 30 seconds. Sets source='manual', data_quality='manual'.
-        Corrections never overwrite (§13 hard rule 2).
+        Designed to take 30 seconds. Sets source='manual', data_quality='manual'.
+        Corrections never overwrite.
       </p>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "0.5rem", marginBottom: "0.6rem" }}>
         <div>
@@ -267,7 +267,7 @@ export const TodayView = () => {
       <Kicker>{formatDate(d.today_iso)} · WEIGH-IN</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Today</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem", fontStyle: "italic", fontSize: "0.82rem" }}>
-        Daily operating cockpit per §14.1. Numbers, not narratives.
+        Daily operating cockpit. Numbers, not narratives.
         Trend judgements live in <strong>Progress</strong>; this view is the morning ritual.
       </p>
 
@@ -296,7 +296,7 @@ export const TodayView = () => {
             posts={snap.post_count.toLocaleString()} · listed={snap.listed_count.toLocaleString()}
           </div>
           <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-            Snapshots are immutable per §13 hard rule 2. Use <strong>Manual entry → Correction</strong> to record
+            Snapshots are immutable. Use <strong>Manual entry → Correction</strong> to record
             a fix; the original row is preserved.
           </p>
         </details>
@@ -335,7 +335,7 @@ export const TodayView = () => {
           {/* Velocity */}
           {!d.velocity_measurable ? (
             <Callout>
-              <em>7-day velocity not yet measurable.</em> Per §13 rule 6, velocity displays only when |Δ7d| ≥ 10.
+              <em>7-day velocity not yet measurable.</em> Velocity displays only when |Δ7d| ≥ 10.
               Judge the week, not the morning.
             </Callout>
           ) : (
@@ -408,7 +408,7 @@ export const TodayView = () => {
                 borderRadius: "2px",
               }}
             >
-              <Kicker>§29.9 · REPLY-TARGET MIX</Kicker>
+              <Kicker>REPLY-TARGET MIX</Kicker>
               <div
                 className="numeric"
                 style={{
@@ -452,7 +452,7 @@ export const TodayView = () => {
           <h2>Pending agent drafts</h2>
           <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
             Agent-generated drafts from today's sessions that haven't been accepted, rejected,
-            or shipped yet. The chip is the §28.11 pre-publish read — informational, never gates Publish.
+            or shipped yet. The chip is the pre-publish read — informational, never gates Publish.
           </p>
           {d.pending_drafts.map((draft) => (
             <div key={draft.id}>

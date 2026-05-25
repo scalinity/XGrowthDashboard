@@ -83,8 +83,8 @@ export function SnapshotForm({
     <div style={{ margin: "0.6rem 0 1rem" }}>
       <h3>Pinned daily snapshot</h3>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-        Spec §15.1 — designed to take 30 seconds. Sets source='manual', data_quality='manual'.
-        Corrections never overwrite (§13 hard rule 2).
+        Designed to take 30 seconds. Sets source='manual', data_quality='manual'.
+        Corrections never overwrite.
       </p>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "0.5rem", marginBottom: "0.6rem" }}>
         {[

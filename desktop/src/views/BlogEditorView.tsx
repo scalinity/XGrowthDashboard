@@ -78,7 +78,7 @@ export const BlogEditorView = () => {
   if (!firstBlogId && !isLoading) {
     return (
       <>
-        <Kicker>§14.15 · BLOG EDITOR</Kicker>
+        <Kicker>BLOG EDITOR</Kicker>
         <h1 style={{ fontSize: "2.1rem" }}>Blog Editor</h1>
         <Callout>
           <em>No blogs exist yet.</em> Create one via the Blogs view first.
@@ -106,7 +106,7 @@ export const BlogEditorView = () => {
 
   return (
     <>
-      <Kicker>§14.15 · BLOG EDITOR</Kicker>
+      <Kicker>BLOG EDITOR</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>{blog.title}</h1>
 
       {/* Meta strip */}

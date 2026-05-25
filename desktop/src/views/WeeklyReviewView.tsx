@@ -379,7 +379,7 @@ export const WeeklyReviewView: FC = () => {
         disabled={exportDisabled}
         title={
           exportDisabled
-            ? "Counterfactual note required (§14.6). Fill the form above and save first."
+            ? "Counterfactual note required. Fill the form above and save first."
             : "Export weekly report"
         }
       >

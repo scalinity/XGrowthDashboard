@@ -72,7 +72,7 @@ export const InspirationView = () => {
 
   return (
     <>
-      <Kicker>§14.13 · INSPIRATION LIBRARY</Kicker>
+      <Kicker>INSPIRATION LIBRARY</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Inspiration Library</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Capture-then-remix. Saved external posts with seven transform modes

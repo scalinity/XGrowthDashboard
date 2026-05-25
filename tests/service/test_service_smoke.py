@@ -109,6 +109,94 @@ def test_today_view_with_valid_token(client: TestClient) -> None:
     assert "username" in body["snapshot_defaults"]
 
 
+def test_production_cors_allows_tauri_webview_origin(client: TestClient) -> None:
+    """The packaged app's WKWebView serves the frontend from tauri://localhost
+    and fetches the loopback sidecar cross-origin. Production (the `client`
+    fixture builds create_app WITHOUT dev_cors_origins) must echo CORS for that
+    origin or every view shows "Couldn't reach the local service. Load failed".
+    """
+    preflight = client.options(
+        "/views/today",
+        headers={
+            "Origin": "tauri://localhost",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers.get("access-control-allow-origin") == "tauri://localhost"
+
+    # The actual authed GET also carries the ACAO header so WebKit lets the
+    # webview read the body.
+    resp = client.get(
+        "/views/today",
+        headers={"Origin": "tauri://localhost", "Authorization": f"Bearer {TOKEN}"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "tauri://localhost"
+
+
+def test_production_cors_rejects_foreign_origin(client: TestClient) -> None:
+    """CORS stays tight: only the Tauri webview origin is allowed. A remote page
+    must not receive an Access-Control-Allow-Origin header (the bearer token +
+    loopback bind remain the real boundary, but CORS shouldn't be wide open)."""
+    preflight = client.options(
+        "/views/today",
+        headers={
+            "Origin": "https://evil.example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert preflight.headers.get("access-control-allow-origin") is None
+
+
+def test_secrets_status_and_set(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§31.5: the packaged app manages the Anthropic key via the Keychain. The
+    service reports presence (never the value) and accepts a write; unknown
+    names and empty values are rejected.
+
+    The secret store is monkeypatched to an in-memory dict so the test never
+    touches the real macOS Keychain (which holds Daniel's actual key), and the
+    env mutation the handler does is reverted on teardown via setenv.
+    """
+    import app.service.app as svc
+
+    store: dict[str, str] = {}
+    monkeypatch.setattr(svc, "store_secret", lambda name, value: store.update({name: value}))
+    monkeypatch.setattr(svc, "resolve_secret", store.get)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")  # reverted on teardown
+
+    H = {"Authorization": f"Bearer {TOKEN}"}
+    r = client.get("/settings/secrets", headers=H)
+    assert r.status_code == 200
+    sec = r.json()["secrets"]
+    assert set(sec["ANTHROPIC_API_KEY"]) == {"present"}
+    assert sec["ANTHROPIC_API_KEY"]["present"] is False  # in-memory store empty
+
+    r = client.put(
+        "/settings/secrets/ANTHROPIC_API_KEY", headers=H, json={"value": "sk-test"}
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert store["ANTHROPIC_API_KEY"] == "sk-test"
+    assert client.get("/settings/secrets", headers=H).json()["secrets"][
+        "ANTHROPIC_API_KEY"
+    ]["present"] is True
+
+    # Guards: unknown name + empty value.
+    assert (
+        client.put("/settings/secrets/NOPE", headers=H, json={"value": "x"}).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/settings/secrets/ANTHROPIC_API_KEY", headers=H, json={"value": "  "}
+        ).status_code
+        == 400
+    )
+
+
 def test_create_app_runs_startup_invariants() -> None:
     # Production AGENT_TOOLS satisfies the §28 invariants — should not raise.
     app = create_app(token=TOKEN, conn_factory=lambda: connect(":memory:"))

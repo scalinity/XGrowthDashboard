@@ -85,10 +85,10 @@ export const ReplyQueueView = () => {
 
   return (
     <>
-      <Kicker>§29 · REPLY TARGET QUEUE</Kicker>
+      <Kicker>REPLY TARGET QUEUE</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Reply target queue</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
-        Candidates to reply under, scored on four dimensions per §29.3.
+        Candidates to reply under, scored on four dimensions.
         The recommended action is deterministic from the scores. Sort order is
         reply_now, reply_if_time, consider, skip — then by recency.
       </p>

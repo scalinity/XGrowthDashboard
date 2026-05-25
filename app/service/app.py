@@ -13,6 +13,7 @@ HTTP shape only; all reads/writes delegate to existing backend code.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import date as _date_t
@@ -53,6 +54,7 @@ from app.forms.post_log import submit_post
 from app.forms.snapshot import submit_snapshot
 from app.forms.weekly_review import submit_weekly_review
 from app.paths import resolve_db_path
+from app.secret_store import resolve_secret, store_secret
 from app.service.security import BearerTokenAuth
 
 def _weekly_review_slice(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -507,6 +509,16 @@ AgentClientFactory = Callable[[], AgentClient]
 SERVICE_NAME = "x-growth-dashboard-service"
 SERVICE_VERSION = "0.1.0"
 
+# The native shell serves the React frontend from the Tauri custom-scheme
+# origin (``tauri://localhost`` on macOS; ``http(s)://tauri.localhost`` on
+# Windows), so the webview's fetch() to the loopback sidecar is *cross-origin*
+# and WebKit enforces CORS. Production must echo CORS for this origin or the app
+# cannot read its own service. This does NOT widen the network surface (§31.10):
+# the sidecar still binds 127.0.0.1 only and every protected route still
+# requires the per-launch bearer token — CORS merely lifts the webview's
+# same-origin *read* check, which a remote page can't satisfy anyway.
+TAURI_WEBVIEW_ORIGIN_REGEX = r"^(tauri://localhost|https?://tauri\.localhost)$"
+
 
 class StartConversationBody(BaseModel):
     """POST /agent/conversations request body (§14.8)."""
@@ -534,6 +546,12 @@ class SettingValue(BaseModel):
     """PUT /settings/{key} request body. ``value`` is any JSON-serializable value."""
 
     value: Any
+
+
+class SecretBody(BaseModel):
+    """PUT /settings/secrets/{name} request body — a write-only secret value."""
+
+    value: str
 
 
 def _form_error(exc: FormError) -> HTTPException:
@@ -1254,12 +1272,16 @@ def create_app(
     run_invariants
         Run the §28 startup invariants at app creation. Default True.
     dev_cors_origins
-        DEV-ONLY. When set, allow these browser origins to call the loopback
-        sidecar cross-origin (the §31 Step 0 screenshot-diff loop). The packaged
-        app and ``app.service.__main__`` NEVER set this, so production emits no
-        CORS headers — the §31.10 "no new network surface" guarantee is intact
-        (auth is still the per-launch bearer token; CORS only relaxes the
-        *browser's* same-origin check, not the loopback bind).
+        DEV-ONLY override. When set, allow these browser origins to call the
+        loopback sidecar cross-origin (the §31 Step 0 screenshot-diff loop). The
+        packaged app and ``app.service.__main__`` never set this; production
+        instead allows the Tauri webview origin via
+        ``TAURI_WEBVIEW_ORIGIN_REGEX`` (the native WKWebView serves the frontend
+        from ``tauri://localhost``, so its fetch to the loopback sidecar is
+        cross-origin and needs CORS). Either way the §31.10 "no new network
+        surface" guarantee holds: auth is still the per-launch bearer token and
+        the bind is still loopback-only; CORS only relaxes the *browser's*
+        same-origin read check, not the bind.
     """
     factory = conn_factory or _default_conn_factory
     agent_factory = agent_client_factory or (lambda: AgentClient())
@@ -1277,10 +1299,22 @@ def create_app(
     app = FastAPI(title="X Growth Dashboard — local service", version=SERVICE_VERSION)
     auth = BearerTokenAuth(token)
 
+    # CORS for the native webview's cross-origin fetch to the loopback sidecar.
+    # In dev (browser screenshot-diffing) the caller passes explicit origins; in
+    # the packaged app we allow the Tauri webview origin. Either way the loopback
+    # bind + per-launch bearer token remain the security boundary (§31.10).
     if dev_cors_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=dev_cors_origins,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=TAURI_WEBVIEW_ORIGIN_REGEX,
             allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
@@ -1468,6 +1502,39 @@ def create_app(
         # set_setting handles the JSON encode + §28.30 audit-log write-through.
         set_setting(conn, key, body.value)
         return {"ok": True, "key": key, "value": body.value}
+
+    # ----- Managed secrets (§31.5): write-only, stored in the OS Keychain -----
+    # The packaged app can't read the repo .env (cwd is "/" under Finder), so the
+    # Anthropic key lives in the macOS Keychain. These report presence (never the
+    # value) and let Settings write a new key. The agent reads it from os.environ
+    # at client construction; __main__ exports Keychain->env at boot, and the PUT
+    # below also updates os.environ so a freshly-set key takes effect without a
+    # restart.
+    _MANAGED_SECRETS = {"ANTHROPIC_API_KEY"}
+
+    @app.get("/settings/secrets", dependencies=[Depends(auth)])
+    def read_secrets() -> dict[str, Any]:
+        return {
+            "secrets": {
+                name: {"present": bool(resolve_secret(name))}
+                for name in sorted(_MANAGED_SECRETS)
+            }
+        }
+
+    @app.put("/settings/secrets/{name}", dependencies=[Depends(auth)])
+    def update_secret(name: str, body: SecretBody) -> dict[str, Any]:
+        if name not in _MANAGED_SECRETS:
+            raise HTTPException(status_code=400, detail=f"Unknown secret: {name!r}")
+        value = body.value.strip()
+        if not value:
+            raise HTTPException(
+                status_code=400, detail="Secret value must not be empty."
+            )
+        store_secret(name, value)
+        # Reflect into the running process so AgentClient() picks it up on the
+        # next request without an app restart (it reads ANTHROPIC_API_KEY from env).
+        os.environ[name] = value
+        return {"ok": True, "name": name, "present": True}
 
     # ----- Agent session endpoints (§14.8, §28) -----
     # Wrap the existing AgentClient.send_message_sync. The §28.10 publish

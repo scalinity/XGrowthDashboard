@@ -94,7 +94,7 @@ export const AccountResearcherView = () => {
 
   return (
     <>
-      <Kicker>§28.24 · ACCOUNT RESEARCHER</Kicker>
+      <Kicker>ACCOUNT RESEARCHER</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Account Researcher</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Analyze a target account into the reply queue. Paste an X handle and

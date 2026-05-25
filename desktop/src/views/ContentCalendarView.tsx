@@ -91,7 +91,7 @@ export const ContentCalendarView = () => {
 
   return (
     <>
-      <Kicker>§14.11 · CONTENT CALENDAR</Kicker>
+      <Kicker>CONTENT CALENDAR</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Content Calendar</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
         Visual planning grid — POSTED + DRAFTED + PLANNED across the window.

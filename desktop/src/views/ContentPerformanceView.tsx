@@ -111,7 +111,7 @@ export const ContentPerformanceView = () => {
   return (
     <>
       {/* Header */}
-      <Kicker>LANE ANALYSIS · §14.4 / §11</Kicker>
+      <Kicker>LANE ANALYSIS</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Content performance</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem", fontStyle: "italic", fontSize: "0.82rem" }}>
         Lanes are scored at four confidence tiers:{" "}
@@ -136,7 +136,7 @@ export const ContentPerformanceView = () => {
       ) : (
         <Callout>
           <em>No best-lane callout.</em> Fewer than 3 lanes are at{" "}
-          <strong>tentative</strong> or above; ranking would be premature (§14.4 anti-overfitting rule).
+          <strong>tentative</strong> or above; ranking would be premature (anti-overfitting rule).
           Read the grid and scatter below as evidence-in-progress, not a leaderboard.
         </Callout>
       )}
@@ -185,7 +185,7 @@ export const ContentPerformanceView = () => {
       <Hairline />
 
       {/* V/G/P/P content type table (§28.17) */}
-      <h2>Content type — V/G/P/P (§28.17)</h2>
+      <h2>Content type — V/G/P/P</h2>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
         Performance sliced by <em>purpose</em> (value / growth / personality / proof) —
         orthogonal to pillar (topic). Same confidence ladder as the lane grid.
@@ -250,7 +250,7 @@ export const ContentPerformanceView = () => {
       {/* Pre-publish scorer calibration */}
       <h2>Pre-publish scorer calibration</h2>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-        Shipped agent drafts grouped by their §28.11 pre-publish composite_label,
+        Shipped agent drafts grouped by their pre-publish composite_label,
         paired with what actually happened. The scorer is well-calibrated when 'strong'
         rows average above 'viable' above 'weak'.
       </p>

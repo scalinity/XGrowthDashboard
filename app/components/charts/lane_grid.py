@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import streamlit as st
+from app._optional_streamlit import st
 
 from app.components.badges import (
     UI_LABEL_PRESENTATION,

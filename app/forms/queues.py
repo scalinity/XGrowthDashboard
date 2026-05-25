@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-import streamlit as st
+from app._optional_streamlit import st
 
 from app.forms import FormError
 from app.forms.post_log import add_post_id

@@ -122,11 +122,11 @@ export const ProgressView = () => {
   return (
     <>
       {/* Header */}
-      <Kicker>LONG-ARC TREND · §14.3</Kicker>
+      <Kicker>LONG-ARC TREND</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Progress</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem", fontStyle: "italic", fontSize: "0.82rem" }}>
-        Distribution and validation ladders carry equal weight (§4). Follower trend below
-        uses the §12 noise-floor band — judge the week, not the morning.
+        Distribution and validation ladders carry equal weight. Follower trend below
+        uses the noise-floor band — judge the week, not the morning.
       </p>
 
       {/* Dual ladders */}
@@ -170,7 +170,7 @@ export const ProgressView = () => {
         <p className="faint">Chart data unavailable.</p>
       )}
       <p className="faint" style={{ fontSize: "0.82rem", marginTop: "0.3rem" }}>
-        Shaded band is the ±2/day noise floor (§12). Days within the band are visualised,
+        Shaded band is the ±2/day noise floor. Days within the band are visualised,
         not arrow-marked — at this sample size, daily deltas are statistically indistinguishable
         from zero.
       </p>

@@ -84,7 +84,7 @@ export const NextRepView = () => {
 
   return (
     <>
-      <Kicker>WHAT SHOULD I POST NEXT · §14.2</Kicker>
+      <Kicker>WHAT SHOULD I POST NEXT</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Next rep</h1>
       <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem", fontStyle: "italic", fontSize: "0.82rem" }}>
         Measurement + generation, one click apart. The lane scoreboard below looks at the last 7 days;
@@ -186,7 +186,7 @@ export const NextRepView = () => {
       <h2>Reply targets</h2>
       <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
         Top candidates from the Reply Target Queue. Filtered to the biggest-gap pillar above when
-        computable. §29.2 — one source of truth, not a parallel list.
+        computable. One source of truth, not a parallel list.
       </p>
       {d.reply_targets.length === 0 ? (
         <div
