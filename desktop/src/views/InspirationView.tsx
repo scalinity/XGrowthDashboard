@@ -3,9 +3,10 @@
  *
  * Saved posts with source text, author, tags, and available transforms.
  * Each transform shows the output text + plagiarism risk label.
- * No useEffect — useQuery only.
+ * No useEffect — useQuery + useMutation only.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
 import { StatusChip } from "../components/badges";
@@ -48,13 +49,155 @@ const RISK_TONE: Record<string, "done" | "active" | "warn" | "neutral"> = {
 };
 
 // ---------------------------------------------------------------------------
+// Save Inspiration Form
+// ---------------------------------------------------------------------------
+const SaveInspirationForm = ({ onSaved }: { onSaved: () => void }) => {
+  const [sourceText, setSourceText] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceAuthor, setSourceAuthor] = useState("");
+  const [notes, setNotes] = useState("");
+  const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: {
+      source_post_text: string;
+      source_url?: string;
+      source_author?: string;
+      notes?: string;
+    }) =>
+      apiFetch<{ inspiration_id: number }>("/inspirations", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: ({ inspiration_id }) => {
+      setSourceText("");
+      setSourceUrl("");
+      setSourceAuthor("");
+      setNotes("");
+      setFeedback({ type: "ok", msg: `Saved inspiration #${inspiration_id}` });
+      onSaved();
+    },
+    onError: (err: Error) => {
+      setFeedback({ type: "err", msg: err.message });
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sourceText.trim()) return;
+    saveMutation.mutate({
+      source_post_text: sourceText.trim(),
+      ...(sourceUrl.trim() ? { source_url: sourceUrl.trim() } : {}),
+      ...(sourceAuthor.trim() ? { source_author: sourceAuthor.trim() } : {}),
+      ...(notes.trim() ? { notes: notes.trim() } : {}),
+    });
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    padding: "0.45rem 0.6rem",
+    fontFamily: fonts.body,
+    fontSize: "0.88rem",
+    color: palette.bone,
+    background: palette.surfaceRaised,
+    border: `1px solid ${palette.hairline}`,
+    borderRadius: "2px",
+    outline: "none",
+  };
+
+  return (
+    <form onSubmit={handleSubmit} style={{ marginBottom: "1.2rem" }}>
+      <div
+        className="kicker"
+        style={{ fontSize: "0.65rem", color: palette.boneFaint, marginBottom: "0.4rem" }}
+      >
+        SAVE INSPIRATION
+      </div>
+
+      <textarea
+        value={sourceText}
+        onChange={(e) => setSourceText(e.target.value)}
+        placeholder="Paste the source post text (required)..."
+        rows={4}
+        style={{ ...inputStyle, resize: "vertical", marginBottom: "0.4rem" }}
+        required
+      />
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.4rem", marginBottom: "0.4rem" }}>
+        <input
+          value={sourceUrl}
+          onChange={(e) => setSourceUrl(e.target.value)}
+          placeholder="Source URL (optional)"
+          style={inputStyle}
+        />
+        <input
+          value={sourceAuthor}
+          onChange={(e) => setSourceAuthor(e.target.value)}
+          placeholder="Author handle (optional)"
+          style={inputStyle}
+        />
+      </div>
+
+      <input
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Notes (optional)"
+        style={{ ...inputStyle, marginBottom: "0.5rem" }}
+      />
+
+      <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+        <button
+          type="submit"
+          disabled={saveMutation.isPending || !sourceText.trim()}
+          style={{
+            padding: "0.4rem 1rem",
+            fontFamily: fonts.body,
+            fontSize: "0.85rem",
+            fontWeight: 500,
+            color: palette.ink,
+            background: palette.phosphor,
+            border: "none",
+            borderRadius: "2px",
+            cursor: saveMutation.isPending ? "wait" : "pointer",
+            opacity: saveMutation.isPending || !sourceText.trim() ? 0.5 : 1,
+          }}
+        >
+          {saveMutation.isPending ? "Saving..." : "Save Inspiration"}
+        </button>
+
+        {feedback && (
+          <span
+            style={{
+              fontSize: "0.8rem",
+              color: feedback.type === "ok" ? palette.phosphor : palette.warnAmber,
+            }}
+          >
+            {feedback.msg}
+          </span>
+        )}
+      </div>
+    </form>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 export const InspirationView = () => {
+  const qc = useQueryClient();
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["inspiration"],
     queryFn: () => apiFetch<InspirationData>("/views/inspiration"),
     retry: 1,
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<{ ok: true }>(`/inspirations/${id}/archive`, { method: "PUT" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inspiration"] });
+    },
   });
 
   if (isLoading) return <p className="dim">Reading the local service...</p>;
@@ -81,10 +224,14 @@ export const InspirationView = () => {
 
       <Hairline />
 
+      <SaveInspirationForm onSaved={() => qc.invalidateQueries({ queryKey: ["inspiration"] })} />
+
+      <Hairline />
+
       {items.length === 0 ? (
         <Callout>
-          <em>No inspiration posts saved yet.</em> Save posts via the Streamlit
-          view to populate this library.
+          <em>No inspiration posts saved yet.</em> Use the form above to save
+          your first inspiration.
         </Callout>
       ) : (
         items.map((item) => (
@@ -109,9 +256,29 @@ export const InspirationView = () => {
               <span style={{ color: palette.bone, fontWeight: 500 }}>
                 {item.source_author ? `@${item.source_author}` : "Unknown source"}
               </span>
-              <span className="numeric" style={{ fontSize: "0.72rem", color: palette.boneFaint }}>
-                #{item.id} · saved {item.saved_at_utc?.slice(0, 10) ?? "—"}
-              </span>
+              <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem" }}>
+                <span className="numeric" style={{ fontSize: "0.72rem", color: palette.boneFaint }}>
+                  #{item.id} · saved {item.saved_at_utc?.slice(0, 10) ?? "—"}
+                </span>
+                {item.status !== "archived" && (
+                  <button
+                    onClick={() => archiveMutation.mutate(item.id)}
+                    disabled={archiveMutation.isPending}
+                    style={{
+                      padding: "2px 8px",
+                      fontFamily: fonts.mono,
+                      fontSize: "0.68rem",
+                      color: palette.boneDim,
+                      background: palette.surfaceRaised,
+                      border: `1px solid ${palette.hairline}`,
+                      borderRadius: "2px",
+                      cursor: archiveMutation.isPending ? "wait" : "pointer",
+                    }}
+                  >
+                    Archive
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Source text */}

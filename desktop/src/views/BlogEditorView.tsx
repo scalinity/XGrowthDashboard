@@ -1,15 +1,14 @@
 /**
  * Blog Editor — faithful port of the §14.15 blog editing surface.
  *
- * For the initial port: simplified single-column layout with blog fields,
- * version history, and body display. The full 3-panel layout (outline left,
- * body center, agent right) is a follow-up.
- * No useEffect — useQuery only.
+ * Provides inline editing of title + body_markdown, status transitions,
+ * version history, and save feedback. No useEffect — useQuery + useMutation.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
-import { ConfidenceBadge, StatusChip } from "../components/badges";
+import { StatusChip } from "../components/badges";
 import { ProgressBar } from "../components";
 import { apiFetch } from "../lib/api";
 import { useNavParams as __useNavParams } from "../lib/nav";
@@ -35,13 +34,12 @@ interface BlogDetail {
 }
 
 interface BlogVersion {
-  id: number;
   version_number: number;
-  title_at_version: string;
-  status_at_version: string;
+  created_at: string;
   created_by: string;
-  confidence_label_at_version: string | null;
-  created_at_utc: string;
+  status_at_version: string;
+  title_at_version: string;
+  is_current: boolean;
 }
 
 interface BlogDetailData {
@@ -49,13 +47,35 @@ interface BlogDetailData {
   versions: BlogVersion[];
 }
 
+interface SaveResponse {
+  saved: boolean;
+  version_number?: number;
+  reason?: string;
+}
+
+interface StatusTransitionResponse {
+  new_status: string;
+  version_number: number;
+}
+
+// Ordered status pipeline per spec.
+const STATUS_PIPELINE = [
+  "idea",
+  "outline",
+  "draft",
+  "review",
+  "final",
+  "exported",
+  "published_externally",
+] as const;
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 export const BlogEditorView = () => {
+  const qc = useQueryClient();
+
   // RV5-W10: read blog ID from nav params (passed by BlogsView on click).
-  // Falls back to loading the first blog from the list if no param is set
-  // (e.g. navigating to Blog Editor directly from the sidebar).
   const navParams = __useNavParams();
   const paramBlogId = typeof navParams.blogId === "number" ? navParams.blogId : null;
 
@@ -75,6 +95,78 @@ export const BlogEditorView = () => {
     retry: 1,
   });
 
+  // Version history (separate endpoint for freshness after saves).
+  const { data: versionsData } = useQuery({
+    queryKey: ["blog-versions", firstBlogId],
+    queryFn: () =>
+      apiFetch<{ versions: BlogVersion[] }>(`/blogs/${firstBlogId}/versions`),
+    enabled: firstBlogId != null,
+    retry: 1,
+  });
+
+  // --- Local editing state ---
+  const [editTitle, setEditTitle] = useState<string | null>(null);
+  const [editBody, setEditBody] = useState<string | null>(null);
+  const [targetStatus, setTargetStatus] = useState<string>("");
+  const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+
+  // --- Mutations ---
+  const saveMutation = useMutation({
+    mutationFn: async (payload: { title?: string; body_markdown?: string }) =>
+      apiFetch<SaveResponse>(`/blogs/${firstBlogId}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: (res) => {
+      if (res.saved) {
+        setFeedback({ type: "ok", msg: `Saved (v${res.version_number}).` });
+        setEditTitle(null);
+        setEditBody(null);
+        qc.invalidateQueries({ queryKey: ["blog-detail", firstBlogId] });
+        qc.invalidateQueries({ queryKey: ["blog-versions", firstBlogId] });
+      } else {
+        setFeedback({ type: "err", msg: res.reason ?? "Save rejected." });
+      }
+    },
+    onError: (err: Error) => {
+      setFeedback({ type: "err", msg: err.message });
+    },
+  });
+
+  const statusMutation = useMutation({
+    mutationFn: async (newStatus: string) =>
+      apiFetch<StatusTransitionResponse>(`/blogs/${firstBlogId}/status`, {
+        method: "PUT",
+        body: JSON.stringify({ new_status: newStatus }),
+      }),
+    onSuccess: (res) => {
+      setFeedback({ type: "ok", msg: `Status → ${res.new_status} (v${res.version_number}).` });
+      setTargetStatus("");
+      qc.invalidateQueries({ queryKey: ["blog-detail", firstBlogId] });
+      qc.invalidateQueries({ queryKey: ["blog-versions", firstBlogId] });
+    },
+    onError: (err: Error) => {
+      setFeedback({ type: "err", msg: err.message });
+    },
+  });
+
+  // --- Handlers ---
+  const handleSave = () => {
+    const payload: { title?: string; body_markdown?: string } = {};
+    if (editTitle !== null) payload.title = editTitle;
+    if (editBody !== null) payload.body_markdown = editBody;
+    if (Object.keys(payload).length === 0) return;
+    setFeedback(null);
+    saveMutation.mutate(payload);
+  };
+
+  const handleAdvanceStatus = () => {
+    if (!targetStatus) return;
+    setFeedback(null);
+    statusMutation.mutate(targetStatus);
+  };
+
+  // --- Guards ---
   if (!firstBlogId && !isLoading) {
     return (
       <>
@@ -98,16 +190,42 @@ export const BlogEditorView = () => {
   }
   if (!data) return null;
 
-  const { blog, versions } = data;
+  const { blog } = data;
+  const versions = versionsData?.versions ?? data.versions ?? [];
   const lengthPct =
     blog.target_length_words && blog.actual_length_words
       ? Math.min(1, blog.actual_length_words / blog.target_length_words)
       : null;
 
+  // Determine available next statuses (only forward transitions).
+  const currentIdx = STATUS_PIPELINE.indexOf(blog.status as typeof STATUS_PIPELINE[number]);
+  const availableStatuses = currentIdx >= 0 ? STATUS_PIPELINE.slice(currentIdx + 1) : [];
+
+  // Resolve displayed values (local edits take priority).
+  const displayTitle = editTitle ?? blog.title;
+  const displayBody = editBody ?? blog.current_body_markdown;
+
   return (
     <>
       <Kicker>BLOG EDITOR</Kicker>
-      <h1 style={{ fontSize: "2.1rem" }}>{blog.title}</h1>
+
+      {/* Editable title */}
+      <input
+        type="text"
+        value={displayTitle}
+        onChange={(e) => setEditTitle(e.target.value)}
+        style={{
+          fontSize: "2.1rem",
+          fontFamily: fonts.display,
+          color: palette.bone,
+          background: palette.surface,
+          border: `1px solid ${palette.hairline}`,
+          borderRadius: "3px",
+          padding: "0.3rem 0.5rem",
+          width: "100%",
+          outline: "none",
+        }}
+      />
 
       {/* Meta strip */}
       <div
@@ -116,7 +234,7 @@ export const BlogEditorView = () => {
           gap: "0.6rem",
           alignItems: "baseline",
           flexWrap: "wrap",
-          marginTop: "-0.2rem",
+          marginTop: "0.4rem",
         }}
       >
         <StatusChip label={blog.status} tone="active" />
@@ -153,7 +271,69 @@ export const BlogEditorView = () => {
 
       <Hairline />
 
-      {/* Outline (if present) */}
+      {/* Status transition */}
+      {availableStatuses.length > 0 && (
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.6rem" }}>
+          <label style={{ fontSize: "0.82rem", color: palette.boneDim }}>Advance to:</label>
+          <select
+            value={targetStatus}
+            onChange={(e) => setTargetStatus(e.target.value)}
+            style={{
+              background: palette.surfaceRaised,
+              color: palette.bone,
+              border: `1px solid ${palette.hairline}`,
+              borderRadius: "3px",
+              padding: "0.3rem 0.5rem",
+              fontFamily: fonts.body,
+              fontSize: "0.85rem",
+            }}
+          >
+            <option value="">—</option>
+            {availableStatuses.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={handleAdvanceStatus}
+            disabled={!targetStatus || statusMutation.isPending}
+            style={{
+              background: palette.phosphor,
+              color: palette.ink,
+              border: "none",
+              borderRadius: "3px",
+              padding: "0.35rem 0.9rem",
+              fontFamily: fonts.body,
+              fontWeight: 600,
+              fontSize: "0.82rem",
+              cursor: targetStatus ? "pointer" : "not-allowed",
+              opacity: targetStatus ? 1 : 0.5,
+            }}
+          >
+            {statusMutation.isPending ? "..." : "Advance"}
+          </button>
+        </div>
+      )}
+
+      {/* Feedback banner */}
+      {feedback && (
+        <div
+          style={{
+            padding: "0.4rem 0.7rem",
+            borderRadius: "3px",
+            fontSize: "0.82rem",
+            fontFamily: fonts.mono,
+            marginBottom: "0.5rem",
+            background: feedback.type === "ok" ? palette.phosphorDim : palette.warnAmber,
+            color: feedback.type === "ok" ? palette.bone : palette.ink,
+          }}
+        >
+          {feedback.msg}
+        </div>
+      )}
+
+      {/* Outline (read-only for now) */}
       {blog.outline_markdown && (
         <>
           <h2>Outline</h2>
@@ -176,27 +356,56 @@ export const BlogEditorView = () => {
         </>
       )}
 
-      {/* Body */}
+      {/* Editable body */}
       <h2>Body</h2>
-      <div
+      <textarea
+        value={displayBody}
+        onChange={(e) => setEditBody(e.target.value)}
+        rows={16}
         style={{
+          width: "100%",
           padding: "0.7rem 0.9rem",
           background: palette.surface,
           borderLeft: `2px solid ${palette.hairline}`,
+          border: `1px solid ${palette.hairline}`,
           borderRadius: "2px",
           fontSize: "0.92rem",
           color: palette.bone,
           lineHeight: 1.6,
-          whiteSpace: "pre-wrap",
-          wordWrap: "break-word",
-          maxHeight: "30rem",
-          overflowY: "auto",
           fontFamily: fonts.body,
+          resize: "vertical",
+          outline: "none",
         }}
-      >
-        {blog.current_body_markdown || (
-          <span className="faint">(empty body — start writing)</span>
-        )}
+        placeholder="Start writing..."
+      />
+
+      {/* Save button */}
+      <div style={{ marginTop: "0.5rem" }}>
+        <button
+          onClick={handleSave}
+          disabled={saveMutation.isPending || (editTitle === null && editBody === null)}
+          style={{
+            background: palette.phosphor,
+            color: palette.ink,
+            border: "none",
+            borderRadius: "3px",
+            padding: "0.45rem 1.2rem",
+            fontFamily: fonts.body,
+            fontWeight: 600,
+            fontSize: "0.88rem",
+            cursor:
+              editTitle !== null || editBody !== null ? "pointer" : "not-allowed",
+            opacity: editTitle !== null || editBody !== null ? 1 : 0.5,
+          }}
+        >
+          {saveMutation.isPending ? "Saving..." : "Save"}
+        </button>
+        <span
+          className="numeric"
+          style={{ marginLeft: "0.7rem", fontSize: "0.75rem", color: palette.boneDim }}
+        >
+          {editTitle !== null || editBody !== null ? "unsaved changes" : ""}
+        </span>
       </div>
 
       <Hairline />
@@ -209,7 +418,7 @@ export const BlogEditorView = () => {
         <div>
           {versions.map((v) => (
             <div
-              key={v.id}
+              key={v.version_number}
               style={{
                 display: "flex",
                 justifyContent: "space-between",
@@ -226,33 +435,25 @@ export const BlogEditorView = () => {
                   {v.title_at_version}
                 </span>
                 <StatusChip label={v.status_at_version} tone="neutral" />
-                {v.confidence_label_at_version && (
-                  <ConfidenceBadge
-                    tier={
-                      v.confidence_label_at_version.includes("confident")
-                        ? "confident"
-                        : v.confidence_label_at_version.includes("tentative")
-                          ? "tentative"
-                          : "insufficient"
-                    }
-                    label={v.confidence_label_at_version}
-                  />
+                {v.is_current && (
+                  <span
+                    style={{
+                      fontSize: "0.7rem",
+                      color: palette.phosphor,
+                      fontFamily: fonts.mono,
+                    }}
+                  >
+                    current
+                  </span>
                 )}
               </div>
               <span className="numeric" style={{ fontSize: "0.72rem", color: palette.boneFaint }}>
-                {v.created_by} · {v.created_at_utc?.slice(0, 16)}
+                {v.created_by} · {v.created_at?.slice(0, 16)}
               </span>
             </div>
           ))}
         </div>
       )}
-
-      <Hairline />
-
-      <div className="faint" style={{ fontSize: "0.82rem", marginTop: "0.3rem" }}>
-        Full 3-panel editor layout (outline / body / agent) is a follow-up
-        increment. This port provides read + version history.
-      </div>
     </>
   );
 };
