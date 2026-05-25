@@ -10,10 +10,10 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
 import { Callout, Hairline, Kicker } from "../components";
-import { ConfidenceBadge, type ConfidenceTier } from "../components/badges";
 import { TodayView } from "./TodayView";
 import { ProgressView } from "./ProgressView";
 import { ContentPerformanceView } from "./ContentPerformanceView";
+import { NextRepView } from "./NextRepView";
 
 export interface ViewDef {
   id: string;
@@ -93,48 +93,7 @@ function QueryBody<T>({
 }
 
 // --- wired views -------------------------------------------------------------
-// TodayView is imported from ./TodayView.tsx (full §14.1 port).
-const CONFIDENCE_MAP: Record<string, ConfidenceTier> = {
-  none: "insufficient",
-  insufficient: "insufficient",
-  low: "directional",
-  directional: "directional",
-  moderate: "tentative",
-  tentative: "tentative",
-  high: "confident",
-  confident: "confident",
-};
-
-const NextRepView: FC = () => (
-  <>
-    <ViewHeader
-      kicker="§14.2 · where to focus"
-      title="Next Rep"
-      blurb="Lane performance with graduated confidence — the dashboard refuses to rank below the discrimination floor."
-    />
-    <Hairline />
-    <QueryBody
-      qKey="next-rep"
-      qFn={api.nextRep}
-      children={(d: { lane_performance?: Array<Record<string, unknown>> }) => {
-        const lanes = d.lane_performance ?? [];
-        return (
-          <>
-            <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", marginBottom: "1rem" }}>
-              {lanes.slice(0, 8).map((l, i) => {
-                const label = String(l.confidence_label ?? "none").toLowerCase();
-                return (
-                  <ConfidenceBadge key={i} tier={CONFIDENCE_MAP[label] ?? "insufficient"} label={label} />
-                );
-              })}
-            </div>
-            <DataTable rows={lanes} />
-          </>
-        );
-      }}
-    />
-  </>
-);
+// TodayView, ProgressView, ContentPerformanceView, NextRepView imported above.
 
 const FunnelView: FC = () => (
   <>

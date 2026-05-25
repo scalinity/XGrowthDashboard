@@ -33,6 +33,8 @@ from app.agent.velocity import (
 from app.components.charts.follower_trend import FollowerPoint, follower_trend_chart
 from app.components.charts.lane_grid import confidence_color_for_ui_label, count_rankable_lanes, lane_rows_from_sql
 from app.components.badges.confidence_label import ui_label_for_db_label
+from app.agent.reply_targets import engagement_footnote as _engagement_footnote
+from app.agent.tools import _load_engagement_surface_settings
 from app.db import apply_migrations, connect
 from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
@@ -533,6 +535,136 @@ def _follower_trend_figure(conn: sqlite3.Connection) -> dict[str, Any]:
     return json.loads(fig.to_json())
 
 
+def _next_rep_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Next Rep view (§14.2) needs."""
+    from datetime import timedelta
+
+    # 1. Lane coverage this week (7-day window).
+    cutoff = (_date_t.today() - timedelta(days=7)).isoformat()
+    cov_rows = conn.execute(
+        """SELECT plm.pillar, plm.audience, plm.cta, COUNT(*) AS n
+           FROM v_post_latest_metrics plm JOIN posts p ON p.id = plm.post_id
+           WHERE p.created_date >= ? AND plm.pillar IS NOT NULL
+           GROUP BY plm.pillar, plm.audience, plm.cta""",
+        (cutoff,),
+    ).fetchall()
+    known = conn.execute(
+        "SELECT DISTINCT pillar, audience, cta FROM v_lane_performance"
+    ).fetchall()
+    counts: dict[str, int] = {}
+    for r in known:
+        key = f"{r['pillar']}·{r['audience']}·{r['cta']}"
+        counts[key] = 0
+    for r in cov_rows:
+        key = f"{r['pillar']}·{r['audience']}·{r['cta']}"
+        counts[key] = int(r["n"])
+    coverage = sorted(
+        [{"lane": k, "count": v} for k, v in counts.items()],
+        key=lambda x: x["count"],
+    )
+    biggest_gap_lane = coverage[0]["lane"] if coverage else None
+    biggest_gap_pillar = biggest_gap_lane.split("·")[0] if biggest_gap_lane else None
+
+    # 2. Open hypotheses.
+    hyp_rows = conn.execute(
+        """SELECT id, name, hypothesis, content_lane, target_audience,
+                  success_metric, minimum_sample_size, start_date
+           FROM experiments WHERE status = 'running' ORDER BY start_date ASC"""
+    ).fetchall()
+    hypotheses = []
+    for h in hyp_rows:
+        # Count posts in the hypothesis lane since start.
+        if h["content_lane"] and h["target_audience"]:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM v_post_latest_metrics plm "
+                "JOIN posts p ON p.id = plm.post_id "
+                "WHERE plm.pillar = ? AND plm.audience = ? AND p.created_date >= ?",
+                (h["content_lane"], h["target_audience"], h["start_date"]),
+            ).fetchone()[0]
+        elif h["content_lane"]:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM v_post_latest_metrics plm "
+                "JOIN posts p ON p.id = plm.post_id "
+                "WHERE plm.pillar = ? AND p.created_date >= ?",
+                (h["content_lane"], h["start_date"]),
+            ).fetchone()[0]
+        else:
+            n = 0
+        hypotheses.append({**dict(h), "posts_in_lane": int(n or 0)})
+
+    # 3. Reply targets (top 5 candidates, biased to biggest-gap pillar).
+    rt_rows = conn.execute(
+        """SELECT * FROM reply_targets
+           WHERE status = 'candidate'
+             AND (? IS NULL OR pillar IS NULL OR pillar = ?)
+           ORDER BY COALESCE(recommended_action_score, -1) DESC,
+                    last_checked_at_utc DESC LIMIT 5""",
+        (biggest_gap_pillar, biggest_gap_pillar),
+    ).fetchall()
+    eng_settings = _load_engagement_surface_settings(conn)
+    reply_targets = []
+    for r in rt_rows:
+        handle = (r["target_author_handle"] or "unknown").lstrip("@")
+        text = (r["target_text"] or "").strip().replace("\n", " ")
+        if len(text) > 80:
+            text = text[:79] + "…"
+        reply_targets.append({
+            "id": r["id"], "handle": handle, "text_excerpt": text or None,
+            "relevance_score": r["relevance_score"],
+            "engagement_surface_score": r["engagement_surface_score"],
+            "saturation_score": r["saturation_score"],
+            "reply_opportunity_score": r["reply_opportunity_score"],
+            "recommended_action_label": r["recommended_action_label"],
+            "engagement_footnote": _engagement_footnote(
+                r["target_author_follower_count"], eng_settings
+            ),
+        })
+
+    # 4. Account leads.
+    has_ata = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_target_accounts'"
+    ).fetchone()
+    account_leads = []
+    if has_ata:
+        al_rows = conn.execute(
+            """SELECT x_handle, display_name, lane, priority, notes
+               FROM agent_target_accounts WHERE is_active = 1
+               ORDER BY priority ASC, last_engaged_at ASC NULLS FIRST LIMIT 8"""
+        ).fetchall()
+        account_leads = [dict(r) for r in al_rows]
+
+    # 5. Pending agent drafts (proposed).
+    pending_rows = conn.execute(
+        """SELECT ad.id, ad.text, ad.draft_kind, ad.pillar,
+                  ad.similarity_warning_json, ps.composite_label
+           FROM agent_drafts ad
+           LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
+           WHERE ad.status = 'proposed' ORDER BY ad.id DESC LIMIT 5"""
+    ).fetchall()
+    pending_drafts = []
+    for d in pending_rows:
+        preview = (d["text"] or "").strip().replace("\n", " ")
+        if len(preview) > 140:
+            preview = preview[:137] + "…"
+        pending_drafts.append({
+            "id": d["id"], "text_preview": preview,
+            "draft_kind": d["draft_kind"], "pillar": d["pillar"],
+            "composite_label": d["composite_label"],
+            "similarity_warning_json": d["similarity_warning_json"],
+        })
+
+    return {
+        "slice": "next_rep",
+        "coverage": coverage,
+        "biggest_gap_lane": biggest_gap_lane,
+        "biggest_gap_pillar": biggest_gap_pillar,
+        "hypotheses": hypotheses,
+        "reply_targets": reply_targets,
+        "account_leads": account_leads,
+        "pending_drafts": pending_drafts,
+    }
+
+
 def create_app(
     *,
     token: str,
@@ -605,8 +737,7 @@ def create_app(
     @app.get("/views/next-rep", dependencies=[Depends(auth)])
     def view_next_rep(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         """§14.2 Next Rep — lane performance with graduated confidence labels."""
-        rows = conn.execute("SELECT * FROM v_lane_performance").fetchall()
-        return {"slice": "next_rep", "lane_performance": [dict(r) for r in rows]}
+        return _next_rep_slice(conn)
 
     @app.get("/views/validation", dependencies=[Depends(auth)])
     def view_validation(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:

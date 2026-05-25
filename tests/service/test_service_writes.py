@@ -103,7 +103,10 @@ def test_next_rep_and_validation_views(client: TestClient) -> None:
     nr = client.get("/views/next-rep", headers=AUTH)
     assert nr.status_code == 200
     assert nr.json()["slice"] == "next_rep"
-    assert "lane_performance" in nr.json()
+    # Expanded response: coverage, hypotheses, reply_targets, etc.
+    assert "coverage" in nr.json()
+    assert "hypotheses" in nr.json()
+    assert "reply_targets" in nr.json()
 
     val = client.get("/views/validation", headers=AUTH)
     assert val.status_code == 200
