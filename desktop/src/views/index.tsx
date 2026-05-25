@@ -14,6 +14,7 @@ import { TodayView } from "./TodayView";
 import { ProgressView } from "./ProgressView";
 import { ContentPerformanceView } from "./ContentPerformanceView";
 import { NextRepView } from "./NextRepView";
+import { FunnelView } from "./FunnelView";
 
 export interface ViewDef {
   id: string;
@@ -94,24 +95,6 @@ function QueryBody<T>({
 
 // --- wired views -------------------------------------------------------------
 // TodayView, ProgressView, ContentPerformanceView, NextRepView imported above.
-
-const FunnelView: FC = () => (
-  <>
-    <ViewHeader
-      kicker="§14.5 · validation"
-      title="Funnel"
-      blurb="Stir conversion events over the last 7 days — distribution signal kept separate from validation."
-    />
-    <Hairline />
-    <QueryBody
-      qKey="validation"
-      qFn={api.validation}
-      children={(d: { funnel_last_7?: Array<Record<string, unknown>> }) => (
-        <DataTable rows={d.funnel_last_7 ?? []} />
-      )}
-    />
-  </>
-);
 
 const SettingsView: FC = () => (
   <>

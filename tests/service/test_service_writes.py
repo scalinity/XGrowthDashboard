@@ -110,8 +110,9 @@ def test_next_rep_and_validation_views(client: TestClient) -> None:
 
     val = client.get("/views/validation", headers=AUTH)
     assert val.status_code == 200
-    assert val.json()["slice"] == "validation_status"
-    assert "funnel_last_7" in val.json()
+    assert val.json()["slice"] == "funnel"
+    assert "aggregate" in val.json()
+    assert "what_we_know" in val.json()
 
 
 def test_settings_get_and_update(client: TestClient) -> None:

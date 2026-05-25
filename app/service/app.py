@@ -31,6 +31,12 @@ from app.agent.velocity import (
     get_velocity_projection,
 )
 from app.components.charts.follower_trend import FollowerPoint, follower_trend_chart
+from app.components.charts.funnel import (
+    APP_STORE_GAP_LABEL,
+    WHAT_WE_KNOW_TABLE_ROWS,
+    build_funnel_stages,
+    funnel_chart,
+)
 from app.components.charts.lane_grid import confidence_color_for_ui_label, count_rankable_lanes, lane_rows_from_sql
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.agent.reply_targets import engagement_footnote as _engagement_footnote
@@ -535,6 +541,114 @@ def _follower_trend_figure(conn: sqlite3.Connection) -> dict[str, Any]:
     return json.loads(fig.to_json())
 
 
+def _funnel_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Funnel view (§14.5) needs."""
+    from datetime import timedelta
+
+    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+    agg_row = conn.execute(
+        """SELECT COALESCE(SUM(x_impressions_estimate),0) AS x_impressions_estimate,
+                  COALESCE(SUM(profile_visits),0) AS profile_visits,
+                  COALESCE(SUM(link_clicks),0) AS link_clicks,
+                  COALESCE(SUM(getstir_visits),0) AS getstir_visits,
+                  COALESCE(SUM(downloads),0) AS downloads,
+                  COALESCE(SUM(qualified_icp_testers),0) AS qualified_icp_testers,
+                  COALESCE(SUM(working_parent_home_cook_testers),0) AS working_parent_home_cook_testers
+           FROM v_funnel_daily WHERE event_date >= ?""",
+        (cutoff,),
+    ).fetchone()
+    agg = {k: int(agg_row[k] or 0) for k in agg_row.keys()}
+
+    daily_rows = conn.execute(
+        """SELECT event_date, x_impressions_estimate, profile_visits, link_clicks,
+                  getstir_visits, downloads, qualified_icp_testers,
+                  working_parent_home_cook_testers
+           FROM v_funnel_daily WHERE event_date >= ? ORDER BY event_date ASC""",
+        (cutoff,),
+    ).fetchall()
+
+    return {
+        "slice": "funnel",
+        "aggregate": agg,
+        "daily": [dict(r) for r in daily_rows],
+        "app_store_gap_label": APP_STORE_GAP_LABEL,
+        "what_we_know": [{"topic": t, "rule": r} for t, r in WHAT_WE_KNOW_TABLE_ROWS],
+    }
+
+
+def _funnel_chart_figure(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Build the funnel Plotly figure and return as JSON-safe dict."""
+    from datetime import timedelta
+    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+    row = conn.execute(
+        """SELECT COALESCE(SUM(x_impressions_estimate),0) AS x_impressions_estimate,
+                  COALESCE(SUM(profile_visits),0) AS profile_visits,
+                  COALESCE(SUM(link_clicks),0) AS link_clicks,
+                  COALESCE(SUM(downloads),0) AS downloads,
+                  COALESCE(SUM(qualified_icp_testers),0) AS qualified_icp_testers
+           FROM v_funnel_daily WHERE event_date >= ?""",
+        (cutoff,),
+    ).fetchone()
+    stages = build_funnel_stages(
+        impressions=int(row["x_impressions_estimate"] or 0),
+        profile_visits_self_reported=int(row["profile_visits"] or 0),
+        app_store_clicks_self_reported=int(row["link_clicks"] or 0),
+        downloads=int(row["downloads"] or 0),
+        icp_testers_self_reported=int(row["qualified_icp_testers"] or 0),
+    )
+    fig = funnel_chart(stages)
+    return json.loads(fig.to_json())
+
+
+def _funnel_daily_chart_figure(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Build the daily-breakdown stacked bar figure."""
+    import plotly.graph_objects as go
+    from datetime import timedelta
+    from app.components.theme import PALETTE as _P
+
+    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+    rows = conn.execute(
+        """SELECT event_date, profile_visits, link_clicks, getstir_visits, downloads
+           FROM v_funnel_daily WHERE event_date >= ? ORDER BY event_date ASC""",
+        (cutoff,),
+    ).fetchall()
+    fig = go.Figure()
+    if not rows:
+        fig.update_layout(
+            paper_bgcolor=_P["ink"], plot_bgcolor=_P["ink"],
+            font={"family": "IBM Plex Sans, sans-serif", "color": _P["bone"]},
+            annotations=[{"text": "No funnel events in the last 30 days.",
+                          "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5, "showarrow": False,
+                          "font": {"family": "Fraunces, serif", "color": _P["bone_dim"]}}],
+            margin={"t": 20, "b": 60, "l": 60, "r": 20},
+        )
+    else:
+        dates = [r["event_date"] for r in rows]
+        for label, key, color in [
+            ("Profile visits", "profile_visits", _P["confidence_directional_bg"]),
+            ("Link clicks", "link_clicks", _P["confidence_tentative_bg"]),
+            ("getstir.app visits", "getstir_visits", _P["phosphor"]),
+            ("Downloads", "downloads", _P["confidence_confident_bg"]),
+        ]:
+            fig.add_trace(go.Bar(
+                x=dates, y=[int(r[key] or 0) for r in rows],
+                name=label, marker={"color": color},
+            ))
+        fig.update_layout(
+            barmode="stack", paper_bgcolor=_P["ink"], plot_bgcolor=_P["ink"],
+            font={"family": "IBM Plex Sans, sans-serif", "color": _P["bone"]},
+            xaxis={"title": "Date", "gridcolor": _P["hairline"],
+                   "tickfont": {"family": "JetBrains Mono, monospace", "color": _P["bone_dim"]}},
+            yaxis={"title": "Events", "gridcolor": _P["hairline"],
+                   "tickfont": {"family": "JetBrains Mono, monospace", "color": _P["bone_dim"]}},
+            legend={"orientation": "h", "y": -0.25,
+                    "font": {"family": "JetBrains Mono, monospace", "size": 10, "color": _P["bone_dim"]},
+                    "bgcolor": "rgba(0,0,0,0)"},
+            margin={"t": 20, "b": 80, "l": 60, "r": 20}, height=360,
+        )
+    return json.loads(fig.to_json())
+
+
 def _next_rep_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     """Gather every data slice the Next Rep view (§14.2) needs."""
     from datetime import timedelta
@@ -741,11 +855,18 @@ def create_app(
 
     @app.get("/views/validation", dependencies=[Depends(auth)])
     def view_validation(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-        """§14.5 Funnel — last-7 validation funnel (Stir conversion events)."""
-        rows = conn.execute(
-            "SELECT * FROM v_funnel_daily ORDER BY event_date DESC LIMIT 7"
-        ).fetchall()
-        return {"slice": "validation_status", "funnel_last_7": [dict(r) for r in rows]}
+        """§14.5 Funnel — full funnel data, aggregated + daily + charts."""
+        return _funnel_slice(conn)
+
+    @app.get("/charts/funnel", dependencies=[Depends(auth)])
+    def view_funnel_chart(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.5 Funnel chart — 30-day aggregate funnel figure."""
+        return _funnel_chart_figure(conn)
+
+    @app.get("/charts/funnel-daily", dependencies=[Depends(auth)])
+    def view_funnel_daily_chart(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """§14.5 Daily breakdown stacked bar chart."""
+        return _funnel_daily_chart_figure(conn)
 
     @app.get("/views/progress", dependencies=[Depends(auth)])
     def view_progress(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
