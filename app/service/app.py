@@ -1561,6 +1561,113 @@ def create_app(
             raise _form_error(exc) from exc
         return {"snapshot_id": snapshot_id}
 
+    # ----- Blog write endpoints (§14.14 / §14.15) -----
+
+    @app.post("/blogs", dependencies=[Depends(auth)])
+    def create_blog_endpoint(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        blog = _blogs.create_blog(
+            conn,
+            title=payload.get("title", "Untitled"),
+            pillar=payload.get("pillar"),
+            audience=payload.get("audience"),
+            target_length_words=payload.get("target_length_words"),
+            notes=payload.get("notes"),
+        )
+        return {"blog_id": blog.id, "slug": blog.slug, "status": blog.status}
+
+    @app.put("/blogs/{blog_id}", dependencies=[Depends(auth)])
+    def save_blog_endpoint(
+        blog_id: int, payload: dict[str, Any],
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        version = _blogs.save_blog(
+            conn, blog_id,
+            body_markdown=payload.get("body_markdown"),
+            outline_markdown=payload.get("outline_markdown"),
+            title=payload.get("title"),
+            status=payload.get("status"),
+            daniel_revision_note=payload.get("daniel_revision_note"),
+        )
+        if version is None:
+            return {"saved": False, "reason": "no_change"}
+        return {"saved": True, "version_number": version.version_number}
+
+    @app.put("/blogs/{blog_id}/status", dependencies=[Depends(auth)])
+    def transition_blog_status(
+        blog_id: int, payload: dict[str, Any],
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        version = _blogs.transition_status(
+            conn, blog_id, payload["new_status"],
+            daniel_revision_note=payload.get("daniel_revision_note"),
+            external_url=payload.get("external_url"),
+        )
+        return {"new_status": payload["new_status"], "version_number": version.version_number}
+
+    @app.get("/blogs/{blog_id}/versions", dependencies=[Depends(auth)])
+    def list_blog_versions(
+        blog_id: int, conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        versions = _blogs.list_versions(conn, blog_id=blog_id)
+        return {"blog_id": blog_id, "versions": [
+            {"version_number": v.version_number, "created_at": v.created_at_utc,
+             "created_by": v.created_by, "status_at_version": v.status_at_version,
+             "title_at_version": v.title_at_version, "is_current": v.is_current_for_blog}
+            for v in versions
+        ]}
+
+    # ----- Campaign write endpoints (§14.12) -----
+
+    @app.post("/campaigns", dependencies=[Depends(auth)])
+    def create_campaign_endpoint(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        cid = _campaigns.create_campaign(
+            conn,
+            name=payload["name"],
+            theme=payload.get("theme"),
+            hypothesis=payload.get("hypothesis"),
+            start_date=payload["start_date"],
+            end_date=payload["end_date"],
+            success_criteria=payload.get("success_criteria", {}),
+            pillar=payload.get("pillar"),
+            content_type=payload.get("content_type"),
+            notes=payload.get("notes"),
+        )
+        return {"campaign_id": cid}
+
+    @app.put("/campaigns/{campaign_id}/activate", dependencies=[Depends(auth)])
+    def activate_campaign_endpoint(
+        campaign_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        _campaigns.activate_campaign(conn, campaign_id=campaign_id)
+        return {"ok": True, "campaign_id": campaign_id, "status": "active"}
+
+    # ----- Inspiration write endpoints (§14.13) -----
+
+    @app.post("/inspirations", dependencies=[Depends(auth)])
+    def save_inspiration_endpoint(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        iid = _inspiration.save_inspiration(
+            conn,
+            source_post_text=payload["source_post_text"],
+            source_url=payload.get("source_url"),
+            source_author=payload.get("source_author"),
+            tags=payload.get("tags"),
+            notes=payload.get("notes"),
+        )
+        return {"inspiration_id": iid}
+
+    @app.put("/inspirations/{inspiration_id}/archive", dependencies=[Depends(auth)])
+    def archive_inspiration_endpoint(
+        inspiration_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        _inspiration.archive_inspiration(conn, inspiration_id=inspiration_id)
+        return {"ok": True, "inspiration_id": inspiration_id}
+
     @app.post("/forms/post", dependencies=[Depends(auth)])
     def post_log(
         payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
