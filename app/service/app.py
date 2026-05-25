@@ -52,6 +52,11 @@ from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
 from app.forms.post_log import submit_post
 from app.forms.snapshot import submit_snapshot
+from app.forms.classify import submit_classification
+from app.forms.daily_reps import submit_daily_activity
+from app.forms.queues import needs_post_id, needs_tagging
+from app.forms.stir_event import submit_stir_event
+from app.forms.stir_tester import submit_tester
 from app.forms.weekly_review import submit_weekly_review
 from app.paths import resolve_db_path
 from app.secret_store import resolve_secret, store_secret
@@ -1248,6 +1253,82 @@ def _next_rep_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _coach_turn(
+    conn: sqlite3.Connection, conversation_id: int, user_text: str
+) -> dict[str, Any]:
+    """Coach advice-only turn: text-in text-out, NO tools.
+
+    The Streamlit Coach (12_Coach.py) is a separate implementation that calls
+    Anthropic with no tools (enforced by ``assert_coach_excludes_write_tools``).
+    This mirrors that behaviour in the sidecar. Conversations with
+    ``context_seed='coach'`` route here instead of to ``AgentClient.send_message_sync``.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {
+            "user_text": user_text, "assistant_text": None, "tool_calls": [],
+            "input_tokens": None, "output_tokens": None, "cost_usd": None,
+            "model": None,
+            "error": "Anthropic API key not configured. Set it in Settings → API keys.",
+        }
+
+    from app.agent import prompt_builder  # lazy to avoid circular imports
+
+    import anthropic
+
+    # Persist user message first (matches AgentClient.send_message_sync order).
+    conn.execute(
+        "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'user', ?)",
+        (conversation_id, user_text),
+    )
+    conn.commit()
+
+    # Build the shared system prompt + load conversation history.
+    system_prompt = prompt_builder.build_system_prompt(conn)
+    rows = conn.execute(
+        "SELECT role, content FROM agent_messages "
+        "WHERE conversation_id = ? ORDER BY id",
+        (conversation_id,),
+    ).fetchall()
+    messages = [{"role": r["role"], "content": r["content"]} for r in rows]
+
+    model = "claude-sonnet-4-20250514"
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
+        resp = client.messages.create(
+            model=model, max_tokens=2048, system=system_prompt, messages=messages,
+        )
+        text_parts = [
+            getattr(b, "text", "")
+            for b in resp.content
+            if getattr(b, "type", None) == "text"
+        ]
+        assistant_text = "".join(text_parts).strip()
+        in_tok = int(getattr(resp.usage, "input_tokens", 0) or 0)
+        out_tok = int(getattr(resp.usage, "output_tokens", 0) or 0)
+
+        # Persist assistant message.
+        conn.execute(
+            "INSERT INTO agent_messages "
+            "(conversation_id, role, content, model, input_tokens, output_tokens) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?)",
+            (conversation_id, assistant_text, model, in_tok, out_tok),
+        )
+        conn.commit()
+
+        return {
+            "user_text": user_text, "assistant_text": assistant_text,
+            "tool_calls": [], "input_tokens": in_tok, "output_tokens": out_tok,
+            "cost_usd": None, "model": model, "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 — surface all errors to the UI
+        return {
+            "user_text": user_text, "assistant_text": None, "tool_calls": [],
+            "input_tokens": None, "output_tokens": None, "cost_usd": None,
+            "model": None, "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def create_app(
     *,
     token: str,
@@ -1482,6 +1563,60 @@ def create_app(
             raise _form_error(exc) from exc
         return {"correction_id": correction_id}
 
+    @app.post("/forms/classify", dependencies=[Depends(auth)])
+    def post_classify(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            cid = submit_classification(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"classification_id": cid}
+
+    @app.post("/forms/daily-activity", dependencies=[Depends(auth)])
+    def post_daily_activity(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            result = submit_daily_activity(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"result": result}
+
+    @app.post("/forms/stir-event", dependencies=[Depends(auth)])
+    def post_stir_event(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            event_id = submit_stir_event(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"event_id": event_id}
+
+    @app.post("/forms/stir-tester", dependencies=[Depends(auth)])
+    def post_stir_tester(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            tester_id = submit_tester(conn, payload)
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"tester_id": tester_id}
+
+    @app.get("/views/needs-tagging", dependencies=[Depends(auth)])
+    def view_needs_tagging(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        rows = needs_tagging(conn)
+        return {"posts": [dict(r) for r in rows]}
+
+    @app.get("/views/needs-post-id", dependencies=[Depends(auth)])
+    def view_needs_post_id(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        rows = needs_post_id(conn)
+        return {"posts": [dict(r) for r in rows]}
+
     # ----- Settings read/update (§14.7) -----
 
     @app.get("/settings", dependencies=[Depends(auth)])
@@ -1591,6 +1726,16 @@ def create_app(
         body: SendMessageBody,
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict[str, Any]:
+        # Coach conversations use a simplified no-tools path (§14.10):
+        # advice-only text-in text-out, matching the Streamlit Coach's
+        # separate implementation.
+        ctx = conn.execute(
+            "SELECT context_seed FROM agent_conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if ctx and ctx["context_seed"] == "coach":
+            return _coach_turn(conn, conversation_id, body.text)
+
         client = agent_factory()
         turn = client.send_message_sync(
             conn, conversation_id=conversation_id, user_text=body.text
