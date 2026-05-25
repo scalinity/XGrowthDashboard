@@ -13,6 +13,7 @@ import { Callout, Hairline, Kicker } from "../components";
 import { ConfidenceBadge, type ConfidenceTier } from "../components/badges";
 import { TodayView } from "./TodayView";
 import { ProgressView } from "./ProgressView";
+import { ContentPerformanceView } from "./ContentPerformanceView";
 
 export interface ViewDef {
   id: string;
@@ -191,7 +192,7 @@ export const VIEWS: ViewDef[] = [
   { id: "today", label: "Today", group: "Analytics", Component: TodayView },
   { id: "next-rep", label: "Next Rep", group: "Analytics", Component: NextRepView },
   { id: "progress", label: "Progress", group: "Analytics", Component: ProgressView },
-  { id: "content-performance", label: "Content Performance", group: "Analytics", Component: scaffold("§14.4", "Content Performance", "Lane scatter, content-type tab, pre-publish calibration.") },
+  { id: "content-performance", label: "Content Performance", group: "Analytics", Component: ContentPerformanceView },
   { id: "funnel", label: "Funnel", group: "Analytics", Component: FunnelView },
   { id: "weekly-review", label: "Weekly Review", group: "Analytics", Component: scaffold("§14.6", "Weekly Review", "The same questions every week + Markdown export.") },
   { id: "manual-entry", label: "Manual Entry", group: "Manual", Component: scaffold("§15", "Manual Entry", "Daily snapshot, post/reply logging, corrections.") },

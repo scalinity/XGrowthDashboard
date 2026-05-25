@@ -31,6 +31,8 @@ from app.agent.velocity import (
     get_velocity_projection,
 )
 from app.components.charts.follower_trend import FollowerPoint, follower_trend_chart
+from app.components.charts.lane_grid import confidence_color_for_ui_label, count_rankable_lanes, lane_rows_from_sql
+from app.components.badges.confidence_label import ui_label_for_db_label
 from app.db import apply_migrations, connect
 from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
@@ -359,6 +361,168 @@ def _progress_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _content_performance_slice(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Gather every data slice the Content Performance view (§14.4) needs."""
+
+    # 1. Lane performance rows.
+    raw_rows = conn.execute(
+        "SELECT * FROM v_lane_performance ORDER BY post_count DESC"
+    ).fetchall()
+    lane_data = lane_rows_from_sql(raw_rows)
+    rankable_count = count_rankable_lanes(lane_data)
+
+    lanes = []
+    for lr in lane_data:
+        ui_label = ui_label_for_db_label(lr.db_confidence_label)
+        chip_bg = confidence_color_for_ui_label(ui_label)
+        # Format median+IQR server-side (§31.10).
+        if ui_label == "insufficient" or lr.median_impressions is None:
+            median_display = "—"
+        elif lr.iqr_low is None or lr.iqr_high is None:
+            median_display = f"{int(round(lr.median_impressions)):,}"
+        else:
+            median_display = (
+                f"{int(round(lr.median_impressions)):,} "
+                f"[{int(round(lr.iqr_low)):,}–{int(round(lr.iqr_high)):,}]"
+            )
+        lanes.append({
+            "pillar": lr.pillar, "audience": lr.audience, "cta": lr.cta,
+            "post_count": lr.post_count, "days_covered": lr.days_covered,
+            "median_display": median_display,
+            "median_impressions": lr.median_impressions,
+            "iqr_low": lr.iqr_low, "iqr_high": lr.iqr_high,
+            "total_bookmarks": lr.total_bookmarks,
+            "total_replies": lr.total_replies,
+            "stir_signal_count": lr.stir_signal_count,
+            "ui_label": ui_label, "chip_bg": chip_bg,
+        })
+
+    # 2. Best lane (§14.4 anti-overfitting gate).
+    best = None
+    if rankable_count >= 3:
+        rankable = [
+            lr for lr in lane_data
+            if ui_label_for_db_label(lr.db_confidence_label) in {"tentative", "confident"}
+            and lr.median_impressions is not None
+        ]
+        if rankable:
+            b = max(rankable, key=lambda r: r.median_impressions or 0)
+            ui_label = ui_label_for_db_label(b.db_confidence_label)
+            best = {
+                "lane": f"{b.pillar} · {b.audience} · {b.cta}",
+                "median_impressions": int(b.median_impressions or 0),
+                "iqr_low": int(b.iqr_low or 0), "iqr_high": int(b.iqr_high or 0),
+                "ui_label": ui_label,
+                "chip_bg": confidence_color_for_ui_label(ui_label),
+            }
+
+    # 3. V/G/P/P content type table.
+    ct_rows = conn.execute(
+        """SELECT content_type, post_count, days_covered,
+                  median_impressions, iqr_impressions_low, iqr_impressions_high,
+                  median_engagement_rate, confidence_label
+           FROM v_content_type_performance
+           ORDER BY CASE content_type
+              WHEN 'value' THEN 0 WHEN 'growth' THEN 1
+              WHEN 'personality' THEN 2 WHEN 'proof' THEN 3 ELSE 9 END"""
+    ).fetchall()
+    content_types = []
+    for r in ct_rows:
+        ul = ui_label_for_db_label(r["confidence_label"] or "insufficient sample")
+        content_types.append({
+            "content_type": r["content_type"],
+            "post_count": int(r["post_count"] or 0),
+            "days_covered": int(r["days_covered"] or 0),
+            "median_impressions": r["median_impressions"],
+            "median_engagement_rate": r["median_engagement_rate"],
+            "ui_label": ul,
+            "chip_bg": confidence_color_for_ui_label(ul),
+        })
+
+    # 4. Pre-publish scorer calibration.
+    cal_rows = conn.execute(
+        """SELECT ps.composite_label, COUNT(*) AS n,
+                  AVG(plm.impressions) AS avg_impressions,
+                  AVG(plm.engagement_rate) AS avg_engagement_rate,
+                  AVG(ps.screenshot_test_score) AS avg_screenshot_test_score,
+                  COUNT(ps.screenshot_test_score) AS n_with_screenshot_score
+           FROM agent_drafts ad
+           JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
+           JOIN posts p ON p.id = ad.final_post_id
+           JOIN v_post_latest_metrics plm ON plm.post_id = p.id
+           WHERE p.manual_confirmation_status = 'confirmed' AND plm.impressions IS NOT NULL
+           GROUP BY ps.composite_label
+           ORDER BY CASE ps.composite_label
+             WHEN 'strong' THEN 0 WHEN 'viable' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END
+           LIMIT 10"""
+    ).fetchall()
+    calibration = [dict(r) for r in cal_rows]
+
+    return {
+        "slice": "content_performance",
+        "lanes": lanes,
+        "rankable_count": rankable_count,
+        "best_lane": best,
+        "content_types": content_types,
+        "calibration": calibration,
+    }
+
+
+def _lane_scatter_figure(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Build the lane-scatter Plotly figure (§14.4) and return JSON-safe dict."""
+    import plotly.graph_objects as go
+    from datetime import timedelta
+    from app.components.theme import LANE_SCATTER_COLORS, PALETTE
+
+    cutoff = (_date_t.today() - timedelta(days=30)).isoformat()
+    rows = conn.execute(
+        """SELECT plm.post_id, p.created_date, plm.impressions,
+                  plm.pillar, plm.audience, plm.cta, plm.engagement_rate
+           FROM v_post_latest_metrics plm JOIN posts p ON p.id = plm.post_id
+           WHERE p.created_date >= ? AND plm.pillar IS NOT NULL AND plm.impressions IS NOT NULL
+           ORDER BY p.created_date ASC""",
+        (cutoff,),
+    ).fetchall()
+
+    fig = go.Figure()
+    if not rows:
+        fig.update_layout(
+            paper_bgcolor=PALETTE["ink"], plot_bgcolor=PALETTE["ink"],
+            font={"family": "IBM Plex Sans, sans-serif", "color": PALETTE["bone"]},
+            annotations=[{"text": "No classified posts with impressions in the last 30 days.",
+                          "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5, "showarrow": False,
+                          "font": {"family": "Fraunces, serif", "size": 14, "color": PALETTE["bone_dim"]}}],
+            margin={"t": 20, "b": 60, "l": 60, "r": 20},
+        )
+    else:
+        by_lane: dict[tuple[str, str, str], list[tuple[str, int]]] = {}
+        for r in rows:
+            key = (r["pillar"], r["audience"], r["cta"])
+            by_lane.setdefault(key, []).append((r["created_date"], int(r["impressions"])))
+        for i, (lane, posts) in enumerate(by_lane.items()):
+            dates_ = [p[0] for p in posts]
+            imps = [p[1] for p in posts]
+            fig.add_trace(go.Scatter(
+                x=dates_, y=imps, mode="markers",
+                marker={"size": 10, "color": LANE_SCATTER_COLORS[i % len(LANE_SCATTER_COLORS)],
+                         "line": {"color": PALETTE["bone"], "width": 0.5}, "opacity": 0.85},
+                name=" · ".join(lane),
+            ))
+        fig.update_layout(
+            paper_bgcolor=PALETTE["ink"], plot_bgcolor=PALETTE["ink"],
+            font={"family": "IBM Plex Sans, sans-serif", "color": PALETTE["bone"]},
+            xaxis={"title": "Date", "gridcolor": PALETTE["hairline"],
+                   "tickfont": {"family": "JetBrains Mono, monospace", "color": PALETTE["bone_dim"]}},
+            yaxis={"title": "Impressions", "gridcolor": PALETTE["hairline"],
+                   "tickfont": {"family": "JetBrains Mono, monospace", "color": PALETTE["bone_dim"]}},
+            legend={"orientation": "h", "y": -0.25,
+                    "font": {"family": "JetBrains Mono, monospace", "size": 10, "color": PALETTE["bone_dim"]},
+                    "bgcolor": "rgba(0,0,0,0)"},
+            margin={"t": 20, "b": 80, "l": 60, "r": 20}, height=440,
+        )
+    return json.loads(fig.to_json())
+
+
 def _follower_trend_figure(conn: sqlite3.Connection) -> dict[str, Any]:
     """Build the follower-trend Plotly figure and return it as a JSON-safe dict."""
     rows = conn.execute(
@@ -469,6 +633,20 @@ def create_app(
         without any business logic (§31.10). See ``_follower_trend_figure`` for details.
         """
         return _follower_trend_figure(conn)
+
+    @app.get("/views/content-performance", dependencies=[Depends(auth)])
+    def view_content_performance(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """§14.4 Content Performance — lane grid, V/G/P/P, calibration."""
+        return _content_performance_slice(conn)
+
+    @app.get("/charts/lane-scatter", dependencies=[Depends(auth)])
+    def view_lane_scatter(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """§14.4 Lane scatter — raw evidence for the last 30 days."""
+        return _lane_scatter_figure(conn)
 
     # ----- Manual entry write endpoints (§15) -----
     # Wrap the pure forms submit functions. Validation + FormError semantics
