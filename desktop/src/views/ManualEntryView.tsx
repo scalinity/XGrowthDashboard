@@ -12,6 +12,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
+import { SnapshotForm } from "../components/SnapshotForm";
 import { apiFetch } from "../lib/api";
 import { palette } from "../theme/tokens";
 
@@ -33,73 +34,11 @@ const TABS = [
 type TabId = (typeof TABS)[number];
 
 // ---------------------------------------------------------------------------
-// Snapshot form (mirrors snapshot.render)
+// Snapshot tab — delegates to the shared SnapshotForm component (RV5-W6 dedup).
+// Defaults are fetched from /views/today automatically (RV5-W1 fix).
 // ---------------------------------------------------------------------------
 function SnapshotTab() {
-  const queryClient = useQueryClient();
-  const [followers, setFollowers] = useState("");
-  const [following, setFollowing] = useState("");
-  const [posts, setPosts] = useState("");
-  const [listed, setListed] = useState("");
-
-  const mutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) =>
-      apiFetch<{ snapshot_id: number }>("/forms/snapshot", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["today"] });
-      setFollowers(""); setFollowing(""); setPosts(""); setListed("");
-    },
-  });
-
-  const handleSubmit = () => {
-    mutation.mutate({
-      snapshot_date: new Date().toISOString().slice(0, 10),
-      username: "", // Will use server defaults
-      profile_url: "",
-      baseline_followers: 0,
-      followers_count: parseInt(followers, 10),
-      following_count: parseInt(following, 10),
-      post_count: parseInt(posts, 10),
-      listed_count: parseInt(listed, 10) || 0,
-    });
-  };
-
-  const valid = followers !== "" && following !== "" && posts !== "" &&
-    !isNaN(parseInt(followers)) && !isNaN(parseInt(following)) && !isNaN(parseInt(posts));
-
-  return (
-    <div>
-      <h3>Daily snapshot</h3>
-      <p className="faint" style={{ fontSize: "0.82rem", fontStyle: "italic" }}>
-        §15.1 — 30 seconds. Source='manual', data_quality='manual'.
-      </p>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "0.5rem", marginBottom: "0.6rem" }}>
-        {[
-          { label: "Followers", value: followers, set: setFollowers },
-          { label: "Following", value: following, set: setFollowing },
-          { label: "Posts", value: posts, set: setPosts },
-          { label: "Listed", value: listed, set: setListed },
-        ].map(({ label, value, set }) => (
-          <div key={label}>
-            <label className="kicker" style={{ display: "block", marginBottom: "0.2rem" }}>{label}</label>
-            <input type="number" value={value} onChange={(e) => set(e.target.value)} style={{ width: "100%" }} />
-          </div>
-        ))}
-      </div>
-      <button onClick={handleSubmit} disabled={!valid || mutation.isPending} className={valid ? "primary" : undefined}>
-        {mutation.isPending ? "Saving…" : "Save daily snapshot"}
-      </button>
-      {mutation.isSuccess && <p style={{ color: palette.phosphor, marginTop: "0.3rem" }}>Snapshot saved.</p>}
-      {mutation.isError && (
-        <p style={{ color: palette.warnAmber, marginTop: "0.3rem" }}>
-          {String((mutation.error as Error).message ?? mutation.error)}
-        </p>
-      )}
-    </div>
-  );
+  return <SnapshotForm />;
 }
 
 // ---------------------------------------------------------------------------
