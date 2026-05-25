@@ -166,6 +166,7 @@ function SnapshotForm({
   const [following, setFollowing] = useState("");
   const [posts, setPosts] = useState("");
   const [listed, setListed] = useState("");
+  const [fetchedUsername, setFetchedUsername] = useState<string | null>(null);
 
   const fetchMetrics = useMutation({
     mutationFn: () =>
@@ -181,6 +182,7 @@ function SnapshotForm({
       if (data.following_count != null) setFollowing(String(data.following_count));
       if (data.post_count != null) setPosts(String(data.post_count));
       if (data.listed_count != null) setListed(String(data.listed_count));
+      if (data.username) setFetchedUsername(data.username);
     },
   });
 
@@ -193,12 +195,16 @@ function SnapshotForm({
     onSuccess,
   });
 
+  // Use the X API-fetched username when settings aren't configured yet.
+  const resolvedUsername = defaults.username || fetchedUsername || "";
+  const resolvedProfileUrl = defaults.profile_url || (fetchedUsername ? `https://x.com/${fetchedUsername}` : "");
+
   const handleSubmit = () => {
     mutation.mutate({
       snapshot_date: new Date().toISOString().slice(0, 10),
-      username: defaults.username,
-      profile_url: defaults.profile_url,
-      baseline_followers: defaults.baseline_followers,
+      username: resolvedUsername,
+      profile_url: resolvedProfileUrl,
+      baseline_followers: defaults.baseline_followers || 0,
       x_user_id: defaults.x_user_id,
       followers_count: parseInt(followers, 10),
       following_count: parseInt(following, 10),

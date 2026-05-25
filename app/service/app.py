@@ -1414,17 +1414,28 @@ def create_app(
         return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
 
     @app.get("/api/user-metrics", dependencies=[Depends(auth)])
-    def get_user_metrics() -> dict[str, Any]:
+    def get_user_metrics(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
         """Fetch the authenticated user's live metrics from X API (Phase 7).
 
         Returns followers, following, posts, listed counts for the snapshot
-        form. Falls back to 502 if xurl is not authenticated or the API call
-        fails.
+        form. As a side-effect, auto-populates the ``x_handle`` and
+        ``profile_url`` settings if they're empty (so subsequent snapshots
+        don't fail validation).
         """
         try:
             from app.x_client import api_get_user_metrics
 
-            return api_get_user_metrics()
+            metrics = api_get_user_metrics()
+            # Auto-seed settings when not yet configured.
+            username = metrics.get("username")
+            if username:
+                if not get_setting(conn, "x_handle"):
+                    set_setting(conn, "x_handle", username)
+                if not get_setting(conn, "profile_url"):
+                    set_setting(conn, "profile_url", f"https://x.com/{username}")
+            return metrics
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 status_code=502,
