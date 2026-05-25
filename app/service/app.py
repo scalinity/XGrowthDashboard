@@ -42,7 +42,16 @@ from app.components.charts.funnel import (
 from app.components.charts.lane_grid import confidence_color_for_ui_label, count_rankable_lanes, lane_rows_from_sql
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.agent.reply_targets import engagement_footnote as _engagement_footnote
-from app.agent.tools import _load_engagement_surface_settings
+from app.agent.tools import (
+    _load_engagement_surface_settings,
+    _score_reply_candidates,
+    _find_reply_targets,
+    _save_draft_reply,
+    _outline_blog_to_dict,
+    _draft_blog_to_dict,
+    _suggest_blog_edits_to_dict,
+)
+from app.agent import brain_dump as _brain_dump
 from app.agent import blogs as _blogs
 from app.agent import calendar as _calendar
 from app.agent import campaigns as _campaigns
@@ -1678,6 +1687,135 @@ def create_app(
     ) -> dict[str, Any]:
         _inspiration.archive_inspiration(conn, inspiration_id=inspiration_id)
         return {"ok": True, "inspiration_id": inspiration_id}
+
+    # ----- Agent action endpoints — one-click automation from views -----
+    # These wrap the agent tool functions (app.agent.tools) as direct HTTP
+    # calls so views can surface "Draft reply", "Score candidates", etc. as
+    # buttons without going through the chat interface.
+
+    @app.post("/agent/score-candidates", dependencies=[Depends(auth)])
+    def score_candidates(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Score all pending reply-target candidates."""
+        try:
+            result = _score_reply_candidates(conn)
+            return {"ok": True, **result}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/agent/find-reply-targets", dependencies=[Depends(auth)])
+    def find_reply_targets(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Discover new reply-target candidates via the agent."""
+        try:
+            result = _find_reply_targets(conn)
+            return {"ok": True, **result}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/agent/draft-reply", dependencies=[Depends(auth)])
+    def draft_reply(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Draft a reply to a specific reply-target post."""
+        try:
+            result = _save_draft_reply(
+                conn,
+                text=payload["text"],
+                target_post_url=payload["target_post_url"],
+                target_post_text=payload.get("target_post_text"),
+                pillar=payload.get("pillar"),
+                content_type=payload.get("content_type"),
+            )
+            return {"ok": True, **result}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.put("/reply-targets/{rt_id}/skip", dependencies=[Depends(auth)])
+    def skip_reply_target(
+        rt_id: int, payload: dict[str, Any],
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Skip a reply target with a reason."""
+        reason = payload.get("skip_reason", "not_relevant")
+        conn.execute(
+            "UPDATE reply_targets SET status = 'skipped', skip_reason = ? WHERE id = ?",
+            (reason, rt_id),
+        )
+        conn.commit()
+        return {"ok": True, "reply_target_id": rt_id, "status": "skipped"}
+
+    @app.put("/reply-targets/{rt_id}/mark-posted", dependencies=[Depends(auth)])
+    def mark_reply_posted(
+        rt_id: int, payload: dict[str, Any],
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Mark a reply target as posted (with optional posted URL)."""
+        posted_url = payload.get("posted_url")
+        conn.execute(
+            "UPDATE reply_targets SET status = 'posted', posted_reply_url = ? WHERE id = ?",
+            (posted_url, rt_id),
+        )
+        conn.commit()
+        return {"ok": True, "reply_target_id": rt_id, "status": "posted"}
+
+    @app.post("/brain-dumps", dependencies=[Depends(auth)])
+    def create_and_process_brain_dump(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Create a brain dump + run agent processing in one step."""
+        raw_text = payload.get("raw_text", "").strip()
+        if not raw_text:
+            raise HTTPException(status_code=400, detail="raw_text is required")
+        try:
+            dump_id = _brain_dump.create_dump(conn, raw_text=raw_text)
+            result = _brain_dump.process(conn, dump_id)
+            return {
+                "ok": True, "brain_dump_id": dump_id,
+                "candidates": len(result.candidates) if result else 0,
+            }
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/blogs/{blog_id}/outline", dependencies=[Depends(auth)])
+    def outline_blog(
+        blog_id: int, payload: dict[str, Any],
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Agent-generate a blog outline."""
+        try:
+            return _outline_blog_to_dict(
+                conn, blog_id=blog_id,
+                daniel_notes=payload.get("notes"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/blogs/{blog_id}/draft", dependencies=[Depends(auth)])
+    def draft_blog(
+        blog_id: int, payload: dict[str, Any],
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Agent-draft a blog from its outline."""
+        try:
+            return _draft_blog_to_dict(
+                conn, blog_id=blog_id,
+                target_length_words=payload.get("target_length_words"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/blogs/{blog_id}/suggest-edits", dependencies=[Depends(auth)])
+    def suggest_blog_edits(
+        blog_id: int, conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Agent-suggest edits for a blog draft."""
+        try:
+            return _suggest_blog_edits_to_dict(conn, blog_id=blog_id)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.post("/forms/post", dependencies=[Depends(auth)])
     def post_log(
