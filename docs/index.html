@@ -2133,7 +2133,7 @@
         <div class="score-bank" aria-label="Phase 11 counters (planned)">
           <div class="tile"><p class="tile-kicker">Migrations</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
           <div class="tile"><p class="tile-kicker">Tests passing</p><div class="tile-number">1199</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-          <div class="tile"><p class="tile-kicker">Views ported</p><div class="tile-number">09</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="tile"><p class="tile-kicker">Views ported</p><div class="tile-number">18</div><div class="tile-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
           <div class="tile"><p class="tile-kicker">Fix commits</p><div class="tile-number zero">00</div><div class="tile-bar" aria-hidden="true"><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i><i class="dim"></i></div></div>
         </div>
 
@@ -2190,8 +2190,8 @@
         <details class="subsection" id="phase-11-next" data-section-type="next">
           <summary><span class="caret"></span><span class="label-kicker">05 / Forward</span><span class="label-title">Execution order</span></summary>
           <div class="subsection-body">
-            <p><strong>Shipped:</strong> 11.0 FastAPI sidecar; 11.1 path migration; 11.2 design-system port; 11.3 Tauri v2 shell; 11.12 packaging (.app + DMG); Step 0 dev fallback (browser screenshot-diff loop); and <strong>9 of 18 views fully ported:</strong> Today (§14.1), Progress (§14.3 — Plotly follower-trend chart + dual ladders + velocity), Content Performance (§14.4 — lane grid + Plotly scatter + calibration), Next Rep (§14.2 — lane scoreboard + ScoreBank + RecommendedActionBadge), Funnel (§14.5 — two Plotly charts + attribution gap), Weekly Review (§14.6 — summary + form + history), Manual Entry (§15 — tabbed hub with 3 wired forms), Settings (§14.7 — grouped panels with inline edit).</p>
-            <p><strong>Remaining:</strong> 9 views (Agent Chat, Reply Target Queue, Brain Dump, Coach, Account Researcher, Content Calendar, Campaigns, Inspiration Library, Blogs/Blog Editor) + true token-level SSE streaming + Developer-ID signing (optional).</p>
+            <p><strong>Shipped:</strong> 11.0 FastAPI sidecar; 11.1 path migration; 11.2 design-system port; 11.3 Tauri v2 shell; 11.12 packaging (.app + DMG); Step 0 dev fallback (browser screenshot-diff loop); and <strong>all 18 views fully ported</strong> to React with real data endpoints: Today (§14.1, Plotly follower trend, MetricTile, SnapshotForm), Progress (§14.3, dual ladders, velocity projection, behaviour bars), Content Performance (§14.4, lane grid + scatter chart + calibration), Next Rep (§14.2, ScoreBank + RecommendedActionBadge), Funnel (§14.5, two Plotly charts), Weekly Review (§14.6, form + history), Manual Entry (§15, tabbed hub), Settings (§14.7, grouped panels), Agent Chat (§14.8, sync messaging + publish modal), Reply Target Queue (§29.7, per-row scores + actions), Brain Dump (§14.9, SpecimenBlock + CandidateCard), Coach (§14.10, CitationChip), Account Researcher (§28.24), Content Calendar (§14.11), Campaigns (§14.12), Inspiration Library (§14.13), Blogs (§14.14), Blog Editor (§14.15).</p>
+            <p><strong>Remaining:</strong> true token-level SSE streaming for Agent Chat (swap sync endpoint for the Anthropic streaming API) + Developer-ID signing + notarization (optional — ad-hoc suffices for Daniel's machine).</p>
           </div>
         </details>
       </section>
