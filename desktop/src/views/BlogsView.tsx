@@ -111,7 +111,7 @@ export const BlogsView = () => {
           return (
             <div
               key={blog.blog_id}
-              onClick={() => nav("blog-editor")}
+              onClick={() => nav("blog-editor", { blogId: blog.blog_id })}
               style={{
                 padding: "0.6rem 0.85rem",
                 margin: "0.4rem 0",

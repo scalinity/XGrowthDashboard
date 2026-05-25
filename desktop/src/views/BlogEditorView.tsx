@@ -12,6 +12,7 @@ import { Callout, Hairline, Kicker } from "../components";
 import { ConfidenceBadge, StatusChip } from "../components/badges";
 import { ProgressBar } from "../components";
 import { apiFetch } from "../lib/api";
+import { useNavParams as __useNavParams } from "../lib/nav";
 import { palette, fonts } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
@@ -52,15 +53,20 @@ interface BlogDetailData {
 // View
 // ---------------------------------------------------------------------------
 export const BlogEditorView = () => {
-  // For the initial port, load the first blog (or show a placeholder).
-  // In the full implementation this would accept a blog_id from URL params.
+  // RV5-W10: read blog ID from nav params (passed by BlogsView on click).
+  // Falls back to loading the first blog from the list if no param is set
+  // (e.g. navigating to Blog Editor directly from the sidebar).
+  const navParams = __useNavParams();
+  const paramBlogId = typeof navParams.blogId === "number" ? navParams.blogId : null;
+
   const { data: blogsData } = useQuery({
     queryKey: ["blogs"],
     queryFn: () => apiFetch<{ blogs: Array<{ blog_id: number }> }>("/views/blogs"),
     retry: 1,
+    enabled: paramBlogId === null,
   });
 
-  const firstBlogId = blogsData?.blogs?.[0]?.blog_id ?? null;
+  const firstBlogId = paramBlogId ?? blogsData?.blogs?.[0]?.blog_id ?? null;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["blog-detail", firstBlogId],

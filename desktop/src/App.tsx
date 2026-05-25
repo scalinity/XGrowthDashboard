@@ -3,21 +3,34 @@
  * views with the active view derived from state (no useEffect — per the project
  * React rules). The window launches directly into Today.
  */
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Layout } from "./components/Layout";
-import { NavContext } from "./lib/nav";
+import { NavContext, NavParamsContext, type NavParams } from "./lib/nav";
 import { VIEWS } from "./views";
 
 export function App() {
   const [activeId, setActiveId] = useState<string>(VIEWS[0].id);
+  const [navParams, setNavParams] = useState<NavParams>({});
   const active = VIEWS.find((v) => v.id === activeId) ?? VIEWS[0];
   const ActiveView = active.Component;
 
+  const navigate = useCallback((viewId: string, params?: NavParams) => {
+    setActiveId(viewId);
+    setNavParams(params ?? {});
+  }, []);
+
+  const handleSidebarSelect = useCallback((viewId: string) => {
+    setActiveId(viewId);
+    setNavParams({});
+  }, []);
+
   return (
-    <NavContext.Provider value={setActiveId}>
-      <Layout views={VIEWS} activeId={activeId} onSelect={setActiveId}>
-        <ActiveView />
-      </Layout>
+    <NavContext.Provider value={navigate}>
+      <NavParamsContext.Provider value={navParams}>
+        <Layout views={VIEWS} activeId={activeId} onSelect={handleSidebarSelect}>
+          <ActiveView />
+        </Layout>
+      </NavParamsContext.Provider>
     </NavContext.Provider>
   );
 }
