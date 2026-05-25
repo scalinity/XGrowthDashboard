@@ -1111,6 +1111,30 @@ def _oldest_publish_since(
         return None
 
 
+def api_get_user_metrics() -> dict[str, int | str | None]:
+    """Fetch the authenticated user's public metrics from X API v2.
+
+    Hits ``/2/users/me?user.fields=public_metrics`` and returns a dict
+    with ``followers_count``, ``following_count``, ``post_count``,
+    ``listed_count``, and ``username``. Raises ``XApiError`` on failure.
+    """
+    resp = request("/2/users/me?user.fields=public_metrics")
+    if resp.status_code != 200:
+        raise XApiError(
+            f"Failed to fetch user metrics (HTTP {resp.status_code}): "
+            f"{resp.body}"
+        )
+    data = resp.body.get("data", {})
+    pm = data.get("public_metrics", {})
+    return {
+        "username": data.get("username"),
+        "followers_count": pm.get("followers_count"),
+        "following_count": pm.get("following_count"),
+        "post_count": pm.get("tweet_count"),  # X API calls it tweet_count
+        "listed_count": pm.get("listed_count"),
+    }
+
+
 __all__ = [
     "HttpMethod",
     "WriteRateCapacity",
@@ -1124,6 +1148,7 @@ __all__ = [
     "XApiUnavailable",
     "api_get_recent_tweets",
     "batch_request",
+    "api_get_user_metrics",
     "check_write_rate_capacity",
     "is_available",
     "publish_post_to_x_via_api",

@@ -1413,6 +1413,24 @@ def create_app(
         """Liveness probe for the Tauri shell's sidecar handshake. Unauthenticated."""
         return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
 
+    @app.get("/api/user-metrics", dependencies=[Depends(auth)])
+    def get_user_metrics() -> dict[str, Any]:
+        """Fetch the authenticated user's live metrics from X API (Phase 7).
+
+        Returns followers, following, posts, listed counts for the snapshot
+        form. Falls back to 502 if xurl is not authenticated or the API call
+        fails.
+        """
+        try:
+            from app.x_client import api_get_user_metrics
+
+            return api_get_user_metrics()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"X API fetch failed: {exc}",
+            ) from exc
+
     @app.get("/views/today", dependencies=[Depends(auth)])
     def view_today(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         """§14.1 Today slice — mirrors the Streamlit page's primary reads.

@@ -29,7 +29,7 @@ import {
 } from "../components";
 import { apiFetch } from "../lib/api";
 import { useNav } from "../lib/nav";
-import { palette } from "../theme/tokens";
+import { palette, fonts } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the expanded /views/today response shape)
@@ -167,6 +167,23 @@ function SnapshotForm({
   const [posts, setPosts] = useState("");
   const [listed, setListed] = useState("");
 
+  const fetchMetrics = useMutation({
+    mutationFn: () =>
+      apiFetch<{
+        followers_count: number;
+        following_count: number;
+        post_count: number;
+        listed_count: number;
+        username: string;
+      }>("/api/user-metrics"),
+    onSuccess: (data) => {
+      if (data.followers_count != null) setFollowers(String(data.followers_count));
+      if (data.following_count != null) setFollowing(String(data.following_count));
+      if (data.post_count != null) setPosts(String(data.post_count));
+      if (data.listed_count != null) setListed(String(data.listed_count));
+    },
+  });
+
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
       apiFetch<{ snapshot_id: number }>("/forms/snapshot", {
@@ -205,6 +222,35 @@ function SnapshotForm({
         Designed to take 30 seconds. Sets source='manual', data_quality='manual'.
         Corrections never overwrite.
       </p>
+      <div style={{ marginBottom: "0.6rem" }}>
+        <button
+          onClick={() => fetchMetrics.mutate()}
+          disabled={fetchMetrics.isPending}
+          style={{
+            padding: "0.4rem 1rem",
+            background: palette.phosphor,
+            color: palette.ink,
+            border: "none",
+            borderRadius: "2px",
+            fontFamily: fonts.body,
+            fontWeight: 600,
+            cursor: "pointer",
+            opacity: fetchMetrics.isPending ? 0.5 : 1,
+          }}
+        >
+          {fetchMetrics.isPending ? "Fetching…" : "Fetch from X"}
+        </button>
+        {fetchMetrics.isError && (
+          <span style={{ color: palette.warnAmber, fontSize: "0.82rem", marginLeft: "0.6rem" }}>
+            {String((fetchMetrics.error as Error).message ?? fetchMetrics.error)}
+          </span>
+        )}
+        {fetchMetrics.isSuccess && (
+          <span style={{ color: palette.phosphor, fontSize: "0.82rem", marginLeft: "0.6rem" }}>
+            ✓ Fields populated from @{fetchMetrics.data?.username}
+          </span>
+        )}
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "0.5rem", marginBottom: "0.6rem" }}>
         <div>
           <label className="kicker" style={{ display: "block", marginBottom: "0.2rem" }}>Followers</label>
