@@ -50,8 +50,11 @@ function devSidecarInfo(): SidecarInfo {
   return { port: null, token, baseUrl: baseUrl.replace(/\/+$/, ""), ready: true };
 }
 
-/** Poll the shell until the sidecar handshake completes (default ~10s budget). */
-export async function waitForSidecar(timeoutMs = 10_000): Promise<SidecarInfo> {
+/** Poll the shell until the sidecar handshake completes (default ~60s budget).
+ *  The frozen PyInstaller binary can take 30-50s on first launch (extraction +
+ *  migrations), so 10s was too aggressive — caused "sidecar did not become
+ *  ready in time" on cold starts. */
+export async function waitForSidecar(timeoutMs = 60_000): Promise<SidecarInfo> {
   if (cached?.ready) return cached;
   if (!isTauri()) {
     cached = devSidecarInfo();
