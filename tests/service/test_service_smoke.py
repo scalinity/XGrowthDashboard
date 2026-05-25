@@ -97,7 +97,7 @@ def test_today_view_with_valid_token(client: TestClient) -> None:
     assert "today_iso" in body
     assert "snapshot" in body
     assert "daily_reps" in body
-    assert "account_last_7" in body
+    # S2: account_last_7 removed (unused by frontend).
     # daily_reps is now a dict with row/targets/mix, not a list.
     reps = body["daily_reps"]
     assert isinstance(reps, dict)

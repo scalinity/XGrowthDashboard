@@ -60,7 +60,10 @@ interface RepsRow {
   post_target_met: boolean;
   reply_target_met: boolean;
   session_target_met: boolean;
-  [k: string]: unknown;
+  // S7: explicit fields used by the §29.9 mix block (removed index signature).
+  high_engagement_replies_shipped: number;
+  icp_intent_replies_shipped: number;
+  candidates_reviewed_today: number;
 }
 
 interface RepsTargets {

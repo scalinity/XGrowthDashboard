@@ -81,7 +81,8 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     ...init,
     headers: {
       Authorization: `Bearer ${info.token}`,
-      "Content-Type": "application/json",
+      // S1: only set Content-Type when there's a body (POST/PUT).
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -92,10 +93,4 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return (await res.json()) as T;
 }
 
-export const api = {
-  health: () => apiFetch<{ status: string }>("/health"),
-  today: () => apiFetch<Record<string, unknown>>("/views/today"),
-  nextRep: () => apiFetch<Record<string, unknown>>("/views/next-rep"),
-  validation: () => apiFetch<Record<string, unknown>>("/views/validation"),
-  settings: () => apiFetch<{ settings: Record<string, unknown> }>("/settings"),
-};
+// S3: removed dead api.* convenience wrappers — views use apiFetch<T> directly.

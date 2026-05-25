@@ -690,10 +690,7 @@ def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
         "x_user_id": get_setting(conn, "x_user_id"),
     }
 
-    # 9. Account last 7 (kept for the account table at the bottom).
-    account_last_7 = conn.execute(
-        "SELECT * FROM v_account_daily ORDER BY snapshot_date DESC LIMIT 7"
-    ).fetchall()
+    # S2: removed unused account_last_7 query (no frontend consumer).
 
     return {
         "slice": "today",
@@ -723,7 +720,6 @@ def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
         "pending_drafts": pending_drafts,
         "recent_posts": recent_posts,
         "snapshot_defaults": snap_defaults,
-        "account_last_7": [dict(r) for r in account_last_7],
     }
 
 
