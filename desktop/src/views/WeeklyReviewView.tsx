@@ -28,6 +28,8 @@ import { palette } from "../theme/tokens";
 // ---------------------------------------------------------------------------
 interface WeeklyReviewSummary {
   follower_delta: number | null;
+  followers_start: number | null;
+  followers_end: number | null;
   posts_shipped: number;
   replies_shipped: number;
   reply_sessions_completed: number;
@@ -86,11 +88,13 @@ interface WeeklyReviewData {
 // ---------------------------------------------------------------------------
 function ReviewForm({
   existing,
+  summary,
   weekStart,
   weekEnd,
   counterfactualRequired,
 }: {
   existing: ExistingReview | null;
+  summary: WeeklyReviewSummary;
   weekStart: string;
   weekEnd: string;
   counterfactualRequired: boolean;
@@ -130,15 +134,16 @@ function ReviewForm({
       counterfactual_note: counterfactualNote.trim() || null,
       confidence_label: confidenceLabel,
       daniel_notes: danielNotes || null,
-      // Auto-filled metrics pass through from summary (server already has them).
-      followers_start: existing?.followers_start ?? null,
-      followers_end: existing?.followers_end ?? null,
-      posts_shipped: existing?.posts_shipped ?? 0,
-      replies_shipped: existing?.replies_shipped ?? 0,
-      reply_sessions_completed: existing?.reply_sessions_completed ?? 0,
-      daily_reps_days_completed: existing?.daily_reps_days_completed ?? 0,
-      downloads: existing?.downloads ?? 0,
-      qualified_icp_testers: existing?.qualified_icp_testers ?? 0,
+      // Auto-filled metrics: use existing review if re-saving, else fall
+      // through to the server-computed summary (RV5-C2 fix — never send zeros).
+      followers_start: existing?.followers_start ?? summary.followers_start ?? null,
+      followers_end: existing?.followers_end ?? summary.followers_end ?? null,
+      posts_shipped: existing?.posts_shipped ?? summary.posts_shipped,
+      replies_shipped: existing?.replies_shipped ?? summary.replies_shipped,
+      reply_sessions_completed: existing?.reply_sessions_completed ?? summary.reply_sessions_completed,
+      daily_reps_days_completed: existing?.daily_reps_days_completed ?? summary.daily_reps_days_completed,
+      downloads: existing?.downloads ?? summary.downloads,
+      qualified_icp_testers: existing?.qualified_icp_testers ?? summary.qualified_icp_testers,
     });
   };
 
@@ -358,6 +363,7 @@ export const WeeklyReviewView: FC = () => {
       <div key={existing_review?.id ?? "new"}>
         <ReviewForm
           existing={existing_review}
+          summary={summary}
           weekStart={week_start}
           weekEnd={week_end}
           counterfactualRequired={counterfactual_required}
