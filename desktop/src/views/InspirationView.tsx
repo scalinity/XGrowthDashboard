@@ -18,7 +18,7 @@ import { palette, fonts } from "../theme/tokens";
 // ---------------------------------------------------------------------------
 interface Transform {
   id: number;
-  mode: string;
+  transform_mode: string;
   output_text: string;
   plagiarism_risk_label: string | null;
   created_at_utc: string;
@@ -192,7 +192,7 @@ export const InspirationView = () => {
                         className="numeric"
                         style={{ fontSize: "0.75rem", color: palette.phosphor }}
                       >
-                        {t.mode}
+                        {t.transform_mode}
                       </span>
                       <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
                         {t.plagiarism_risk_label && (

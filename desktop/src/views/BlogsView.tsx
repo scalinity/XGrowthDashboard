@@ -27,8 +27,8 @@ interface BlogRow {
   actual_length_words: number | null;
   target_length_words: number | null;
   current_version_number: number | null;
-  current_version_author: string | null;
-  confidence_label: string | null;
+  last_edited_by: string | null;
+  latest_confidence_label: string | null;
   last_edited_at_utc: string | null;
   agent_assisted: number | boolean | null;
 }
@@ -137,8 +137,8 @@ export const BlogsView = () => {
                     label={blog.status}
                     tone={STATUS_TONE[blog.status] ?? "neutral"}
                   />
-                  {blog.confidence_label && (
-                    <ConfidenceBadge tier={confidenceTier(blog.confidence_label)} label={blog.confidence_label} />
+                  {blog.latest_confidence_label && (
+                    <ConfidenceBadge tier={confidenceTier(blog.latest_confidence_label)} label={blog.latest_confidence_label} />
                   )}
                 </div>
               </div>
@@ -159,7 +159,7 @@ export const BlogsView = () => {
                   ` / ${blog.target_length_words} target`}
                 {blog.current_version_number != null &&
                   ` · v${blog.current_version_number}`}
-                {blog.current_version_author && ` by ${blog.current_version_author}`}
+                {blog.last_edited_by && ` by ${blog.last_edited_by}`}
                 {blog.agent_assisted ? " · agent-assisted" : ""}
               </div>
 
