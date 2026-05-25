@@ -1,20 +1,19 @@
 /**
- * View registry + components (spec §31.7). The 18 views, grouped to mirror the
- * Streamlit page order. Core read-only views are wired to the sidecar API via
- * TanStack Query (no useEffect — per the project React rules). Views whose
- * read endpoints land in later increments render a design-system scaffold so
- * the app is fully navigable now.
+ * View registry (spec §31.7). The 18 views, grouped to mirror the
+ * Streamlit page order. Each ported view lives in its own file under
+ * src/views/; scaffolds remain for views whose endpoints aren't wired yet.
  */
-import type { FC, ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import type { FC } from "react";
 
-import { api } from "../lib/api";
 import { Callout, Hairline, Kicker } from "../components";
 import { TodayView } from "./TodayView";
 import { ProgressView } from "./ProgressView";
 import { ContentPerformanceView } from "./ContentPerformanceView";
 import { NextRepView } from "./NextRepView";
 import { FunnelView } from "./FunnelView";
+import { WeeklyReviewView } from "./WeeklyReviewView";
+import { ManualEntryView } from "./ManualEntryView";
+import { SettingsView } from "./SettingsView";
 
 export interface ViewDef {
   id: string;
@@ -23,102 +22,17 @@ export interface ViewDef {
   Component: FC;
 }
 
-// --- shared render helpers ---------------------------------------------------
-function ViewHeader({ kicker, title, blurb }: { kicker: string; title: string; blurb?: string }) {
-  return (
-    <header style={{ marginBottom: "0.4rem" }}>
-      <Kicker>{kicker}</Kicker>
-      <h1 style={{ fontSize: "2.1rem" }}>{title}</h1>
-      {blurb && (
-        <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
-          {blurb}
-        </p>
-      )}
-    </header>
-  );
-}
-
-function fmt(v: unknown): string {
-  if (v === null || v === undefined) return "—";
-  if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  return String(v);
-}
-
-function DataTable({ rows }: { rows: Array<Record<string, unknown>> }) {
-  if (!rows || rows.length === 0) return <p className="dim">No rows yet.</p>;
-  const cols = Object.keys(rows[0]);
-  return (
-    <table>
-      <thead>
-        <tr>
-          {cols.map((c) => (
-            <th key={c}>{c.replace(/_/g, " ")}</th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r, i) => (
-          <tr key={i}>
-            {cols.map((c) => (
-              <td key={c} className={typeof r[c] === "number" ? "numeric" : undefined}>
-                {fmt(r[c])}
-              </td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-/** useQuery wrapper with design-system loading/error states (no useEffect). */
-function QueryBody<T>({
-  qKey,
-  qFn,
-  children,
-}: {
-  qKey: string;
-  qFn: () => Promise<T>;
-  children: (data: T) => ReactNode;
-}) {
-  const { data, isLoading, error } = useQuery({ queryKey: [qKey], queryFn: qFn, retry: 1 });
-  if (isLoading) return <p className="dim">Reading the local service…</p>;
-  if (error) {
-    return (
-      <Callout>
-        Couldn't reach the local service. <em>{String((error as Error).message ?? error)}</em>
-      </Callout>
-    );
-  }
-  return <>{children(data as T)}</>;
-}
-
-// --- wired views -------------------------------------------------------------
-// TodayView, ProgressView, ContentPerformanceView, NextRepView imported above.
-
-const SettingsView: FC = () => (
-  <>
-    <ViewHeader kicker="§14.7 · configuration" title="Settings" blurb="Account, goals, daily reps, data sources, and the Growth Agent." />
-    <Hairline />
-    <QueryBody
-      qKey="settings"
-      qFn={api.settings}
-      children={(d: { settings?: Record<string, unknown> }) => {
-        const rows = Object.entries(d.settings ?? {}).map(([key, value]) => ({
-          key,
-          value: typeof value === "object" ? JSON.stringify(value) : value,
-        }));
-        return <DataTable rows={rows} />;
-      }}
-    />
-  </>
-);
-
 // --- scaffold for views whose endpoints land in later increments ------------
 function scaffold(kicker: string, title: string, blurb: string): FC {
   const Scaffolded: FC = () => (
     <>
-      <ViewHeader kicker={kicker} title={title} blurb={blurb} />
+      <header style={{ marginBottom: "0.4rem" }}>
+        <Kicker>{kicker}</Kicker>
+        <h1 style={{ fontSize: "2.1rem" }}>{title}</h1>
+        <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
+          {blurb}
+        </p>
+      </header>
       <Hairline />
       <Callout>
         This view's data wiring lands in a later Phase 11.4+ increment.{" "}
@@ -136,8 +50,8 @@ export const VIEWS: ViewDef[] = [
   { id: "progress", label: "Progress", group: "Analytics", Component: ProgressView },
   { id: "content-performance", label: "Content Performance", group: "Analytics", Component: ContentPerformanceView },
   { id: "funnel", label: "Funnel", group: "Analytics", Component: FunnelView },
-  { id: "weekly-review", label: "Weekly Review", group: "Analytics", Component: scaffold("§14.6", "Weekly Review", "The same questions every week + Markdown export.") },
-  { id: "manual-entry", label: "Manual Entry", group: "Manual", Component: scaffold("§15", "Manual Entry", "Daily snapshot, post/reply logging, corrections.") },
+  { id: "weekly-review", label: "Weekly Review", group: "Analytics", Component: WeeklyReviewView },
+  { id: "manual-entry", label: "Manual Entry", group: "Manual", Component: ManualEntryView },
   { id: "settings", label: "Settings", group: "Manual", Component: SettingsView },
   { id: "agent-chat", label: "Agent Chat", group: "Agent", Component: scaffold("§14.8", "Agent Chat", "Streaming chat, visible tool calls, §28.10 confirm modal.") },
   { id: "reply-queue", label: "Reply Target Queue", group: "Agent", Component: scaffold("§29.7", "Reply Target Queue", "Scored candidates, R/E/S/O cluster, recommended action.") },
