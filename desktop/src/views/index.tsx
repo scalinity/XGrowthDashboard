@@ -9,8 +9,9 @@ import type { FC, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
-import { Callout, Hairline, Kicker, ReadoutCard } from "../components";
+import { Callout, Hairline, Kicker } from "../components";
 import { ConfidenceBadge, type ConfidenceTier } from "../components/badges";
+import { TodayView } from "./TodayView";
 
 export interface ViewDef {
   id: string;
@@ -67,28 +68,6 @@ function DataTable({ rows }: { rows: Array<Record<string, unknown>> }) {
   );
 }
 
-function StatGrid({ obj, max = 4 }: { obj: Record<string, unknown> | undefined; max?: number }) {
-  if (!obj) return null;
-  const entries = Object.entries(obj)
-    .filter(([, v]) => typeof v === "number")
-    .slice(0, max);
-  if (!entries.length) return null;
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(${entries.length}, 1fr)`,
-        gap: "0.6rem",
-        marginBottom: "1rem",
-      }}
-    >
-      {entries.map(([k, v]) => (
-        <ReadoutCard key={k} label={k.replace(/_/g, " ")} value={fmt(v)} />
-      ))}
-    </div>
-  );
-}
-
 /** useQuery wrapper with design-system loading/error states (no useEffect). */
 function QueryBody<T>({
   qKey,
@@ -112,34 +91,7 @@ function QueryBody<T>({
 }
 
 // --- wired views -------------------------------------------------------------
-const TodayView: FC = () => (
-  <>
-    <ViewHeader
-      kicker="§14.1 · morning weigh-in"
-      title="Today"
-      blurb="Follower trend, daily reps, and the noise-floor reminder."
-    />
-    <Hairline />
-    <QueryBody
-      qKey="today"
-      qFn={api.today}
-      children={(d: { daily_reps?: Array<Record<string, unknown>>; account_last_7?: Array<Record<string, unknown>> }) => (
-        <>
-          <Kicker>Latest snapshot</Kicker>
-          <StatGrid obj={d.account_last_7?.[0]} />
-          <Kicker>Daily reps</Kicker>
-          <StatGrid obj={d.daily_reps?.[0]} />
-          <Hairline />
-          <Kicker>Account · last 7</Kicker>
-          <div style={{ marginTop: "0.5rem" }}>
-            <DataTable rows={d.account_last_7 ?? []} />
-          </div>
-        </>
-      )}
-    />
-  </>
-);
-
+// TodayView is imported from ./TodayView.tsx (full §14.1 port).
 const CONFIDENCE_MAP: Record<string, ConfidenceTier> = {
   none: "insufficient",
   insufficient: "insufficient",

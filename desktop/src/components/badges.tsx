@@ -100,3 +100,88 @@ export function CitationChip({
     </span>
   );
 }
+
+// --- Prepublish composite-label chip (§28.11) --------------------------------
+const PREPUBLISH_STYLES: Record<string, [string, string]> = {
+  weak: [palette.confidenceDirectionalBg, palette.confidenceDirectionalFg],
+  viable: [palette.confidenceTentativeBg, palette.confidenceTentativeFg],
+  strong: [palette.confidenceConfidentBg, palette.confidenceConfidentFg],
+};
+
+export function PrepublishChip({ label }: { label: string | null }) {
+  if (!label) return null;
+  const key = label.trim().toLowerCase();
+  const [bg, fg] = PREPUBLISH_STYLES[key] ?? [palette.surface, palette.boneDim];
+  return <span style={chipStyle(bg, fg, { fontWeight: 600 })}>PRE-PUBLISH · {key}</span>;
+}
+
+// --- Repetition guard banner (§28.13) ----------------------------------------
+interface SimilarityWarning {
+  label?: string;
+  max_cosine?: number;
+  nearest_post_id?: number;
+  nearest_text_excerpt?: string;
+}
+
+const REP_LABELS: Record<string, [string, string]> = {
+  near_duplicate: ["NEAR DUPLICATE", "You've shipped almost exactly this idea before. Decide consciously."],
+  close_echo: ["CLOSE ECHO", "Similar to a recent post. Worth a glance before publishing."],
+};
+
+export function RepetitionBanner({ warningJson }: { warningJson: string | Record<string, unknown> | null }) {
+  if (!warningJson) return null;
+  let warning: SimilarityWarning;
+  if (typeof warningJson === "string") {
+    try {
+      warning = JSON.parse(warningJson);
+    } catch {
+      return null;
+    }
+  } else {
+    warning = warningJson as SimilarityWarning;
+  }
+  const label = (warning.label ?? "").toLowerCase();
+  const match = REP_LABELS[label];
+  if (!match) return null;
+  const [chipLabel, summary] = match;
+  const cosine = typeof warning.max_cosine === "number" ? warning.max_cosine.toFixed(2) : "—";
+  const excerpt = warning.nearest_text_excerpt ?? "";
+  const nearestId = warning.nearest_post_id;
+
+  return (
+    <div
+      style={{
+        borderLeft: `3px solid ${palette.warnAmber}`,
+        background: palette.surfaceRaised,
+        padding: "0.5rem 0.8rem",
+        margin: "0.4rem 0",
+      }}
+    >
+      <div
+        className="numeric"
+        style={{
+          fontSize: "0.7rem",
+          letterSpacing: "0.08em",
+          color: palette.warnAmber,
+          textTransform: "uppercase",
+        }}
+      >
+        REPETITION GUARD · {chipLabel} · COSINE {cosine}
+      </div>
+      <div style={{ fontSize: "0.85rem", color: palette.bone, marginTop: "0.3rem" }}>
+        {summary}
+      </div>
+      <div
+        style={{
+          fontFamily: "var(--font-display)",
+          fontSize: "0.95rem",
+          color: palette.boneDim,
+          marginTop: "0.4rem",
+          fontStyle: "italic",
+        }}
+      >
+        Nearest post #{nearestId ?? "?"}: {excerpt}
+      </div>
+    </div>
+  );
+}

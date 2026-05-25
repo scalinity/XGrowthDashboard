@@ -5,6 +5,7 @@
  */
 import { useState } from "react";
 import { Layout } from "./components/Layout";
+import { NavContext } from "./lib/nav";
 import { VIEWS } from "./views";
 
 export function App() {
@@ -13,8 +14,10 @@ export function App() {
   const ActiveView = active.Component;
 
   return (
-    <Layout views={VIEWS} activeId={activeId} onSelect={setActiveId}>
-      <ActiveView />
-    </Layout>
+    <NavContext.Provider value={setActiveId}>
+      <Layout views={VIEWS} activeId={activeId} onSelect={setActiveId}>
+        <ActiveView />
+      </Layout>
+    </NavContext.Provider>
   );
 }

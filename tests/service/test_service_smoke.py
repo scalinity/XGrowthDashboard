@@ -62,9 +62,19 @@ def test_today_view_with_valid_token(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["slice"] == "today"
+    assert "today_iso" in body
+    assert "snapshot" in body
     assert "daily_reps" in body
     assert "account_last_7" in body
-    assert isinstance(body["daily_reps"], list)
+    # daily_reps is now a dict with row/targets/mix, not a list.
+    reps = body["daily_reps"]
+    assert isinstance(reps, dict)
+    assert "row" in reps
+    assert "targets" in reps
+    assert "mix" in reps
+    # snapshot_defaults is provided for the snapshot form.
+    assert "snapshot_defaults" in body
+    assert "username" in body["snapshot_defaults"]
 
 
 def test_create_app_runs_startup_invariants() -> None:
