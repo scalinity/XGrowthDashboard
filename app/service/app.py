@@ -489,9 +489,9 @@ def _account_researcher_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     if has_ata:
         rows = conn.execute(
             """SELECT x_handle, display_name, lane, priority, notes,
-                      is_active, last_engaged_at, created_at_utc
+                      is_active, last_engaged_at, created_at
                FROM agent_target_accounts
-               ORDER BY created_at_utc DESC LIMIT 30"""
+               ORDER BY created_at DESC LIMIT 30"""
         ).fetchall()
         accounts = [dict(r) for r in rows]
 

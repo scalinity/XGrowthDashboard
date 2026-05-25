@@ -37,6 +37,38 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/views/today",
+        "/views/next-rep",
+        "/views/progress",
+        "/views/content-performance",
+        "/views/validation",
+        "/views/weekly-review",
+        "/views/reply-queue",
+        "/views/content-calendar",
+        "/views/campaigns",
+        "/views/inspiration",
+        "/views/blogs",
+        "/views/brain-dump",
+        "/views/account-researcher",
+        "/agent/conversations",
+        "/charts/follower-trend",
+        "/charts/lane-scatter",
+        "/charts/funnel",
+        "/charts/funnel-daily",
+        "/settings",
+    ],
+)
+def test_all_view_endpoints_return_200(client: TestClient, path: str) -> None:
+    """RV5-W7: parametrized smoke test for every read endpoint."""
+    resp = client.get(path, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert resp.status_code == 200, f"{path} returned {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert isinstance(body, dict), f"{path} did not return a JSON object"
+
+
 def test_health_is_public(client: TestClient) -> None:
     resp = client.get("/health")
     assert resp.status_code == 200
