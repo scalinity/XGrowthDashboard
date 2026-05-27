@@ -37,11 +37,11 @@ def test_health_details_shape(tmp_path: Path) -> None:
 def test_diagnostics_copy_redacts_secrets(
     tmp_path: Path, monkeypatch
 ) -> None:
-    import app.service.app as svc
+    import app.service.routes.registry as registry
 
     store = {"ANTHROPIC_API_KEY": SENTINEL}
-    monkeypatch.setattr(svc, "store_secret", lambda name, value: store.update({name: value}))
-    monkeypatch.setattr(svc, "resolve_secret", store.get)
+    monkeypatch.setattr(registry, "store_secret", lambda name, value: store.update({name: value}))
+    monkeypatch.setattr(registry, "resolve_secret", store.get)
 
     client = _client(tmp_path)
     resp = client.get("/diagnostics/copy", headers={"Authorization": f"Bearer {TOKEN}"})
