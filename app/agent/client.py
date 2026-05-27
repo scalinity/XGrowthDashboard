@@ -45,6 +45,7 @@ _log = logging.getLogger(__name__)
 SAVE_DRAFT_TOOLS: frozenset[str] = frozenset(
     {"save_draft_post", "save_draft_reply"}
 )
+MAX_TOOL_ROUNDS = 4
 
 
 # Phase 10 / §29.5 reply_intent promotion. Cached defaults match the
@@ -541,100 +542,120 @@ class AgentClient:
             )
             return turn
 
-        try:
-            assistant_text, tool_calls, in_tok, out_tok = self._call_model(
-                conn, conversation_id=conversation_id
-            )
-        except Exception as exc:
-            _log.exception(
-                "Anthropic call failed for conversation_id=%s model=%s status_code=%s",
-                conversation_id,
-                self.model,
-                _anthropic_status_code(exc),
-            )
-            turn.error = _format_anthropic_error_for_user(exc)
-            return turn
-
-        # Estimate cost from token counts using the rate snapshot.
-        estimate = cost.estimate_cost(
-            input_tokens=in_tok, output_tokens=out_tok, model=self.model
-        )
-        # Phase 5.8 / §28.14 — parse confidence labels from the assistant
-        # message and persist the dominant one. Drafts inherit it via the
-        # tool-result wiring further down (search for "Phase 5.8 / §28.14").
-        from app.agent.session import (
-            dominant_confidence_label,
-            extract_confidence_labels,
-        )
-        _conf_labels = extract_confidence_labels(assistant_text)
-        _dominant_conf = dominant_confidence_label(_conf_labels)
-
-        msg_id = append_message(
-            conn,
-            conversation_id=conversation_id,
-            role="assistant",
-            content=assistant_text,
-            model=self.model,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            rate_snapshot=estimate.rate_snapshot,
-            tool_calls=tool_calls or None,
-            confidence_label=_dominant_conf,
-        )
-
-        # Dispatch each tool_use block locally.
+        total_in_tok = 0
+        total_out_tok = 0
         dispatched: list[dict] = []
-        for tc in tool_calls:
-            tc_name = tc.get("name", "")
-            tc_input = tc.get("input", {}) or {}
-            # For save_draft_* tools, look up the conversation's current
-            # IWH attempt count so the orchestrator's refuse-on-N+1 gate
-            # has the right starting index. Counter increments via
-            # _revise_draft (the durable side); this is the read.
-            current_attempt = 1
-            if tc_name in SAVE_DRAFT_TOOLS:
-                row = conn.execute(
-                    """
-                    SELECT COALESCE(MAX(iwh_attempt_index), 0) + 1 AS next_idx
-                    FROM agent_drafts
-                    WHERE conversation_id = ? AND status != 'rejected'
-                    """,
-                    (conversation_id,),
-                ).fetchone()
-                if row is not None and row["next_idx"] is not None:
-                    current_attempt = int(row["next_idx"])
-            result = dispatch_tool_call(
-                conn,
-                tool_name=tc_name,
-                tool_input=tc_input,
-                message_id=msg_id,
-                assistant_text=assistant_text,
-                current_attempt_index=current_attempt,
+        tool_rounds = 0
+
+        while True:
+            try:
+                assistant_text, tool_calls, in_tok, out_tok = self._call_model(
+                    conn, conversation_id=conversation_id
+                )
+            except Exception as exc:
+                _log.exception(
+                    "Anthropic call failed for conversation_id=%s model=%s status_code=%s",
+                    conversation_id,
+                    self.model,
+                    _anthropic_status_code(exc),
+                )
+                turn.error = _format_anthropic_error_for_user(exc)
+                return turn
+
+            total_in_tok += in_tok
+            total_out_tok += out_tok
+            call_estimate = cost.estimate_cost(
+                input_tokens=in_tok, output_tokens=out_tok, model=self.model
             )
-            dispatched.append(result)
-            # Phase 5.8 / §28.14 — the dominant confidence label is now
-            # injected into the save_draft_* tool_input by dispatch_tool_call
-            # (see P58R-6) so it lands inside the handler's transaction.
-            # No post-hoc UPDATE needed here.
-            # Persist tool_result message so the next turn has it in context.
-            # Switch on `status` instead of truthy result — a legitimate empty
-            # result ({} / []) is falsy and used to fall through to error,
-            # which was None, persisted as the literal string "null" (W6).
-            if result.get("status") == "success":
-                content_payload = result.get("result")
-            else:
-                content_payload = result.get("error") or result.get("rationale") or ""
-            append_message(
+            # Phase 5.8 / §28.14 — parse confidence labels from the assistant
+            # message and persist the dominant one. Drafts inherit it via the
+            # tool-result wiring further down (search for "Phase 5.8 / §28.14").
+            from app.agent.session import (
+                dominant_confidence_label,
+                extract_confidence_labels,
+            )
+            _conf_labels = extract_confidence_labels(assistant_text)
+            _dominant_conf = dominant_confidence_label(_conf_labels)
+
+            msg_id = append_message(
                 conn,
                 conversation_id=conversation_id,
-                role="tool_result",
-                content=json.dumps(content_payload, default=str),
-                tool_call_id=tc.get("id"),
+                role="assistant",
+                content=assistant_text,
+                model=self.model,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                rate_snapshot=call_estimate.rate_snapshot,
+                tool_calls=tool_calls or None,
+                confidence_label=_dominant_conf,
             )
-        turn.assistant_text = assistant_text
+            turn.assistant_text = assistant_text
+
+            if not tool_calls:
+                break
+            if tool_rounds >= MAX_TOOL_ROUNDS:
+                turn.error = (
+                    "Growth Agent stopped after too many tool-use rounds. "
+                    "Try narrowing the request and run it again."
+                )
+                break
+
+            tool_rounds += 1
+            for tc in tool_calls:
+                tc_name = tc.get("name", "")
+                tc_input = tc.get("input", {}) or {}
+                # For save_draft_* tools, look up the conversation's current
+                # IWH attempt count so the orchestrator's refuse-on-N+1 gate
+                # has the right starting index. Counter increments via
+                # _revise_draft (the durable side); this is the read.
+                current_attempt = 1
+                if tc_name in SAVE_DRAFT_TOOLS:
+                    row = conn.execute(
+                        """
+                        SELECT COALESCE(MAX(iwh_attempt_index), 0) + 1 AS next_idx
+                        FROM agent_drafts
+                        WHERE conversation_id = ? AND status != 'rejected'
+                        """,
+                        (conversation_id,),
+                    ).fetchone()
+                    if row is not None and row["next_idx"] is not None:
+                        current_attempt = int(row["next_idx"])
+                result = dispatch_tool_call(
+                    conn,
+                    tool_name=tc_name,
+                    tool_input=tc_input,
+                    message_id=msg_id,
+                    assistant_text=assistant_text,
+                    current_attempt_index=current_attempt,
+                )
+                dispatched.append(result)
+                # Phase 5.8 / §28.14 — the dominant confidence label is now
+                # injected into the save_draft_* tool_input by dispatch_tool_call
+                # (see P58R-6) so it lands inside the handler's transaction.
+                # No post-hoc UPDATE needed here.
+                # Persist tool_result message so this same turn can continue
+                # with the local tool output and future turns keep context.
+                # Switch on `status` instead of truthy result — a legitimate empty
+                # result ({} / []) is falsy and used to fall through to error,
+                # which was None, persisted as the literal string "null" (W6).
+                if result.get("status") == "success":
+                    content_payload = result.get("result")
+                else:
+                    content_payload = result.get("error") or result.get("rationale") or ""
+                append_message(
+                    conn,
+                    conversation_id=conversation_id,
+                    role="tool_result",
+                    content=json.dumps(content_payload, default=str),
+                    tool_call_id=tc.get("id"),
+                )
+
+        estimate = cost.estimate_cost(
+            input_tokens=total_in_tok, output_tokens=total_out_tok, model=self.model
+        )
         turn.tool_calls = dispatched
-        turn.input_tokens = in_tok
-        turn.output_tokens = out_tok
+        turn.input_tokens = total_in_tok
+        turn.output_tokens = total_out_tok
         turn.cost_usd = estimate.total_usd
         return turn
 

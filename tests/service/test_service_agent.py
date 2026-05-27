@@ -32,7 +32,32 @@ class _StubClient(AgentClient):
         return ("stub assistant reply", [], 12, 7)
 
 
-def _build_client(db_path: Path) -> TestClient:
+class _ToolUsingStubClient(AgentClient):
+    """A deterministic client that asks for one tool, then summarizes it."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key="stub-key")
+        self.calls = 0
+
+    def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "I'll inspect the reply lane first.",
+                [
+                    {
+                        "id": "toolu_dashboard_state",
+                        "name": "query_dashboard_state",
+                        "input": {"slice": "next_rep"},
+                    }
+                ],
+                12,
+                7,
+            )
+        return ("No queued reply targets are ready yet.", [], 8, 11)
+
+
+def _build_client_with_agent(db_path: Path, agent_factory) -> TestClient:  # type: ignore[no-untyped-def]
     conn = connect(db_path)
     apply_migrations(conn)
     seed_settings(conn)  # cost-ceiling rows the send path reads
@@ -44,9 +69,13 @@ def _build_client(db_path: Path) -> TestClient:
     app = create_app(
         token=TOKEN,
         conn_factory=conn_factory,
-        agent_client_factory=_StubClient,
+        agent_client_factory=agent_factory,
     )
     return TestClient(app)
+
+
+def _build_client(db_path: Path) -> TestClient:
+    return _build_client_with_agent(db_path, _StubClient)
 
 
 @pytest.fixture
@@ -96,6 +125,28 @@ def test_messages_are_persisted_and_listable(client: TestClient) -> None:
     roles = [m["role"] for m in msgs]
     assert "user" in roles and "assistant" in roles
     assert any(m["content"] == "stub assistant reply" for m in msgs)
+
+
+def test_messages_endpoint_omits_internal_tool_result_rows(tmp_path: Path) -> None:
+    client = _build_client_with_agent(tmp_path / "agent_svc_tools.db", _ToolUsingStubClient)
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+    sent = client.post(
+        f"/agent/conversations/{cid}/messages",
+        json={"text": "Find reply opportunities"},
+        headers=AUTH,
+    )
+    assert sent.status_code == 200
+    assert sent.json()["assistant_text"] == "No queued reply targets are ready yet."
+
+    listed = client.get(f"/agent/conversations/{cid}/messages", headers=AUTH)
+    assert listed.status_code == 200
+    msgs = listed.json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "assistant"]
+    tool_message = next(m for m in msgs if m["tool_calls_json"])
+    assert "query_dashboard_state" in tool_message["tool_calls_json"]
+    assert all(m["role"] != "tool_result" for m in msgs)
 
 
 def test_list_conversations(client: TestClient) -> None:
@@ -174,3 +225,19 @@ def test_stream_message_emits_sse_events(client: TestClient) -> None:
     assert "event: assistant" in text
     assert "stub assistant reply" in text
     assert "event: done" in text
+
+
+def test_stream_message_echoes_user_before_agent_work(client: TestClient) -> None:
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "Find reply opportunities"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200
+    text = resp.text
+    assert "event: user" in text
+    assert "Find reply opportunities" in text
+    assert text.index("event: user") < text.index("event: assistant")

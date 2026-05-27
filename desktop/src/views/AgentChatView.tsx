@@ -28,10 +28,21 @@ interface Message {
   role: string;
   content: string | null;
   tool_calls_json: string | null;
+  tool_results_json?: string | null;
   model: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   confidence_label: string | null;
+}
+
+interface MessagesResponse {
+  conversation_id: number;
+  messages: Message[];
+}
+
+interface SendMessageVariables {
+  conversationId: number;
+  text: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,27 +155,80 @@ function renderInline(text: string): ReactNode[] {
   return nodes;
 }
 
-function renderToolCalls(json: string): ReactNode {
+type ToolCallView = {
+  id?: string;
+  name?: string;
+  tool_name?: string;
+  input?: unknown;
+};
+
+type ToolResultView = {
+  tool_call_id?: string | null;
+  content?: string | null;
+};
+
+function formatToolPayload(value: unknown): string {
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function toolResultsByCallId(json?: string | null): Map<string, string> {
+  const results = new Map<string, string>();
+  if (!json) return results;
   try {
-    const calls = JSON.parse(json);
+    const parsed = JSON.parse(json) as ToolResultView[];
+    if (!Array.isArray(parsed)) return results;
+    for (const item of parsed) {
+      if (item.tool_call_id && item.content != null) {
+        results.set(item.tool_call_id, item.content);
+      }
+    }
+  } catch {
+    return results;
+  }
+  return results;
+}
+
+function renderToolCalls(json: string, resultJson?: string | null): ReactNode {
+  try {
+    const calls = JSON.parse(json) as ToolCallView[];
     if (Array.isArray(calls)) {
+      const results = toolResultsByCallId(resultJson);
       return (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "0.2rem",
-            marginTop: "0.3rem",
-          }}
-        >
-          {calls.map(
-            (c: { name?: string; tool_name?: string }, i: number) => (
-              <span key={i} className="agent-tool-badge">
-                <span className="agent-tool-badge__icon">{"⚙"}</span>
-                {c.name ?? c.tool_name ?? "tool"}
-              </span>
-            ),
-          )}
+        <div className="agent-tool-stack">
+          {calls.map((c, i) => {
+            const toolName = c.name ?? c.tool_name ?? "tool";
+            const result = c.id ? results.get(c.id) : null;
+            return (
+              <details key={`${toolName}-${c.id ?? i}`} className="agent-tool-detail">
+                <summary className="agent-tool-detail__summary">
+                  <span className="agent-tool-badge">
+                    <span className="agent-tool-badge__icon">{"⚙"}</span>
+                    {toolName}
+                  </span>
+                  <span className="agent-tool-detail__state">
+                    {result ? "result ready" : "called"}
+                  </span>
+                </summary>
+                <div className="agent-tool-detail__body">
+                  <div className="agent-tool-detail__label">input</div>
+                  <pre className="agent-tool-json">{formatToolPayload(c.input ?? {})}</pre>
+                  {result && (
+                    <>
+                      <div className="agent-tool-detail__label">output</div>
+                      <pre className="agent-tool-json">{formatToolPayload(result)}</pre>
+                    </>
+                  )}
+                </div>
+              </details>
+            );
+          })}
         </div>
       );
     }
@@ -254,7 +318,7 @@ export const AgentChatView = () => {
   const { data: messagesData } = useQuery({
     queryKey: ["agent-messages", activeConvoId],
     queryFn: () =>
-      apiFetch<{ conversation_id: number; messages: Message[] }>(
+      apiFetch<MessagesResponse>(
         `/agent/conversations/${activeConvoId}/messages`,
       ),
     enabled: activeConvoId != null,
@@ -296,14 +360,9 @@ export const AgentChatView = () => {
   });
 
   const sendMessage = useMutation({
-    mutationFn: async (text: string) => {
-      setStreamChunks([]);
-      setThinkingText("Preparing agent context…");
-      setStreamError(null);
-      scrollToBottom();
-
+    mutationFn: async ({ conversationId, text }: SendMessageVariables) => {
       const info = await waitForSidecar();
-      const url = `${apiBaseUrl(info)}/agent/conversations/${activeConvoId}/stream`;
+      const url = `${apiBaseUrl(info)}/agent/conversations/${conversationId}/stream`;
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -343,6 +402,8 @@ export const AgentChatView = () => {
             setThinkingText(null);
             setStreamChunks([accumulated]);
             scrollToBottom();
+          } else if (eventType === "user") {
+            scrollToBottom();
           } else if (eventType === "thinking_delta") {
             setThinkingText(payload.text ?? "Thinking…");
           } else if (eventType === "done") {
@@ -363,20 +424,44 @@ export const AgentChatView = () => {
       }
       return accumulated;
     },
-    onSuccess: () => {
+    onMutate: async ({ conversationId, text }) => {
+      const queryKey = ["agent-messages", conversationId] as const;
+      setStreamChunks([]);
+      setThinkingText("Preparing agent context…");
+      setStreamError(null);
       setInputText("");
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
+      await qc.cancelQueries({ queryKey });
+      const optimisticMessage: Message = {
+        id: -Date.now(),
+        role: "user",
+        content: text,
+        tool_calls_json: null,
+        tool_results_json: null,
+        model: null,
+        input_tokens: null,
+        output_tokens: null,
+        confidence_label: null,
+      };
+      qc.setQueryData<MessagesResponse>(queryKey, (current) => ({
+        conversation_id: conversationId,
+        messages: [...(current?.messages ?? []), optimisticMessage],
+      }));
+      scrollToBottom();
+    },
+    onSuccess: (_data, variables) => {
       setStreamChunks([]);
       setThinkingText(null);
-      if (textareaRef.current) textareaRef.current.style.height = "auto";
-      qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
+      qc.invalidateQueries({ queryKey: ["agent-messages", variables.conversationId] });
       scrollToBottom(true);
     },
-    onError: () => {
+    onError: (_error, variables) => {
       setStreamChunks([]);
       setThinkingText(null);
+      qc.invalidateQueries({ queryKey: ["agent-messages", variables.conversationId] });
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
+      qc.invalidateQueries({ queryKey: ["agent-conversations"] });
     },
   });
 
@@ -385,7 +470,7 @@ export const AgentChatView = () => {
   const handleSend = () => {
     const trimmed = inputText.trim();
     if (!trimmed || !activeConvoId) return;
-    sendMessage.mutate(trimmed);
+    sendMessage.mutate({ conversationId: activeConvoId, text: trimmed });
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -411,6 +496,7 @@ export const AgentChatView = () => {
 
   const conversations = convos?.conversations ?? [];
   const messages = messagesData?.messages ?? [];
+  const visibleMessages = messages.filter((m) => m.role !== "tool_result");
   const hasStreamContent = streamChunks.length > 0 || thinkingText != null;
   const disableActions = sendMessage.isPending || deleteConvo.isPending;
   const errorText =
@@ -570,7 +656,7 @@ export const AgentChatView = () => {
             <>
               {/* Messages */}
               <div className="agent-chat__messages">
-                {messages.map((m) => {
+                {visibleMessages.map((m) => {
                   const tokenStr = formatTokens(
                     m.input_tokens,
                     m.output_tokens,
@@ -597,7 +683,8 @@ export const AgentChatView = () => {
                             ? renderContent(m.content ?? "")
                             : (m.content ?? "")}
                         </div>
-                        {m.tool_calls_json && renderToolCalls(m.tool_calls_json)}
+                        {m.tool_calls_json &&
+                          renderToolCalls(m.tool_calls_json, m.tool_results_json)}
                       </div>
                     </div>
                   );
@@ -638,7 +725,7 @@ export const AgentChatView = () => {
                 )}
 
                 {/* Empty conversation — suggested prompts */}
-                {messages.length === 0 && !hasStreamContent && (
+                {visibleMessages.length === 0 && !hasStreamContent && (
                   <div className="agent-chat__empty">
                     <div className="agent-chat__empty-glyph">{"◈"}</div>
                     <div className="agent-chat__empty-title">

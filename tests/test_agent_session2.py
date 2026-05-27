@@ -239,6 +239,79 @@ class TestAgentClientApiErrors:
         assert "incorrect header check" not in turn.error
 
 
+class TestAgentClientToolLoop:
+    def test_tool_calls_resume_model_with_tool_results(self, db_conn, monkeypatch):
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "success",
+                "result": {"accounts": []},
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class ToolThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.history_snapshots = []
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                history = self._load_messages_history(conn, conversation_id)
+                self.history_snapshots.append(history)
+                if len(self.history_snapshots) == 1:
+                    return (
+                        "I'll check the reply queue.",
+                        [
+                            {
+                                "id": "toolu_reply_targets",
+                                "name": "find_reply_targets",
+                                "input": {},
+                            }
+                        ],
+                        10,
+                        5,
+                    )
+                assert history[-1]["role"] == "user"
+                assert history[-1]["content"][0]["type"] == "tool_result"
+                assert history[-1]["content"][0]["tool_use_id"] == "toolu_reply_targets"
+                return ("There are no queued reply targets yet.", [], 7, 9)
+
+        conversation_id = start_conversation(db_conn, title="tool loop test")
+        client = ToolThenFinalClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="Find reply opportunities",
+        )
+
+        assert turn.error is None
+        assert turn.assistant_text == "There are no queued reply targets yet."
+        assert len(client.history_snapshots) == 2
+        assert turn.input_tokens == 17
+        assert turn.output_tokens == 14
+        assert turn.tool_calls == [
+            {
+                "tool_name": "find_reply_targets",
+                "status": "success",
+                "result": {"accounts": []},
+            }
+        ]
+        rows = db_conn.execute(
+            "SELECT role, content FROM agent_messages WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        ).fetchall()
+        assert [row["role"] for row in rows] == [
+            "user",
+            "assistant",
+            "tool_result",
+            "assistant",
+        ]
+        assert rows[-1]["content"] == "There are no queued reply targets yet."
+
+
 # ===========================================================================
 # IWH decision orchestrator
 # ===========================================================================

@@ -477,6 +477,60 @@
 
 /* ── Tool badges ── */
 
+.agent-tool-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.agent-tool-detail {
+  border: 1px solid rgba(95, 179, 161, 0.12);
+  border-radius: 4px;
+  background: rgba(95, 179, 161, 0.035);
+}
+
+.agent-tool-detail__summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.16rem 0.35rem;
+  cursor: pointer;
+  list-style: none;
+}
+.agent-tool-detail__summary::-webkit-details-marker {
+  display: none;
+}
+.agent-tool-detail__summary::after {
+  content: "▸";
+  margin-left: auto;
+  color: var(--bone-faint);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  transition: transform 140ms ease;
+}
+.agent-tool-detail[open] .agent-tool-detail__summary::after {
+  transform: rotate(90deg);
+}
+
+.agent-tool-detail__state,
+.agent-tool-detail__label {
+  font-family: var(--font-mono);
+  font-size: 0.54rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bone-faint);
+}
+
+.agent-tool-detail__body {
+  padding: 0 0.45rem 0.45rem;
+}
+
+.agent-tool-detail__label {
+  margin: 0.35rem 0 0.15rem;
+  color: var(--phosphor-dim);
+}
+
 .agent-tool-badge {
   display: inline-flex;
   align-items: center;
@@ -501,15 +555,16 @@
   margin-top: 0.3rem;
   padding: 0.25rem 0.5rem;
   background: var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.04);
   border-radius: 3px;
   font-family: var(--font-mono);
   font-size: 0.68rem;
   color: var(--bone-faint);
-  max-height: 4rem;
+  max-height: 8rem;
   overflow-y: auto;
   line-height: 1.4;
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: break-word;
 }
 
 /* ── Thinking indicator ── */
