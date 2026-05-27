@@ -237,3 +237,19 @@ Phase 9 uses `grok-4.3` (1M-token context, $1.25/M input + $2.50/M output per th
 - **Dedupe** — same `target_x_post_id` from manual + Grok: first insert wins; second silently drops via the partial unique index.
 
 See `docs/SCHEDULED_JOBS.md` for the full Phase 9 runbook.
+
+## Agent PR review
+
+PRs opened on `cursor/*` branches automatically receive a kickoff comment from GitHub Actions that triggers a **Codex ↔ Claude review debate** before merge:
+
+1. **@codex** — first-pass code review (P0/P1 only, per [`AGENTS.md`](AGENTS.md))
+2. **@claude** — responds in-thread, agreeing or disagreeing on each P0/P1 and surfacing missing risks
+
+Resolve the debate in the PR thread before merging.
+
+**Manual kickoff** (PR opened before the workflow existed, or kickoff missed):
+
+- Merge the workflow to `main` first, then **Actions → Agent review kickoff → Run workflow** and enter the PR number, or
+- Post a PR comment with `@codex review` and `@claude Please review and debate Codex's findings`.
+
+Note: `@codex review` in the PR description alone may not trigger Codex — it must appear in a **PR comment** or via the workflow.
