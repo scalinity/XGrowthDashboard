@@ -374,7 +374,7 @@ else:
 
 hairline()
 
-# 5. Quick links — buttons set the active-tab hint and switch to Manual Entry.
+# 5. Quick links — automation-first actions for the daily cockpit.
 st.markdown("## Quick actions")
 b1, b2, b3 = st.columns(3)
 
@@ -394,16 +394,15 @@ if b1.button("Sync X activity", type="primary", width="stretch"):
     except Exception as exc:  # noqa: BLE001
         st.session_state.today_x_sync_error = f"X activity sync failed: {exc}"
     st.rerun()
-if b2.button("Classify untagged", width="stretch"):
-    st.session_state.manual_entry_active_tab = "Needs tagging"
+if b2.button("Open Agent Ops", width="stretch"):
     st.switch_page("pages/8_Manual_Entry.py")
-if b3.button("Log Stir tester", width="stretch"):
-    st.session_state.manual_entry_active_tab = "Tester"
-    st.switch_page("pages/8_Manual_Entry.py")
+if b3.button("Reply Queue", width="stretch"):
+    st.switch_page("pages/10_Reply_Target_Queue.py")
 
 st.markdown(
     "<p class='faint'>X sync imports your owned posts/replies from the API. "
-    "Manual Entry remains available for corrections, classification, and tester logs.</p>",
+    "Agent Ops handles classification, Grok discovery, and queue scoring; "
+    "manual write paths stay behind the scenes as fallback primitives.</p>",
     unsafe_allow_html=True,
 )
 

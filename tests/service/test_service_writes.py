@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import apply_migrations, connect
-from app.jobs import x_activity_sync
+from app.jobs import grok_discovery_sweep, x_activity_sync
 from app.service.app import create_app
 from app import x_client
 from scripts import collect_account_snapshot
@@ -171,6 +171,55 @@ def test_sync_today_from_x_imports_posts_and_updates_daily_reps(
     assert today["daily_reps"]["row"]["posts_shipped"] == 1
     assert today["daily_reps"]["row"]["replies_shipped"] == 1
     assert today["recent_posts"][0]["confirm_status"] == "needs_metrics"
+
+
+def test_agent_classify_posts_tags_untagged_imports(client: TestClient) -> None:
+    post = client.post(
+        "/forms/post",
+        json={
+            "type": "post",
+            "text": "Building Stir so weeknight dinner stops being a tiny kitchen crisis.",
+            "manual_confirmation_status": "needs_metrics",
+        },
+        headers=AUTH,
+    )
+    assert post.status_code == 200
+    post_id = post.json()["post_id"]
+
+    resp = client.post("/agent/classify-posts", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["classified_count"] == 1
+    assert body["classified"][0]["post_id"] == post_id
+    assert body["classified"][0]["pillar"] == "stir"
+    assert body["classified"][0]["audience"] == "icp"
+
+    assert client.get("/views/needs-tagging", headers=AUTH).json()["posts"] == []
+
+
+def test_agent_grok_sweep_endpoint_formats_summary(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(conn: sqlite3.Connection) -> dict[str, object]:
+        return {
+            "queries_run": 1,
+            "candidates_discovered": 2,
+            "candidates_verified": 2,
+            "candidates_inserted": 2,
+            "candidates_rejected_404": 0,
+            "error": None,
+        }
+
+    monkeypatch.setattr(grok_discovery_sweep, "run", fake_run)
+
+    resp = client.post("/agent/grok-sweep", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["severity"] == "success"
+    assert body["summary"]["candidates_inserted"] == 2
+    assert "sweep OK" in body["message"]
 
 
 def test_post_snapshot_validation_returns_400_with_field_errors(

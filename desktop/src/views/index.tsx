@@ -39,7 +39,7 @@ export const VIEWS: ViewDef[] = [
   { id: "content-performance", label: "Content Performance", group: "Analytics", Component: ContentPerformanceView },
   { id: "funnel", label: "Funnel", group: "Analytics", Component: FunnelView },
   { id: "weekly-review", label: "Weekly Review", group: "Analytics", Component: WeeklyReviewView },
-  { id: "manual-entry", label: "Manual Entry", group: "Manual", Component: ManualEntryView },
+  { id: "manual-entry", label: "Agent Ops", group: "Agent", Component: ManualEntryView },
   { id: "settings", label: "Settings", group: "Manual", Component: SettingsView },
   { id: "agent-chat", label: "Agent Chat", group: "Agent", Component: AgentChatView },
   { id: "reply-queue", label: "Reply Target Queue", group: "Agent", Component: ReplyQueueView },

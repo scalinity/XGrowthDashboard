@@ -1029,9 +1029,9 @@ export const TodayView = () => {
               >
                 {syncToday.isPending ? "Syncing..." : "Sync X activity"}
               </button>
-              <button onClick={() => nav("manual-entry")}>Manual fallback</button>
-              <button onClick={() => nav("manual-entry")}>Classify untagged</button>
-              <button onClick={() => nav("manual-entry")}>Log Stir tester</button>
+              <button onClick={() => nav("manual-entry")}>Agent Ops</button>
+              <button onClick={() => nav("reply-queue")}>Reply Queue</button>
+              <button onClick={() => nav("settings")}>API Settings</button>
             </div>
             {syncToday.isSuccess && (
               <div

@@ -68,7 +68,7 @@ from app.forms.queues import needs_post_id, needs_tagging
 from app.forms.stir_event import submit_stir_event
 from app.forms.stir_tester import submit_tester
 from app.forms.weekly_review import submit_weekly_review
-from app.jobs import x_activity_sync
+from app.jobs import x_activity_sync, post_classification_sync
 from app.paths import resolve_db_path
 from app.secret_store import resolve_secret, store_secret
 from app.service.security import BearerTokenAuth
@@ -1746,6 +1746,35 @@ def create_app(
         try:
             result = _score_reply_candidates(conn)
             return {"ok": True, **result}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/agent/grok-sweep", dependencies=[Depends(auth)])
+    def run_grok_sweep(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Run the configured Grok discovery sweep for reply-target candidates."""
+        try:
+            from app.jobs import grok_discovery_sweep
+
+            summary = grok_discovery_sweep.run(conn)
+            severity, message = grok_discovery_sweep.format_sweep_summary_for_ui(summary)
+            return {
+                "ok": severity != "error",
+                "severity": severity,
+                "message": message,
+                "summary": summary,
+            }
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/agent/classify-posts", dependencies=[Depends(auth)])
+    def classify_posts(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Automatically classify untagged imported posts into the v1 taxonomy."""
+        try:
+            return post_classification_sync.run(conn)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

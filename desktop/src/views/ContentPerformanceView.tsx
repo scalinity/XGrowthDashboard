@@ -145,7 +145,7 @@ export const ContentPerformanceView = () => {
       <h2>Lane grid</h2>
       {d.lanes.length === 0 ? (
         <p className="faint">
-          No classified posts yet. Classify a few from <strong>Manual entry → Needs tagging</strong> to populate this grid.
+          No classified posts yet. Run X sync from <strong>Agent Ops</strong>, then use <strong>Classify queue</strong> to tag imported activity.
         </p>
       ) : (
         <table>

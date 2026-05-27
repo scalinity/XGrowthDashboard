@@ -6,7 +6,9 @@ responsibility of this module is to provide connections that:
 1. Have ``PRAGMA foreign_keys = ON`` (SQLite defaults this OFF; missing it
    silently disables every FK declaration in 001_initial.sql).
 2. Use ``PRAGMA journal_mode = WAL`` for safer concurrent reads.
-3. Have the ``percentile(value, p)`` user-defined aggregate registered so
+3. Allow FastAPI's sync threadpool to use a per-request connection even when
+   dependency setup and endpoint execution land on different worker threads.
+4. Have the ``percentile(value, p)`` user-defined aggregate registered so
    ``v_lane_performance`` can compute medians and IQR bounds.
 
 The Streamlit-side helper ``get_st_connection`` is included for forward
@@ -77,7 +79,7 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")

@@ -95,8 +95,7 @@ export const NextRepView = () => {
       <h2>This week — lane coverage</h2>
       {d.coverage.length === 0 ? (
         <p className="faint">
-          No classified posts yet. Classify a few from <strong>Manual entry → Needs tagging</strong> so
-          the lane scoreboard has something to read.
+          No classified posts yet. Run X sync from <strong>Agent Ops</strong>, then use <strong>Classify queue</strong> to give Next Rep lane data.
         </p>
       ) : (
         <>
