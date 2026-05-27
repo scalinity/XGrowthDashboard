@@ -33,6 +33,7 @@ from app.agent import autonomy as _autonomy
 from app.agent import blog_drafting as _blog_drafting
 from app.agent import blog_repurposing as _blog_repurposing
 from app.agent import brain_dump as _brain_dump
+from app.agent import review_drafting as _review_drafting
 from app.agent import campaigns as _campaigns
 from app.agent import inspiration as _inspiration
 from app.agent import monthly_review as _monthly_review
@@ -1003,27 +1004,14 @@ def _extract_lesson(conn: sqlite3.Connection, *, post_id: int) -> dict[str, Any]
 # 11. draft_weekly_review_section (§28.4 #9)
 # ---------------------------------------------------------------------------
 def _draft_weekly_review_section(
-    conn: sqlite3.Connection,  # noqa: ARG001 — Session 2 reads the week's data
+    conn: sqlite3.Connection,
     *,
     section_name: str,
     week_id: int,
 ) -> dict[str, Any]:
-    if section_name not in {
-        "interpretation",
-        "lesson",
-        "counterfactual",
-        "next_week_experiment",
-    }:
-        return {"error": f"unknown section_name {section_name!r}"}
-    return {
-        "section_name": section_name,
-        "week_id": int(week_id),
-        "draft_text": None,
-        "note": (
-            "Session-1 stub: section name validated. Session-2 wires the "
-            "Anthropic call that drafts the actual prose."
-        ),
-    }
+    return _review_drafting.draft_weekly_review_section(
+        conn, section_name=section_name, week_id=week_id
+    )
 
 
 # Phase 5.11 §28.29 — inspiration transform + plagiarism score tool
@@ -1281,40 +1269,9 @@ def _draft_monthly_review_section(
     section_name: str,
     iso_month: str,
 ) -> dict[str, Any]:
-    allowed = {
-        "interpretation",
-        "lesson",
-        "counterfactual",
-        "next_month_experiment",
-        "campaigns_retro",
-    }
-    if section_name not in allowed:
-        return {"error": f"unknown section_name {section_name!r}"}
-    try:
-        _monthly_review.parse_iso_month(iso_month)
-    except _monthly_review.InvalidIsoMonthError as exc:
-        return {"error": str(exc)}
-    # Surface auto-filled context so the (future) Session-2 prompt has
-    # everything it needs to draft. Pure read; safe to call here.
-    auto_filled = _monthly_review.compute_auto_filled_fields(conn, iso_month)
-    return {
-        "section_name": section_name,
-        "iso_month": iso_month,
-        "draft_text": None,
-        "auto_filled": {
-            "follower_delta": auto_filled.follower_delta,
-            "posts_shipped": auto_filled.posts_shipped,
-            "downloads": auto_filled.downloads,
-            "strongest_pillar_candidate": auto_filled.strongest_pillar_candidate,
-            "strongest_content_type": auto_filled.strongest_content_type,
-            "weakest_content_type": auto_filled.weakest_content_type,
-            "campaigns_completed_json": auto_filled.campaigns_completed_json,
-        },
-        "note": (
-            "Session-1 stub: section name validated, auto-fill payload "
-            "surfaced for Session-2 prompt wiring per §28.27."
-        ),
-    }
+    return _review_drafting.draft_monthly_review_section(
+        conn, section_name=section_name, iso_month=iso_month
+    )
 
 
 # ---------------------------------------------------------------------------
