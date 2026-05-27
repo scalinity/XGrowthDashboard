@@ -1,0 +1,95 @@
+# When Cursor opens a PR on cursor/*, post @codex review + @claude debate kickoff.
+# Manual: Actions → Agent review kickoff → Run workflow → PR number.
+
+name: Agent review kickoff
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened, synchronize, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to kick off agent review on
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  kickoff:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      startsWith(github.event.pull_request.head.ref, 'cursor/'))
+    steps:
+      - name: Post agent review kickoff comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = "<!-- agent-review-kickoff -->";
+            const prNumber =
+              context.payload.pull_request?.number ??
+              Number(context.payload.inputs?.pr_number);
+
+            if (!prNumber || Number.isNaN(prNumber)) {
+              core.setFailed("No pull request number available");
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            if (comments.some((c) => c.body?.includes(marker))) {
+              core.info("Kickoff comment already exists; skipping duplicate.");
+              return;
+            }
+
+            const draftNote = pr.draft
+              ? "\n\n> **Note:** This PR is still a **draft**. Mark it ready for review when you want full CI gates to run; Codex and Claude can still respond below.\n"
+              : "";
+
+            const agentsMd = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/AGENTS.md`;
+            const workflowUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/.github/workflows/agent-pr-review-kickoff.yml`;
+
+            const body = [
+              marker,
+              "## Agent review debate",
+              "",
+              "This pull request was opened by an automated agent (**Cursor Cloud Agent**). Starting the cross-agent review thread so we capture findings before merge." + draftNote,
+              "",
+              "@codex review",
+              "",
+              "@claude Please review this PR and engage with Codex's findings — agree or disagree on each P0/P1, note missing risks, and keep the debate in this thread before merge.",
+              "",
+              "**Review focus (X Growth Dashboard)**",
+              "- API key / token / PII logging (`ANTHROPIC_API_KEY`, X OAuth tokens, Grok keys, publish tokens)",
+              "- FastAPI sidecar loopback auth (`127.0.0.1`, bearer token, SSE) and publish-flow security (spec §28.10)",
+              "- Agent invariants, niche gate, coach citation refusal, and confirmation-token edge cases",
+              "- Spec drift: implementation must match `spec.md`; migrations lexicographic and idempotent",
+              "- `.env.example`, README, and Settings docs aligned with actual env vars and commands",
+              "",
+              `Repo guidance: see [\`AGENTS.md\`](${agentsMd}).`,
+              "",
+              "---",
+              `<sub>Automated by [agent-pr-review-kickoff.yml](${workflowUrl}) · PR: ${pr.html_url}</sub>`,
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
