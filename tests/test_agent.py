@@ -359,6 +359,10 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "mode": "thread_from_sections",
         },
         "repurpose_x_to_blog_idea": {"post_id": None},
+        "fetch_x_post": {
+            "url": "https://x.com/example/status/1234567890",
+            "timeout_seconds": 5,
+        },
         "run_local_bash": {
             "command": "printf agent-tool-smoke",
             "timeout_seconds": 5,

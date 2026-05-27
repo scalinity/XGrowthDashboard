@@ -214,6 +214,15 @@ candidates when Daniel asks "what should I post today?"
   call read-only X API endpoints, refresh data, inspect failures, and
   report concrete results. You do not need a separate UI permission prompt
   for `run_local_bash` or `query_x_api`.
+- When Daniel pastes an X status URL (`x.com/.../status/...` or
+  `twitter.com/.../status/...`) and asks for a reply or analysis, call
+  `fetch_x_post(url)` first. Do not ask Daniel to paste the post text until
+  `fetch_x_post` returns a structured refusal or runtime error.
+- If `fetch_x_post` or `query_x_api` refuses because
+  `data_collection_mode='manual'`, xurl is unavailable, the post 404s, or X
+  rate-limits the read, explain the exact blocker and ask Daniel to paste
+  the post text manually. Do not claim you cannot fetch X URLs when the
+  read tools exist but are blocked.
 - Empty tool results are recovery signals, not setup requests. If a tool
   returns empty arrays, `autonomy.should_continue=true`, or
   `next_tool_options`, immediately try the suggested local tools

@@ -169,6 +169,81 @@ class _MalformedToolStreamingStubClient(AgentClient):
         return ("Done.", [], 8, 7)
 
 
+class _FetchXPostStreamingStubClient(AgentClient):
+    """Streams a fetch_x_post round trip before the final assistant reply."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key="stub-key")
+        self.calls = 0
+
+    def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "I'll fetch the post first.",
+                [
+                    {
+                        "id": "toolu_fetch_x_post",
+                        "name": "fetch_x_post",
+                        "input": {
+                            "url": "https://x.com/ClaudeDevs/status/2059701677981413812",
+                        },
+                    }
+                ],
+                14,
+                6,
+            )
+        return ("Draft reply ready after fetch.", [], 9, 12)
+
+    def _call_model_stream(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            yield ("text_delta", {"text": "I'll fetch the post first."})
+            yield (
+                "tool_call",
+                {
+                    "id": "toolu_fetch_x_post",
+                    "name": "fetch_x_post",
+                    "input": {
+                        "url": "https://x.com/ClaudeDevs/status/2059701677981413812",
+                    },
+                    "status": "requested",
+                },
+            )
+            return (
+                "I'll fetch the post first.",
+                [
+                    {
+                        "id": "toolu_fetch_x_post",
+                        "name": "fetch_x_post",
+                        "input": {
+                            "url": "https://x.com/ClaudeDevs/status/2059701677981413812",
+                        },
+                    }
+                ],
+                14,
+                6,
+            )
+        yield ("text_delta", {"text": "Draft reply ready after fetch."})
+        return ("Draft reply ready after fetch.", [], 9, 12)
+
+
+class _ToolCatalogSpyClient(AgentClient):
+    """Captures the Anthropic tool catalog passed on the first model call."""
+
+    captured_tool_names: list[str] = []
+
+    def __init__(self) -> None:
+        super().__init__(api_key="stub-key")
+        self.captured_tool_names = []
+
+    def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        from app.agent import tools
+
+        self.captured_tool_names = [t.name for t in tools.AGENT_TOOLS]
+        return ("catalog captured", [], 3, 2)
+
+
 def _build_client_with_agent(db_path: Path, agent_factory) -> TestClient:  # type: ignore[no-untyped-def]
     conn = connect(db_path)
     apply_migrations(conn)
@@ -491,3 +566,93 @@ def test_stream_message_streams_coach_text_before_final_assistant(
     assert messages[1]["content"] == "coach says move now"
     assert messages[1]["input_tokens"] == 11
     assert messages[1]["output_tokens"] == 5
+
+
+def test_stream_message_emits_fetch_x_post_tool_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app import x_client
+
+    def fake_request(endpoint: str, **kwargs):  # noqa: ARG001
+        return x_client.XApiResponse(
+            status_code=200,
+            body={
+                "data": {
+                    "id": "2059701677981413812",
+                    "text": "Ship day update from ClaudeDevs",
+                    "author_id": "999",
+                    "created_at": "2026-05-27T12:00:00.000Z",
+                    "conversation_id": "2059701677981413812",
+                    "public_metrics": {
+                        "like_count": 4,
+                        "reply_count": 1,
+                        "retweet_count": 0,
+                        "quote_count": 0,
+                    },
+                },
+                "includes": {
+                    "users": [
+                        {
+                            "id": "999",
+                            "username": "ClaudeDevs",
+                            "name": "Claude Devs",
+                            "public_metrics": {"followers_count": 500},
+                        }
+                    ]
+                },
+            },
+            raw_response_id=91,
+            endpoint=endpoint,
+            method="GET",
+            elapsed_seconds=0.01,
+        )
+
+    monkeypatch.setattr(x_client, "request", fake_request)
+
+    client = _build_client_with_agent(
+        tmp_path / "agent_svc_fetch_x_post_stream.db",
+        _FetchXPostStreamingStubClient,
+    )
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={
+            "text": (
+                "Write me a reply for https://x.com/ClaudeDevs/status/"
+                "2059701677981413812"
+            )
+        },
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    text = resp.text
+    assert "event: tool_call" in text
+    assert "fetch_x_post" in text
+    assert "event: tool_result" in text
+    assert "Ship day update from ClaudeDevs" in text
+    assert "Draft reply ready after fetch." in text
+    assert text.index("event: tool_call") < text.index("event: tool_result")
+    assert text.index("event: tool_result") < text.index("event: done")
+
+
+def test_agent_chat_registry_includes_operator_tools(tmp_path: Path) -> None:
+    spy = _ToolCatalogSpyClient()
+    client = _build_client_with_agent(
+        tmp_path / "agent_svc_tool_catalog.db", lambda: spy
+    )
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+    sent = client.post(
+        f"/agent/conversations/{cid}/messages",
+        json={"text": "hello"},
+        headers=AUTH,
+    )
+    assert sent.status_code == 200
+    assert "fetch_x_post" in spy.captured_tool_names
+    assert "query_x_api" in spy.captured_tool_names
+    assert "run_local_bash" in spy.captured_tool_names

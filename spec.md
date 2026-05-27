@@ -4193,7 +4193,10 @@ See §25 Phases 7, 8, 9 for the full per-phase checklists; the §0 sixth revisio
 | Per-session token budget approaches limit      | Warning at 80%, hard stop at 100% (offer to start new session)      |
 | Agent tool call returns DB error               | Surface to agent so it can recover; don't silently swallow          |
 | User edits draft after agent generated it      | Edited text is what ships; `accepted_with_edits` recorded           |
-| Agent in manual mode tries to call X API       | Refuse; explain mode mismatch                                       |
+| Agent in manual mode tries to call X API       | Refuse; explain mode mismatch (`fetch_x_post`, `query_x_api`, and scheduled jobs all no-op or return `data_collection_mode=manual`) |
+| Daniel pastes X status URL in Agent Chat       | Agent calls `fetch_x_post(url)` first when `data_collection_mode='api'`; on success drafts from returned `target_post_text`; on refusal/error explains blocker and asks for pasted text |
+| `fetch_x_post` returns 404                     | Agent flags target deleted; offers to draft from cached/pasted text or abandon |
+| `fetch_x_post` returns 429 or xurl unavailable | Agent surfaces the exact error; asks Daniel to paste post text or retry after auth/rate-limit reset |
 | Session_id collision (unlikely)                | UUIDs are used; collision treated as error and logged               |
 | Streamlit rerun during agent streaming response | Persist partial response to `agent_messages`; on resume, complete   |
 | User asks agent to write engagement-bait       | Agent refuses, explains voice bars, offers alternative              |
@@ -5734,6 +5737,22 @@ Eleven tools. Tools #1-5 and #10-11 are MVP must-ship; #6-9 are Should-ship.
 - **Audit redaction (rule #11)**: `arguments_json` written to `agent_tool_calls` is `{"post_id": N, "confirmation_token_id": M}` where M = `publish_confirmation_tokens.id`. The raw token string is NEVER persisted. `redacted_arguments = true`.
 
 Tool implementation lives in `app/agent/tools.py` (registered) and `app/agent/_internal_tools.py` (unregistered publish entry points). The publish tools use the X API v2 `POST /2/tweets` endpoint with OAuth 1.0a user-context auth from `.env`. The agent does not get a SQL shell, only these named functions.
+
+**Autonomous operator tools (Agent Chat, §14.8 / native §31):** beyond the MVP-era eleven-tool table above, the live registry in `app/agent/tools.py` includes local-only operator tools the model may call without per-command UI approval:
+
+| Tool | Input | Output | Side effects | When to use |
+|---|---|---|---|---|
+| `fetch_x_post` | `url: str` (canonical `x.com/.../status/{id}` or `twitter.com/.../status/{id}`) | Normalized tweet payload: `target_post_url`, `x_post_id`, `target_post_text`, author handle/name, public metrics, `raw_response_id` | None when read-only succeeds; logs to `raw_api_responses` via xurl | **First choice** when Daniel pastes an X status URL and asks for a reply or analysis. GET-only through xurl — never scrapes the web page |
+| `query_x_api` | `endpoint: str` (must start with `/2/`) | Raw X API v2 GET body + audit metadata | Same read-only audit path as scheduled jobs | Lower-level escape hatch for other vetted `/2/...` reads when `fetch_x_post` is not the right shape |
+| `run_local_bash` | `command, cwd?, timeout_seconds?, purpose?` | Captured stdout/stderr + exit metadata | Executes bounded project-scoped bash on Daniel's machine; destructive/env-dump patterns refused | Local recovery: `uv run python -m app.jobs.*`, imports, git inspection |
+
+**`fetch_x_post` contract (load-bearing):**
+
+1. **No scraping.** The tool never fetches arbitrary URLs or HTML status pages. It parses the status id from the URL, then calls the same xurl-backed `GET /2/tweets/{id}` path used by Phase 7 verification (§29.12).
+2. **`data_collection_mode` gate.** When `data_collection_mode='manual'`, the tool returns a structured refusal (`status='refused'`, reason `data_collection_mode=manual`) per §22 edge case — the agent must explain the mode mismatch and ask Daniel to paste the post text. Scheduled jobs and agent-initiated reads share this gate.
+3. **Manual fallback on runtime failure.** When xurl is unavailable, unauthenticated, rate-limited (429), not found (404), or times out, the tool returns structured error metadata; the agent explains the exact blocker and asks for pasted URL + text rather than claiming it cannot fetch X URLs at all.
+4. **Preserves reply context.** Successful responses always echo the input URL as `target_post_url` so downstream `save_draft_reply` can preserve §28.2 rule #4.
+5. **Never publishes.** POST `/2/tweets` remains internal-only and confirmation-gated (tools #10–11).
 
 ### 28.5 Voice samples
 
