@@ -553,6 +553,42 @@ def test_x_client_parse_retry_after_from_body():
     assert 80 < ra < 100
 
 
+def test_x_client_request_finds_user_go_bin_when_path_is_sparse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finder-launched app sidecars do not inherit the interactive shell PATH."""
+    monkeypatch.delenv("XURL_BIN", raising=False)
+    monkeypatch.setenv("HOME", "/Users/danny")
+    monkeypatch.setattr(x_client.shutil, "which", lambda binary: None)
+    monkeypatch.setattr(
+        x_client.os.path,
+        "isfile",
+        lambda path: path == "/Users/danny/go/bin/xurl",
+    )
+    monkeypatch.setattr(
+        x_client.os,
+        "access",
+        lambda path, mode: path == "/Users/danny/go/bin/xurl",
+    )
+    seen: dict[str, Any] = {}
+
+    class FakeProc:
+        stdout = '{"data":{"id":"42"}}'
+        stderr = ""
+        returncode = 0
+
+    def fake_run(argv: list[str], **kwargs: Any) -> FakeProc:
+        seen["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(x_client.subprocess, "run", fake_run)
+
+    response = x_client.request("/2/users/me")
+
+    assert seen["argv"][0] == "/Users/danny/go/bin/xurl"
+    assert response.status_code == 200
+
+
 def test_rv2_8_validate_x_handle_rejects_path_injection_attempts() -> None:
     """RV2-8: handle validation refuses anything that could escape the
     intended endpoint when interpolated into a xurl URL path."""

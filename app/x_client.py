@@ -73,6 +73,11 @@ _MAX_RATE_LIMIT_WAIT_SECONDS: float = 90.0
 # ``XURL_BIN`` env var to override (CI fixture mode points it at a fake
 # script that emits canned responses).
 _DEFAULT_XURL_BIN: str = "xurl"
+_STANDARD_XURL_PATHS: tuple[str, ...] = (
+    "~/go/bin/xurl",
+    "/opt/homebrew/bin/xurl",
+    "/usr/local/bin/xurl",
+)
 
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE"]
 
@@ -224,14 +229,13 @@ class XApiResponse:
 # Public API.
 # ---------------------------------------------------------------------------
 def is_available(xurl_bin: str | None = None) -> bool:
-    """Return True if the xurl binary is installed and on PATH.
+    """Return True if the xurl binary is installed and resolvable.
 
     Does NOT verify that ``xurl auth login`` has been completed — that
     surfaces as a 401 on the first real call. The Settings → Data sources
     panel surfaces both states explicitly.
     """
-    binary = xurl_bin or os.environ.get("XURL_BIN") or _DEFAULT_XURL_BIN
-    return shutil.which(binary) is not None
+    return _resolve_xurl_binary(xurl_bin) is not None
 
 
 def request(
@@ -267,9 +271,10 @@ def request(
     snapshots back to the exact API call that produced them.
     """
     binary = xurl_bin or os.environ.get("XURL_BIN") or _DEFAULT_XURL_BIN
-    if shutil.which(binary) is None:
+    resolved_binary = _resolve_xurl_binary(xurl_bin)
+    if resolved_binary is None:
         raise XApiUnavailable(
-            f"xurl binary {binary!r} not found on PATH; "
+            f"xurl binary {binary!r} not found on PATH or standard macOS user locations; "
             "see docs/X_API_SETUP.md to install + authenticate."
         )
 
@@ -280,7 +285,7 @@ def request(
         timeout_seconds = _read_timeout_setting(conn)
 
     # Build the subprocess argv. xurl's CLI: `xurl [--method M] [--data D] <endpoint>`.
-    argv: list[str] = [binary]
+    argv: list[str] = [resolved_binary]
     if method != "GET":
         argv += ["--request", method]
     if body_json is not None:
@@ -590,6 +595,32 @@ def _log_raw(
 # ---------------------------------------------------------------------------
 # Helpers.
 # ---------------------------------------------------------------------------
+def _resolve_xurl_binary(xurl_bin: str | None = None) -> str | None:
+    """Resolve xurl for shell-launched jobs and Finder-launched app sidecars.
+
+    macOS GUI apps do not inherit the user's interactive shell PATH, so a
+    valid install under ~/go/bin or Homebrew can be invisible to the packaged
+    sidecar unless we check the common absolute locations ourselves.
+    """
+    binary = xurl_bin or os.environ.get("XURL_BIN") or _DEFAULT_XURL_BIN
+    found = shutil.which(binary)
+    if found:
+        return found
+
+    expanded = os.path.expanduser(binary)
+    if os.path.sep in binary and os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+        return expanded
+
+    if binary != _DEFAULT_XURL_BIN:
+        return None
+
+    for candidate in _STANDARD_XURL_PATHS:
+        expanded_candidate = os.path.expanduser(candidate)
+        if os.path.isfile(expanded_candidate) and os.access(expanded_candidate, os.X_OK):
+            return expanded_candidate
+    return None
+
+
 def _infer_status_code(
     body: dict[str, Any] | list[Any],
     exit_code: int,
