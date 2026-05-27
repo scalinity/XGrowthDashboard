@@ -221,6 +221,56 @@ function toolInputClassName(value: unknown, snapshot?: string): string {
     : "agent-tool-json";
 }
 
+function summarizeToolResult(toolName: string, value: unknown): string | null {
+  const payload = parseToolPayload(value);
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const status = typeof record.status === "string" ? record.status : null;
+
+  if (toolName === "fetch_x_post") {
+    if (status === "success") {
+      const text = String(record.target_post_text ?? "").trim();
+      const handle = String(record.target_author_handle ?? "").trim();
+      const excerpt = text.length > 96 ? `${text.slice(0, 95)}…` : text;
+      if (handle && excerpt) return `@${handle}: ${excerpt}`;
+      if (excerpt) return excerpt;
+      return "post fetched";
+    }
+    if (status === "refused") {
+      return String(record.reason ?? record.error ?? "fetch refused");
+    }
+    if (status === "error") {
+      const reason = record.reason ? `${record.reason}: ` : "";
+      return `${reason}${String(record.error ?? "fetch failed")}`;
+    }
+  }
+
+  if (toolName === "query_x_api") {
+    if (status === "success") {
+      return String(record.endpoint ?? "X API read complete");
+    }
+    if (status === "refused") {
+      return String(record.reason ?? record.error ?? "X API read refused");
+    }
+    return String(record.error ?? "X API read failed");
+  }
+
+  if (toolName === "run_local_bash") {
+    if (status === "success") {
+      const stdout = String(record.stdout ?? "").trim();
+      const firstLine = stdout.split("\n").find((line) => line.trim()) ?? "";
+      return firstLine ? `exit 0 · ${firstLine}` : "exit 0";
+    }
+    if (status === "refused" || status === "timeout" || status === "error") {
+      return String(record.error ?? status);
+    }
+  }
+
+  return null;
+}
+
 function toolResultsByCallId(json?: string | null): Map<string, string> {
   const results = new Map<string, string>();
   if (!json) return results;
@@ -248,6 +298,7 @@ function renderToolCalls(json: string, resultJson?: string | null): ReactNode {
           {calls.map((c, i) => {
             const toolName = c.name ?? c.tool_name ?? "tool";
             const result = c.id ? results.get(c.id) : null;
+            const summary = result ? summarizeToolResult(toolName, result) : null;
             return (
               <details key={`${toolName}-${c.id ?? i}`} className="agent-tool-detail">
                 <summary className="agent-tool-detail__summary">
@@ -256,7 +307,7 @@ function renderToolCalls(json: string, resultJson?: string | null): ReactNode {
                     {toolName}
                   </span>
                   <span className="agent-tool-detail__state">
-                    {result ? "result ready" : "called"}
+                    {summary ?? (result ? "result ready" : "called")}
                   </span>
                 </summary>
                 <div className="agent-tool-detail__body">
@@ -290,6 +341,9 @@ function renderLiveToolCalls(calls: LiveToolCall[]): ReactNode {
       {calls.map((c) => {
         const state = c.error ? "error" : c.status || "running";
         const output = c.error ?? c.rationale ?? c.result;
+        const summary =
+          summarizeToolResult(c.name, output) ??
+          (c.error ? String(c.error) : state.replaceAll("_", " "));
         return (
           <details key={c.id} className="agent-tool-detail agent-tool-detail--live" open>
             <summary className="agent-tool-detail__summary">
@@ -298,7 +352,7 @@ function renderLiveToolCalls(calls: LiveToolCall[]): ReactNode {
                 {c.name}
               </span>
               <span className={`agent-tool-detail__state agent-tool-detail__state--${state}`}>
-                {state.replaceAll("_", " ")}
+                {summary}
               </span>
             </summary>
             <div className="agent-tool-detail__body">
@@ -518,8 +572,17 @@ export const AgentChatView = () => {
         },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok || !res.body)
-        throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.ok) {
+        let detail = `${res.status} ${res.statusText}`;
+        try {
+          const bodyText = await res.text();
+          if (bodyText.trim()) detail = bodyText.trim();
+        } catch {
+          /* keep status summary */
+        }
+        throw new Error(detail);
+      }
+      if (!res.body) throw new Error("Agent stream returned no body");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();

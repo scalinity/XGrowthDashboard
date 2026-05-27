@@ -63,6 +63,13 @@ from app.agent.reply_targets import (
 
 _LOG = logging.getLogger(__name__)
 
+parse_x_post_id = _autonomy.parse_x_post_id
+
+
+def _parse_x_post_id(url: str) -> str | None:
+    """Backward-compatible alias for URL parsing used across reply flows."""
+    return parse_x_post_id(url)
+
 
 @dataclass(frozen=True)
 class ToolDef:
@@ -958,17 +965,6 @@ def _score_reply_candidates(
         scored.append(result)
 
     return {"scored": scored, "errors": errors}
-
-
-def _parse_x_post_id(url: str) -> str | None:
-    """Pull the numeric post id from an X URL.
-
-    Accepts the canonical ``https://x.com/{handle}/status/{id}`` form (and
-    twitter.com aliases). Returns None on no match.
-    """
-    import re as _re
-    m = _re.search(r"(?:x|twitter)\.com/[^/]+/status/(\d+)", url)
-    return m.group(1) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -3103,6 +3099,30 @@ AGENT_TOOLS: list[ToolDef] = [
         ),
     ),
     # ----- autonomous operator tools (local-only; publish remains internal-only) -----
+    ToolDef(
+        name="fetch_x_post",
+        description=(
+            "Fetch live text and metrics for a pasted X status URL through "
+            "read-only X API v2 (xurl). Use this before drafting replies when "
+            "Daniel provides an x.com/.../status/... or twitter.com alias. "
+            "Never scrapes web pages; returns normalized target_post_url, "
+            "target_post_text, author handle, and public metrics. Refuses when "
+            "data_collection_mode='manual' or xurl is unavailable."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "timeout_seconds": {"type": "number", "default": 30},
+            },
+            "required": ["url"],
+        },
+        handler=lambda conn, *, url, timeout_seconds=30: _autonomy.fetch_x_post_by_url(
+            conn,
+            url=url,
+            timeout_seconds=timeout_seconds,
+        ),
+    ),
     ToolDef(
         name="run_local_bash",
         description=(
