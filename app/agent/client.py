@@ -106,6 +106,12 @@ def _format_anthropic_error_for_user(exc: Exception) -> str:
             "request, so wait a minute and try again; your message was saved in this "
             "conversation."
         )
+    if "decompressing data" in raw or "incorrect header check" in raw:
+        return (
+            "The Growth Agent hit a temporary provider/network decoding error while "
+            "reading the Anthropic response. Try again shortly; your message was saved "
+            "in this conversation."
+        )
     if status_code == 429 or exc_name == "RateLimitError":
         return (
             "Anthropic rate-limited the Growth Agent request. Wait a bit and try again; "

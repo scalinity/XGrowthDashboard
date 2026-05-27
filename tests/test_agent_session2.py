@@ -10,6 +10,7 @@ than the perimeter itself.
 from __future__ import annotations
 
 import os
+import zlib
 
 import pytest
 
@@ -218,6 +219,24 @@ class TestAgentClientApiErrors:
         assert "try again" in turn.error.lower()
         assert "OverloadedError" not in turn.error
         assert "request_id" not in turn.error
+
+    def test_provider_decompression_error_returns_retryable_user_message(self, db_conn):
+        class DecompressionClient(AgentClient):
+            def _call_model(self, conn, *, conversation_id):
+                raise zlib.error("Error -3 while decompressing data: incorrect header check")
+
+        conversation_id = start_conversation(db_conn, title="decompression test")
+        turn = DecompressionClient(api_key="test-key").send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="draft something",
+        )
+
+        assert turn.error is not None
+        assert "temporary provider/network decoding error" in turn.error
+        assert "try again" in turn.error.lower()
+        assert "Error -3" not in turn.error
+        assert "incorrect header check" not in turn.error
 
 
 # ===========================================================================
