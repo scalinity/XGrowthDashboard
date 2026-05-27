@@ -39,6 +39,7 @@ from app.forms.weekly_review import submit_weekly_review
 from app.jobs import agent_ops, post_classification_sync, x_activity_sync
 from app.secret_store import resolve_secret, store_secret
 from scripts import collect_account_snapshot
+from app.service.agent_status import build_agent_mode, build_capabilities
 from app.service.constants import SERVICE_NAME, SERVICE_VERSION
 from app.service.diagnostics import (
     build_diagnostics_payload,
@@ -47,11 +48,22 @@ from app.service.diagnostics import (
 )
 from app.service.helpers import _automation_queue_row, _form_error, _sse
 from app.service.models import (
+    AgentModeResponse,
+    CapabilitiesResponse,
+    ConversationsResponse,
+    DiagnosticsCopyResponse,
+    HealthDetailsResponse,
+    MessagesResponse,
     PublishBody,
+    PublishResponse,
+    ReplyQueueResponse,
     SecretBody,
+    SecretsResponse,
     SendMessageBody,
+    SettingsResponse,
     SettingValue,
     StartConversationBody,
+    TodayResponse,
 )
 from app.service.settings_schema import (
     MANAGED_SECRETS,
@@ -89,12 +101,12 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
             """Liveness probe for the Tauri shell's sidecar handshake. Unauthenticated."""
             return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
 
-        @app.get("/health/details", dependencies=[Depends(auth)])
+        @app.get("/health/details", dependencies=[Depends(auth)], response_model=HealthDetailsResponse)
         def health_details(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             """Structured non-sensitive sidecar readiness details for the native shell."""
             return build_health_details(conn, service_version=SERVICE_VERSION)
 
-        @app.get("/diagnostics/copy", dependencies=[Depends(auth)])
+        @app.get("/diagnostics/copy", dependencies=[Depends(auth)], response_model=DiagnosticsCopyResponse)
         def diagnostics_copy(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             payload = build_diagnostics_payload(conn, service_version=SERVICE_VERSION)
             return {
@@ -161,7 +173,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
                     detail=f"X activity sync failed: {type(exc).__name__}: {exc}",
                 ) from exc
 
-        @app.get("/views/today", dependencies=[Depends(auth)])
+        @app.get("/views/today", dependencies=[Depends(auth)], response_model=TodayResponse)
         def view_today(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             """§14.1 Today slice — mirrors the Streamlit page's primary reads.
 
@@ -227,7 +239,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
             """§14.6 Weekly Review — summary metrics, existing review, history."""
             return _weekly_review_slice(conn)
 
-        @app.get("/views/reply-queue", dependencies=[Depends(auth)])
+        @app.get("/views/reply-queue", dependencies=[Depends(auth)], response_model=ReplyQueueResponse)
         def view_reply_queue(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             """§29.7 Reply Target Queue — scored candidates with R/E/S/O cluster."""
             return _reply_queue_slice(conn)
@@ -707,7 +719,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
 
         # ----- Settings read/update (§14.7) -----
 
-        @app.get("/settings", dependencies=[Depends(auth)])
+        @app.get("/settings", dependencies=[Depends(auth)], response_model=SettingsResponse)
         def read_settings(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             rows = conn.execute("SELECT key FROM settings ORDER BY key").fetchall()
             return {"settings": {r["key"]: get_setting(conn, r["key"]) for r in rows}}
@@ -735,7 +747,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
         # below also updates os.environ so a freshly-set key takes effect without a
         # restart.
 
-        @app.get("/settings/secrets", dependencies=[Depends(auth)])
+        @app.get("/settings/secrets", dependencies=[Depends(auth)], response_model=SecretsResponse)
         def read_secrets() -> dict[str, Any]:
             return {
                 "secrets": {
@@ -758,6 +770,14 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
             os.environ[name] = value
             return {"ok": True, "name": name, "present": True}
 
+        @app.get("/agent/mode", dependencies=[Depends(auth)], response_model=AgentModeResponse)
+        def agent_mode(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+            return build_agent_mode(conn)
+
+        @app.get("/capabilities", dependencies=[Depends(auth)], response_model=CapabilitiesResponse)
+        def capabilities(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+            return build_capabilities(conn)
+
         # ----- Agent session endpoints (§14.8, §28) -----
         # Wrap the existing AgentClient.send_message_sync. The §28.10 publish
         # tools remain unreachable from here (they are not in AGENT_TOOLS; the
@@ -773,7 +793,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
             )
             return {"conversation_id": cid}
 
-        @app.get("/agent/conversations", dependencies=[Depends(auth)])
+        @app.get("/agent/conversations", dependencies=[Depends(auth)], response_model=ConversationsResponse)
         def list_conversations(
             conn: sqlite3.Connection = Depends(get_conn),
         ) -> dict[str, Any]:
@@ -794,6 +814,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
         @app.get(
             "/agent/conversations/{conversation_id}/messages",
             dependencies=[Depends(auth)],
+            response_model=MessagesResponse,
         )
         def list_messages(
             conversation_id: int, conn: sqlite3.Connection = Depends(get_conn)
@@ -938,7 +959,7 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
         # frontend only sends the typed-'confirm' phrase + the (possibly edited) text.
         # The six-check chain + atomic transaction live unchanged in publish.py.
 
-        @app.post("/publish", dependencies=[Depends(auth)])
+        @app.post("/publish", dependencies=[Depends(auth)], response_model=PublishResponse)
         def publish(
             body: PublishBody, conn: sqlite3.Connection = Depends(get_conn)
         ) -> dict[str, Any]:
