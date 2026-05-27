@@ -1,0 +1,93 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# X Growth Dashboard — CodeRabbit repo config (see AGENTS.md, spec.md).
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: true
+  changed_files_summary: true
+  instructions: |
+    Single-user, local-only Python growth dashboard (Streamlit + FastAPI sidecar + Tauri/React desktop).
+    Authoritative product and architecture rules live in spec.md; operational rules in AGENTS.md and CLAUDE.md.
+    When implementation disagrees with spec.md, flag it — the spec wins unless the PR explicitly updates spec first.
+
+    Global conventions:
+    - Package manager is uv only (uv add / uv run); never suggest pip install or hand-editing pyproject dependency lists.
+    - Python ≥ 3.11; lint with Ruff (line-length 100). Verification: uv run pytest -q and uv run ruff check.
+    - data/ and secrets (.env, API keys) must never be committed; flag any credential or user DB path leakage.
+    - Out of scope: multi-tenant, auth/Stripe, cloud sync, telemetry, App Store distribution, auto-update — refuse scope creep politely.
+    - Do not nitpick import order or formatting already enforced by Ruff/ESLint.
+    - Prefer bugs, data-loss risk, security, and spec drift over style opinions.
+  path_filters:
+    - "!data/**"
+    - "!**/.venv/**"
+    - "!**/__pycache__/**"
+    - "!**/.pytest_cache/**"
+    - "!**/.ruff_cache/**"
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!build/**"
+    - "!desktop/src-tauri/target/**"
+    - "!desktop/src-tauri/bin/**"
+    - "!uv.lock"
+    - "!**/package-lock.json"
+    - "!**/*.png"
+    - "!**/*.db"
+    - "!**/*.db-wal"
+    - "!**/*.db-shm"
+    - "!/.playwright-mcp/**"
+  path_instructions:
+    - path: "spec.md"
+      instructions: |
+        Treat as authoritative. Flag PRs that change behavior without matching spec updates, or that silently narrow MVP scope defined in the spec.
+    - path: "app/pages/**"
+      instructions: |
+        Streamlit pages: no silent rerun side-effects. Mutations via explicit handlers (on_click, form submit), not render flow.
+        Derive display state from st.session_state + DB reads; avoid "if A changed, update B" sync patterns. Call apply_theme() after st.title.
+    - path: "app/service/**"
+      instructions: |
+        FastAPI loopback sidecar is a pure HTTP/SSE adapter — no new business logic here; delegate to existing app/ modules.
+    - path: "app/agent/**"
+      instructions: |
+        Growth Agent (Anthropic tools, confirmations, lint pass, recovery). Watch for tool-call safety, confirmation flows, and API key handling.
+    - path: "migrations/**"
+      instructions: |
+        Raw SQL applied in lexicographic filename order. Flag non-idempotent migrations, destructive changes without backup notes, and schema drift from spec.
+    - path: "desktop/src/**"
+      instructions: |
+        Native UI must mirror app/components/theme.py (dark instrument-panel, bundled fonts, Plotly.js). Flag aesthetic drift and React useEffect used for state sync (project prefers explicit handlers / derived state).
+    - path: "tests/**"
+      instructions: |
+        pytest mirrors app/ layout. Prefer behavioral tests; flag tests that only assert mocks or trivial constants without guarding real regressions.
+    - path: "scripts/**"
+      instructions: |
+        Operational one-shots (backup, export). Flag data-destructive scripts missing safeguards and any path that writes outside resolved data dirs.
+  auto_review:
+    enabled: true
+    drafts: false
+    incremental_reviews: true
+  tools:
+    enabled: true
+    ruff:
+      enabled: true
+    eslint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: auto
