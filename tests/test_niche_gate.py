@@ -226,10 +226,12 @@ def test_prompt_splice_renders_loaded_niche(db_conn: sqlite3.Connection) -> None
 def test_prompt_splice_renders_disabled_stub_when_unset(
     db_conn: sqlite3.Connection,
 ) -> None:
-    # Empty seed values → disabled stub.
+    # Empty seed values → persistence blocked, inline help still available.
     prompt = build_system_prompt(db_conn)
     assert "niche not yet defined" in prompt
-    assert "drafting is disabled" in prompt
+    assert "drafting is disabled" not in prompt
+    assert "can still draft inline" in prompt
+    assert "cannot save drafts" in prompt
     assert "{{ NICHE_DEFINITION_PLACEHOLDER }}" not in prompt
 
 

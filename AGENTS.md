@@ -1,6 +1,6 @@
 # Project rules — X Growth Dashboard
 
-Project-local standing rules that override conflicting global defaults. The user's global `~/.claude/CLAUDE.md` still applies; this file adds project-specific constraints.
+Project-local standing rules that override conflicting global defaults. The user's global `~/.Codex/AGENTS.md` still applies; this file adds project-specific constraints.
 
 ---
 
@@ -126,7 +126,7 @@ Verification: `open docs/index.html` on macOS. Confirm the new phase appears in 
 
 ## Issue tracking and review-fix workflow
 
-This project does **not** use Linear or GitHub Issues. It tracks fixes locally via the Claude Code Task tools (`TaskCreate` / `TaskUpdate` / `TaskList`). The `/address` skill (and any skill that "files a Linear parent + sub-issues") must adapt as follows on this repo:
+This project does **not** use Linear or GitHub Issues. It tracks fixes locally via the Codex Task tools (`TaskCreate` / `TaskUpdate` / `TaskList`). The `/address` skill (and any skill that "files a Linear parent + sub-issues") must adapt as follows on this repo:
 
 - **In lieu of a Linear project:** file a *parent* local task ("Address /review-N findings for <area>") and one *sub-task* per finding via `TaskCreate`. Sub-tasks must reference the finding's severity (🔴/🟡/🔵) and the offending `file:line` from the review report.
 - **Per-fix workflow:** for each sub-task, mark `in_progress` → make the code change → run the verification command(s) below for the affected area → `git commit` with a Conventional Commits subject that references the sub-task ID (e.g. `fix(scripts): #14 — restore_db preserves WAL/SHM sidecars`) → `git push origin main` → mark `completed`.
@@ -135,7 +135,7 @@ This project does **not** use Linear or GitHub Issues. It tracks fixes locally v
   - Python source (`app/`, `scripts/`, `tests/`): `uv run pytest -q` AND `uv run ruff check`.
   - UI changes (`app/pages/`, `app/components/`): the two above PLUS a Streamlit boot smoke (`uv run streamlit run app/main.py --server.headless true` and check no exception in the logs) when feasible.
   - Migrations (`migrations/*.sql`): `uv run pytest tests/test_schema.py -q` AND a manual `uv run python -m scripts.init_db` against a fresh tmp DB.
-  - Docs only (`docs/`, `README.md`, `CLAUDE.md`): no test gate required; spelling/link sanity check is enough.
+  - Docs only (`docs/`, `README.md`, `AGENTS.md`): no test gate required; spelling/link sanity check is enough.
 - **Git remote:** `origin` points at `https://github.com/scalinity/XGrowthDashboard` (public). Every fix commit is pushed individually so the public history reflects per-finding granularity.
 
 The point of the per-sub-task push is the same point Linear would serve: an external observer can audit which finding produced which commit without trawling for `[PRE-EXISTING]` prefixes or commit-body footnotes.

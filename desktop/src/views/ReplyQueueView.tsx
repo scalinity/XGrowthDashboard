@@ -48,6 +48,58 @@ interface ReplyQueueData {
   items: ReplyQueueItem[];
 }
 
+interface AddReplyTargetResult {
+  ok: boolean;
+  reply_target_id: number;
+  created: boolean;
+  scored_count?: number;
+  note?: string;
+}
+
+interface AddCandidateForm {
+  targetPostUrl: string;
+  targetUser: string;
+  targetPostText: string;
+  targetAuthorFollowerCount: string;
+  likeCount: string;
+  replyCount: string;
+  repostCount: string;
+  pillar: string;
+  replyIntent: string;
+}
+
+const EMPTY_ADD_CANDIDATE: AddCandidateForm = {
+  targetPostUrl: "",
+  targetUser: "",
+  targetPostText: "",
+  targetAuthorFollowerCount: "",
+  likeCount: "0",
+  replyCount: "0",
+  repostCount: "0",
+  pillar: "",
+  replyIntent: "",
+};
+
+const PILLAR_OPTIONS = ["", "stir", "build", "self"] as const;
+const REPLY_INTENT_OPTIONS = [
+  "",
+  "growth",
+  "icp_discovery",
+  "relationship",
+  "product_adjacent",
+  "thought_leadership",
+] as const;
+
+const optionalText = (value: string) => {
+  const cleaned = value.trim();
+  return cleaned || undefined;
+};
+
+const optionalNumber = (value: string) => {
+  if (value.trim() === "") return undefined;
+  return Number(value);
+};
+
 // Action label -> keyline color (mirrors theme.py).
 const ACTION_KEYLINE: Record<string, string> = {
   reply_now: palette.phosphor,
@@ -57,10 +109,12 @@ const ACTION_KEYLINE: Record<string, string> = {
 };
 
 const SKIP_REASONS = [
-  { value: "not_relevant", label: "Not relevant" },
-  { value: "too_old", label: "Too old" },
-  { value: "already_replied", label: "Already replied" },
-  { value: "low_quality", label: "Low quality" },
+  { value: "off_topic", label: "Off topic" },
+  { value: "ragebait", label: "Ragebait" },
+  { value: "saturation", label: "Saturation" },
+  { value: "cant_add_value", label: "Can't add value" },
+  { value: "target_deleted", label: "Target deleted" },
+  { value: "blocked_by_author", label: "Blocked by author" },
   { value: "other", label: "Other" },
 ] as const;
 
@@ -83,6 +137,17 @@ export const ReplyQueueView = () => {
       apiFetch<{ ok: boolean; scored_count: number }>("/agent/score-candidates", {
         method: "POST",
       }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reply-queue"] });
+    },
+  });
+
+  const discoverMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ ok: boolean; created_count?: number; updated_count?: number }>(
+        "/agent/find-reply-targets",
+        { method: "POST" },
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reply-queue"] });
     },
@@ -113,9 +178,32 @@ export const ReplyQueueView = () => {
   // --- Local UI state (no effects — driven by handlers only) ---------------
 
   const [skipOpen, setSkipOpen] = useState<number | null>(null);
-  const [skipReason, setSkipReason] = useState("not_relevant");
+  const [skipReason, setSkipReason] = useState("off_topic");
   const [markPostedOpen, setMarkPostedOpen] = useState<number | null>(null);
   const [postedUrl, setPostedUrl] = useState("");
+  const [candidateForm, setCandidateForm] = useState<AddCandidateForm>(EMPTY_ADD_CANDIDATE);
+
+  const addCandidateMutation = useMutation({
+    mutationFn: (form: AddCandidateForm) =>
+      apiFetch<AddReplyTargetResult>("/reply-targets", {
+        method: "POST",
+        body: JSON.stringify({
+          target_post_url: form.targetPostUrl.trim(),
+          target_user: optionalText(form.targetUser),
+          target_post_text: optionalText(form.targetPostText),
+          target_author_follower_count: optionalNumber(form.targetAuthorFollowerCount),
+          like_count: optionalNumber(form.likeCount),
+          reply_count: optionalNumber(form.replyCount),
+          repost_count: optionalNumber(form.repostCount),
+          pillar: optionalText(form.pillar),
+          reply_intent: optionalText(form.replyIntent),
+        }),
+      }),
+    onSuccess: () => {
+      setCandidateForm(EMPTY_ADD_CANDIDATE);
+      queryClient.invalidateQueries({ queryKey: ["reply-queue"] });
+    },
+  });
 
   if (isLoading) return <p className="dim">Reading the local service...</p>;
   if (error) {
@@ -134,14 +222,14 @@ export const ReplyQueueView = () => {
     <>
       <Kicker>REPLY TARGET QUEUE</Kicker>
       <h1 style={{ fontSize: "2.1rem" }}>Reply target queue</h1>
-      <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
+      <p className="dim" style={{ maxWidth: 760, marginTop: "-0.2rem" }}>
         Candidates to reply under, scored on four dimensions.
         The recommended action is deterministic from the scores. Sort order is
         reply_now, reply_if_time, consider, skip — then by recency.
       </p>
 
-      {/* Score Candidates action */}
-      <div style={{ margin: "0.5rem 0 0.7rem" }}>
+      {/* Queue actions */}
+      <div style={{ display: "flex", gap: "0.55rem", alignItems: "center", flexWrap: "wrap", margin: "0.65rem 0 0.7rem" }}>
         <button
           onClick={() => scoreMutation.mutate()}
           disabled={scoreMutation.isPending}
@@ -160,32 +248,43 @@ export const ReplyQueueView = () => {
         >
           {scoreMutation.isPending ? "Scoring..." : "Score candidates"}
         </button>
+        <button
+          onClick={() => discoverMutation.mutate()}
+          disabled={discoverMutation.isPending}
+          style={{
+            padding: "0.45rem 1rem",
+            background: palette.surfaceRaised,
+            color: palette.bone,
+            border: `1px solid ${palette.hairline}`,
+            borderRadius: "3px",
+            fontFamily: fonts.body,
+            fontWeight: 600,
+            fontSize: "0.85rem",
+            cursor: discoverMutation.isPending ? "wait" : "pointer",
+            opacity: discoverMutation.isPending ? 0.6 : 1,
+          }}
+        >
+          {discoverMutation.isPending ? "Finding..." : "Find targets"}
+        </button>
         {scoreMutation.isSuccess && (
-          <span
-            style={{
-              marginLeft: "0.6rem",
-              color: palette.phosphor,
-              fontSize: "0.82rem",
-            }}
-          >
+          <span style={{ color: palette.phosphor, fontSize: "0.82rem" }}>
             Scored {scoreMutation.data.scored_count} candidates
           </span>
         )}
-        {scoreMutation.isError && (
-          <span
-            style={{
-              marginLeft: "0.6rem",
-              color: palette.warnAmber,
-              fontSize: "0.82rem",
-            }}
-          >
-            {String((scoreMutation.error as Error).message ?? "Scoring failed")}
+        {discoverMutation.isSuccess && (
+          <span style={{ color: palette.phosphor, fontSize: "0.82rem" }}>
+            Found {discoverMutation.data.created_count ?? 0} new / {discoverMutation.data.updated_count ?? 0} updated
+          </span>
+        )}
+        {(scoreMutation.isError || discoverMutation.isError) && (
+          <span style={{ color: palette.warnAmber, fontSize: "0.82rem" }}>
+            {String(((scoreMutation.error ?? discoverMutation.error) as Error).message ?? "Action failed")}
           </span>
         )}
       </div>
 
       {/* Counter strip */}
-      <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(10rem, 1fr))", gap: "0.6rem", width: "100%" }}>
         <ReadoutCard label="Candidates" value={String(counters.candidates)} />
         <ReadoutCard label="Drafted" value={String(counters.drafted)} accent="phosphorDim" />
         <ReadoutCard label="Posted today" value={String(counters.posted_today)} accent="phosphor" />
@@ -197,13 +296,114 @@ export const ReplyQueueView = () => {
         />
       </div>
 
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          addCandidateMutation.mutate(candidateForm);
+        }}
+        style={{
+          background: palette.surface,
+          borderLeft: `2px solid ${palette.phosphorDim}`,
+          borderRadius: "2px",
+          padding: "0.9rem 1.05rem",
+          margin: "0.2rem 0 1rem",
+        }}
+      >
+        <div className="kicker" style={{ color: palette.phosphor, marginBottom: "0.55rem" }}>
+          Add candidate
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(18rem, 1.4fr) minmax(10rem, 0.6fr)", gap: "0.55rem" }}>
+          <input
+            required
+            placeholder="Target post URL"
+            value={candidateForm.targetPostUrl}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, targetPostUrl: event.target.value }))}
+          />
+          <input
+            placeholder="Author handle"
+            value={candidateForm.targetUser}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, targetUser: event.target.value }))}
+          />
+        </div>
+        <textarea
+          placeholder="Target text"
+          value={candidateForm.targetPostText}
+          onChange={(event) => setCandidateForm((form) => ({ ...form, targetPostText: event.target.value }))}
+          style={{ width: "100%", minHeight: "4.5rem", marginTop: "0.55rem", resize: "vertical" }}
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(8rem, 1fr))", gap: "0.55rem", marginTop: "0.55rem" }}>
+          <input
+            type="number"
+            min={0}
+            placeholder="Likes"
+            value={candidateForm.likeCount}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, likeCount: event.target.value }))}
+          />
+          <input
+            type="number"
+            min={0}
+            placeholder="Replies"
+            value={candidateForm.replyCount}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, replyCount: event.target.value }))}
+          />
+          <input
+            type="number"
+            min={0}
+            placeholder="Reposts"
+            value={candidateForm.repostCount}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, repostCount: event.target.value }))}
+          />
+          <input
+            type="number"
+            min={0}
+            placeholder="Author followers"
+            value={candidateForm.targetAuthorFollowerCount}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, targetAuthorFollowerCount: event.target.value }))}
+          />
+          <select
+            value={candidateForm.pillar}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, pillar: event.target.value }))}
+          >
+            {PILLAR_OPTIONS.map((value) => (
+              <option key={value || "none"} value={value}>
+                {value || "Pillar"}
+              </option>
+            ))}
+          </select>
+          <select
+            value={candidateForm.replyIntent}
+            onChange={(event) => setCandidateForm((form) => ({ ...form, replyIntent: event.target.value }))}
+          >
+            {REPLY_INTENT_OPTIONS.map((value) => (
+              <option key={value || "none"} value={value}>
+                {value || "Intent"}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: "0.55rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.65rem" }}>
+          <button type="submit" className="primary" disabled={addCandidateMutation.isPending}>
+            {addCandidateMutation.isPending ? "Adding..." : "Add candidate"}
+          </button>
+          {addCandidateMutation.isSuccess && (
+            <span style={{ color: palette.phosphor, fontSize: "0.82rem" }}>
+              Candidate #{addCandidateMutation.data.reply_target_id} {addCandidateMutation.data.created ? "added" : "updated"}
+            </span>
+          )}
+          {addCandidateMutation.isError && (
+            <span style={{ color: palette.warnAmber, fontSize: "0.82rem" }}>
+              {String((addCandidateMutation.error as Error).message ?? "Add failed")}
+            </span>
+          )}
+        </div>
+      </form>
+
       <Hairline />
 
       {/* Candidate rows */}
       {items.length === 0 ? (
         <Callout>
-          <em>No candidates in the queue.</em> Add candidates via the Streamlit
-          view or let the agent discover them.
+          <em>No candidates in the queue.</em> Add a target above or let the agent discover candidates.
         </Callout>
       ) : (
         items.map((item) => {

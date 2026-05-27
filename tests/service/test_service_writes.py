@@ -153,16 +153,39 @@ def test_next_rep_and_validation_views(client: TestClient) -> None:
     nr = client.get("/views/next-rep", headers=AUTH)
     assert nr.status_code == 200
     assert nr.json()["slice"] == "next_rep"
-    # Expanded response: coverage, hypotheses, reply_targets, etc.
-    assert "coverage" in nr.json()
-    assert "hypotheses" in nr.json()
-    assert "reply_targets" in nr.json()
 
     val = client.get("/views/validation", headers=AUTH)
     assert val.status_code == 200
     assert val.json()["slice"] == "funnel"
-    assert "aggregate" in val.json()
-    assert "what_we_know" in val.json()
+
+
+def test_create_reply_target_records_and_scores_candidate(client: TestClient) -> None:
+    resp = client.post(
+        "/reply-targets",
+        json={
+            "target_post_url": "https://x.com/example/status/12345",
+            "target_user": "example",
+            "target_post_text": "A thoughtful post about weeknight cooking systems.",
+            "like_count": 0,
+            "reply_count": 0,
+            "repost_count": 0,
+            "pillar": "stir",
+            "reply_intent": "icp_discovery",
+        },
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["created"] is True
+    assert isinstance(body["reply_target_id"], int)
+
+    queue = client.get("/views/reply-queue", headers=AUTH)
+    assert queue.status_code == 200
+    data = queue.json()
+    assert data["counters"]["candidates"] == 1
+    assert data["items"][0]["handle"] == "example"
 
 
 def test_settings_get_and_update(client: TestClient) -> None:

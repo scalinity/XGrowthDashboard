@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app import x_client
 from app.agent import audit, confirmation, publish, recovery
 from app.agent._internal_tools import INTERNAL_TOOLS, publish_post_to_x
 from app.agent.tools import AGENT_TOOLS, _save_draft_post, _revise_draft, get_tool
@@ -99,6 +100,56 @@ def test_publish_tool_names_match_internal_tools():
     into agent_tool_calls.arguments_json. This test catches that.
     """
     assert audit.PUBLISH_TOOL_NAMES == {t.name for t in INTERNAL_TOOLS}
+
+
+def test_autonomous_bash_tool_runs_project_scoped_command(db_conn):
+    """The agent can execute bounded local project work without UI permission."""
+    result = get_tool("run_local_bash").handler(
+        db_conn,
+        command="printf agent-ready",
+        timeout_seconds=5,
+        purpose="smoke test",
+    )
+    assert result["status"] == "success"
+    assert result["stdout"] == "agent-ready"
+    assert result["exit_code"] == 0
+
+
+def test_autonomous_bash_tool_refuses_secret_dump(db_conn):
+    """Bash access is autonomous, but not allowed to dump env secrets."""
+    result = get_tool("run_local_bash").handler(db_conn, command="env")
+    assert result["status"] == "refused"
+    assert "environment" in result["error"]
+
+
+def test_agent_x_api_tool_is_read_only_get(monkeypatch, db_conn):
+    """The model-visible X API tool can read through xurl but cannot publish."""
+    seen: dict[str, object] = {}
+
+    def fake_request(endpoint: str, **kwargs):
+        seen["endpoint"] = endpoint
+        seen["method"] = kwargs.get("method")
+        seen["log_source"] = kwargs.get("log_source")
+        return x_client.XApiResponse(
+            status_code=200,
+            body={"data": {"id": "123"}},
+            raw_response_id=44,
+            endpoint=endpoint,
+            method="GET",
+            elapsed_seconds=0.01,
+        )
+
+    monkeypatch.setattr(x_client, "request", fake_request)
+
+    result = get_tool("query_x_api").handler(db_conn, endpoint="/2/users/me")
+
+    assert result["status"] == "success"
+    assert seen == {
+        "endpoint": "/2/users/me",
+        "method": "GET",
+        "log_source": "agent_x_api_read",
+    }
+    assert result["raw_response_id"] == 44
 
 
 # ===========================================================================
@@ -255,6 +306,12 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
             "mode": "thread_from_sections",
         },
         "repurpose_x_to_blog_idea": {"post_id": None},
+        "run_local_bash": {
+            "command": "printf agent-tool-smoke",
+            "timeout_seconds": 5,
+            "purpose": "agent tool registry smoke test",
+        },
+        "query_x_api": {"endpoint": "/2/users/me", "timeout_seconds": 5},
     }
     # Seed a brain_dumps row for the smoke test invocation.
     from app.agent import brain_dump as _brain_dump
@@ -312,19 +369,33 @@ def test_every_agent_tool_handler_executes_against_fresh_db(db_conn):
 
     from app.agent.tools import AGENT_TOOLS
     saved_draft_id: int | None = None
-    for tool in AGENT_TOOLS:
-        kwargs = dict(sample_kwargs[tool.name])
-        if tool.name == "revise_draft":
-            assert saved_draft_id is not None, (
-                "save_draft_post must run before revise_draft in test order"
-            )
-            kwargs["draft_post_id"] = saved_draft_id
-        result = tool.handler(db_conn, **kwargs)
-        assert isinstance(result, dict), (
-            f"{tool.name} must return a dict; got {type(result).__name__}"
+
+    def _fake_x_request(endpoint: str, **kwargs):
+        return x_client.XApiResponse(
+            status_code=200,
+            body={"data": {"id": "123"}},
+            raw_response_id=None,
+            endpoint=endpoint,
+            method="GET",
+            elapsed_seconds=0.001,
         )
-        if tool.name == "save_draft_post":
-            saved_draft_id = result["draft_id"]
+
+    from unittest.mock import patch
+
+    with patch.object(x_client, "request", _fake_x_request):
+        for tool in AGENT_TOOLS:
+            kwargs = dict(sample_kwargs[tool.name])
+            if tool.name == "revise_draft":
+                assert saved_draft_id is not None, (
+                    "save_draft_post must run before revise_draft in test order"
+                )
+                kwargs["draft_post_id"] = saved_draft_id
+            result = tool.handler(db_conn, **kwargs)
+            assert isinstance(result, dict), (
+                f"{tool.name} must return a dict; got {type(result).__name__}"
+            )
+            if tool.name == "save_draft_post":
+                saved_draft_id = result["draft_id"]
 
 
 def test_dispatch_tool_call_refuses_save_draft_with_low_iwh(db_conn, monkeypatch):

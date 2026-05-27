@@ -149,9 +149,11 @@ def extract_rules_from_spec(spec_path: Path | None = None) -> list[str]:
 def render_voice_samples_section(samples: list[voice.VoiceSample]) -> str:
     if not samples:
         return (
-            "(No voice samples are active. Daniel hasn't marked any posts as "
-            "voice exemplars yet — the agent is operating without a calibrated "
-            "voice signal until at least 3 samples are added in Settings.)"
+            "(No voice samples are active. Daniel is operating without a calibrated "
+            "voice signal; this is not a blocker. Use the base voice guidance, "
+            "the identity context, and the current chat request. Mention that "
+            "3+ active voice exemplars in Settings will make future drafts sharper, "
+            "but keep helping now.)"
         )
     blocks: list[str] = []
     for s in samples:
@@ -324,16 +326,16 @@ def render_niche_definition(nd: niche.NicheDefinition) -> str:
     Two states:
       * BOTH fields set → load-bearing line, verbatim per §28.16:
         "You help **{niche_person}** solve **{niche_problem}**."
-      * EITHER empty → the disabled-state stub. Drafting is also refused
-        by the orchestrator (rule #15), but the agent sees the prompt
-        line so it can echo a sensible "fill out your niche first"
-        response when asked.
+      * EITHER empty → explain that draft persistence is blocked, while
+        inline drafting and strategic help remain available.
     """
     if nd.is_defined():
         return f"You help **{nd.person}** solve **{nd.problem}**."
     return (
-        "(niche not yet defined — drafting is disabled until Daniel fills "
-        "Settings → Growth Agent → Niche)"
+        "(niche not yet defined — you can still draft inline in chat using "
+        "the identity context and Daniel's current request, but you cannot "
+        "save drafts with `save_draft_post` or `save_draft_reply` until Daniel "
+        "fills Settings → Growth Agent → Niche.)"
     )
 
 

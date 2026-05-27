@@ -318,6 +318,28 @@ def test_prompt_builder_warns_when_no_voice_samples(db_conn):
     assert "without a calibrated" in prompt or "No voice samples" in prompt
 
 
+def test_prompt_builder_missing_voice_samples_is_not_a_drafting_blocker(db_conn):
+    prompt = prompt_builder.build_system_prompt(db_conn)
+    assert "not a blocker" in prompt
+    assert "base voice guidance" in prompt
+
+
+def test_prompt_builder_missing_niche_allows_inline_drafting(db_conn):
+    prompt = prompt_builder.build_system_prompt(db_conn)
+    assert "drafting is disabled" not in prompt
+    assert "refuses to draft" not in prompt
+    assert "creator-flavored noise" not in prompt
+    assert "can still draft inline" in prompt
+    assert "cannot save drafts" in prompt
+
+
+def test_prompt_builder_frames_publish_as_owner_confirmed_workflow(db_conn):
+    prompt = prompt_builder.build_system_prompt(db_conn)
+    assert "prepare the exact final text" in prompt
+    assert "owner-confirmed publish workflow" in prompt
+    assert "I never publish" not in prompt
+
+
 def test_prompt_builder_includes_all_15_agent_tools(db_conn):
     prompt = prompt_builder.build_system_prompt(db_conn)
     from app.agent.tools import AGENT_TOOLS

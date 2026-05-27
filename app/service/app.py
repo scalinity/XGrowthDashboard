@@ -26,7 +26,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent import _internal_tools, confirmation, invariants
-from app.agent.client import AgentClient, start_conversation
+from app.agent.client import AgentClient, start_conversation, delete_conversation
 from app.agent.content_types import get_content_type_gaps, get_recommendation_window_days
 from app.agent.velocity import (
     get_noise_floor,
@@ -47,6 +47,7 @@ from app.agent.tools import (
     _score_reply_candidates,
     _find_reply_targets,
     _save_draft_reply,
+    _record_reply_target,
     _outline_blog_to_dict,
     _draft_blog_to_dict,
     _suggest_blog_edits_to_dict,
@@ -725,6 +726,17 @@ def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
 
     # S2: removed unused account_last_7 query (no frontend consumer).
 
+    # 9. Follower sparkline (last 14 days for the Today dashboard mini-chart).
+    sparkline_rows = conn.execute(
+        """SELECT snapshot_date, followers_count
+           FROM v_account_daily
+           ORDER BY snapshot_date DESC LIMIT 14"""
+    ).fetchall()
+    follower_sparkline = [
+        {"date": r["snapshot_date"], "count": int(r["followers_count"])}
+        for r in reversed(sparkline_rows)
+    ]
+
     return {
         "slice": "today",
         "today_iso": today_iso,
@@ -753,6 +765,7 @@ def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
         "pending_drafts": pending_drafts,
         "recent_posts": recent_posts,
         "snapshot_defaults": snap_defaults,
+        "follower_sparkline": follower_sparkline,
     }
 
 
@@ -1733,6 +1746,62 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.post("/reply-targets", dependencies=[Depends(auth)])
+    def create_reply_target(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        """Record a manual reply-target candidate from the native queue view."""
+
+        def clean_str(key: str) -> str | None:
+            value = payload.get(key)
+            if value is None:
+                return None
+            cleaned = str(value).strip()
+            return cleaned or None
+
+        def clean_nonnegative_int(key: str) -> int | None:
+            value = payload.get(key)
+            if value is None or value == "":
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+            if parsed < 0:
+                raise HTTPException(status_code=400, detail=f"{key} must be >= 0")
+            return parsed
+
+        target_post_url = clean_str("target_post_url")
+        if target_post_url is None:
+            raise HTTPException(status_code=400, detail="target_post_url is required")
+
+        try:
+            result = _record_reply_target(
+                conn,
+                target_post_url=target_post_url,
+                target_post_text=clean_str("target_post_text"),
+                target_user=clean_str("target_user"),
+                target_author_follower_count=clean_nonnegative_int("target_author_follower_count"),
+                like_count=clean_nonnegative_int("like_count"),
+                reply_count=clean_nonnegative_int("reply_count"),
+                repost_count=clean_nonnegative_int("repost_count"),
+                quote_count=clean_nonnegative_int("quote_count"),
+                pillar=clean_str("pillar"),
+                audience=clean_str("audience"),
+                reply_intent=clean_str("reply_intent"),
+                agent_reasoning=clean_str("notes"),
+                discovered_via="manual",
+            )
+            if "error" in result:
+                raise HTTPException(status_code=400, detail=result["error"])
+            reply_target_id = int(result["reply_target_id"])
+            score_result = _score_reply_candidates(conn, reply_target_id=reply_target_id)
+            return {"ok": True, **result, **score_result}
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     @app.post("/agent/draft-reply", dependencies=[Depends(auth)])
     def draft_reply(
         payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn),
@@ -1986,6 +2055,15 @@ def create_app(
             "SELECT * FROM agent_conversations ORDER BY id DESC LIMIT 100"
         ).fetchall()
         return {"conversations": [dict(r) for r in rows]}
+
+    @app.delete("/agent/conversations/{conversation_id}", dependencies=[Depends(auth)])
+    def delete_agent_conversation(
+        conversation_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        deleted = delete_conversation(conn, conversation_id=conversation_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return {"ok": True, "conversation_id": conversation_id}
 
     @app.get(
         "/agent/conversations/{conversation_id}/messages",

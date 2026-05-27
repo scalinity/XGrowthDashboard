@@ -110,7 +110,7 @@ h3 {
   font-family: var(--font-display);
   font-style: italic;
   font-weight: 400;
-  color: var(--bone-dim);
+  color: var(--phosphor);
 }
 
 .kicker {
@@ -207,4 +207,74 @@ table th {
   text-transform: uppercase;
   color: var(--bone-faint);
   font-weight: 500;
+}
+
+/* ── Today dashboard ──────────────────────────────────────── */
+@keyframes panelReveal {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.today-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin: 0.75rem 0 1.5rem;
+}
+
+.today-panel {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 1.1rem 1.3rem;
+  animation: panelReveal 450ms ease both;
+  transition: border-color 200ms ease;
+}
+
+.today-panel:hover {
+  border-color: var(--phosphor-dim);
+}
+
+.today-panel.accent {
+  border-left: 3px solid var(--phosphor);
+  border-top-left-radius: 3px;
+  border-bottom-left-radius: 3px;
+}
+
+.today-panel.full {
+  grid-column: 1 / -1;
+}
+
+.today-section {
+  animation: panelReveal 400ms ease both;
+}
+
+.today-section summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.today-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.today-section summary::before {
+  content: "▸";
+  font-size: 0.75rem;
+  color: var(--bone-faint);
+  transition: transform 200ms ease;
+}
+
+.today-section[open] summary::before {
+  transform: rotate(90deg);
 }

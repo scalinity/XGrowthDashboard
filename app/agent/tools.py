@@ -29,6 +29,7 @@ from typing import Any, Callable
 
 from app.db import transaction
 from app.agent import account_research as _account_research
+from app.agent import autonomy as _autonomy
 from app.agent import blog_drafting as _blog_drafting
 from app.agent import blog_repurposing as _blog_repurposing
 from app.agent import brain_dump as _brain_dump
@@ -2069,8 +2070,9 @@ def _brain_dump_process_to_dict(
     }
 
 
-# AGENT_TOOLS — the registered tool catalog (25 entries after Phase 5.11
-# — #23 transform_inspiration + #24 score_inspiration_plagiarism_risk).
+# AGENT_TOOLS — the registered tool catalog. The list has grown across
+# phases; keep tests source-of-truth on the actual registry rather than a
+# hard-coded count.
 # ===========================================================================
 AGENT_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -2957,6 +2959,58 @@ AGENT_TOOLS: list[ToolDef] = [
         },
         handler=lambda conn, *, post_id: _repurpose_x_to_blog_idea_to_dict(
             conn, post_id=post_id
+        ),
+    ),
+    # ----- autonomous operator tools (local-only; publish remains internal-only) -----
+    ToolDef(
+        name="run_local_bash",
+        description=(
+            "Run a project-scoped local bash command on Daniel's machine for "
+            "XGrowth work. Use this when the work requires invoking uv, scripts, "
+            "sqlite-utils, git inspection, or other local project commands. The "
+            "tool does not ask for per-command permission, but cwd is confined to "
+            "the project root, runtime/output are bounded, env-file access is "
+            "blocked, and destructive machine-level commands are refused."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "cwd": {"type": "string", "default": "."},
+                "timeout_seconds": {"type": "number", "default": 30},
+                "purpose": {"type": "string"},
+            },
+            "required": ["command"],
+        },
+        handler=lambda conn, *, command, cwd=".", timeout_seconds=30, purpose=None: (
+            _autonomy.run_bash_command(
+                command=command,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                purpose=purpose,
+            )
+        ),
+    ),
+    ToolDef(
+        name="query_x_api",
+        description=(
+            "Run a read-only X API v2 GET request through the existing xurl "
+            "client and raw-response audit path. Use this to fetch live X data "
+            "when dashboard rows are stale or missing. This tool never publishes; "
+            "POST /2/tweets remains internal-only and confirmation-gated."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string"},
+                "timeout_seconds": {"type": "number", "default": 30},
+            },
+            "required": ["endpoint"],
+        },
+        handler=lambda conn, *, endpoint, timeout_seconds=30: _autonomy.query_x_api_get(
+            conn,
+            endpoint=endpoint,
+            timeout_seconds=timeout_seconds,
         ),
     ),
 ]

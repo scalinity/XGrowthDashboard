@@ -86,7 +86,15 @@ export function Layout({
         })}
       </aside>
 
-      <div style={{ flex: 1, padding: "2.2rem 2.4rem 4rem", maxWidth: 1000, overflowX: "hidden" }}>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          width: "100%",
+          padding: "2.2rem 2.4rem 4rem",
+          overflowX: "hidden",
+        }}
+      >
         {children}
       </div>
     </div>

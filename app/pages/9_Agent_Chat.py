@@ -44,6 +44,7 @@ from app.agent import (
 )
 from app.agent.client import (
     AgentClient,
+    delete_conversation,
     start_conversation,
 )
 from app.components.badges import (
@@ -116,6 +117,7 @@ def _strip_confidence_tags(content: str) -> str:
 def _bootstrap_state() -> None:
     st.session_state.setdefault("agent_conversation_id", None)
     st.session_state.setdefault("agent_context_seed", None)
+    st.session_state.setdefault("agent_delete_confirm_id", None)
     st.session_state.setdefault("publish_modal", None)
     st.session_state.setdefault("publish_result", None)
 
@@ -234,6 +236,39 @@ def _render_sidebar(conn) -> None:
                 use_container_width=True,
             ):
                 st.session_state.agent_conversation_id = int(row["id"])
+                st.session_state.agent_delete_confirm_id = None
+                st.rerun()
+
+            row_id = int(row["id"])
+            if st.session_state.get("agent_delete_confirm_id") == row_id:
+                st.warning(f"Delete session #{row_id}? Drafts/posts stay in the archive.")
+                col_delete, col_keep = st.columns([1, 1])
+                with col_delete:
+                    if st.button(
+                        "confirm delete",
+                        key=f"confirm_delete_session_{row_id}",
+                        use_container_width=True,
+                    ):
+                        if delete_conversation(conn, conversation_id=row_id):
+                            if st.session_state.get("agent_conversation_id") == row_id:
+                                st.session_state.agent_conversation_id = None
+                            st.session_state.agent_delete_confirm_id = None
+                            st.rerun()
+                        st.error("Conversation was already deleted.")
+                with col_keep:
+                    if st.button(
+                        "keep",
+                        key=f"keep_session_{row_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.agent_delete_confirm_id = None
+                        st.rerun()
+            elif st.button(
+                f"delete #{row_id}",
+                key=f"delete_session_{row_id}",
+                use_container_width=True,
+            ):
+                st.session_state.agent_delete_confirm_id = row_id
                 st.rerun()
 
 

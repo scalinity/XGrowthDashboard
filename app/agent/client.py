@@ -147,6 +147,23 @@ def start_conversation(
     return int(cur.lastrowid)
 
 
+def delete_conversation(conn: sqlite3.Connection, *, conversation_id: int) -> bool:
+    """Delete one agent conversation and its message/tool-call history.
+
+    Drafts and posts are preserved as audit records: their foreign keys are
+    declared ``ON DELETE SET NULL`` in §10.2/§28 migrations, while messages and
+    tool calls cascade away with the deleted conversation.
+    """
+    row = conn.execute(
+        "SELECT id FROM agent_conversations WHERE id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    conn.execute("DELETE FROM agent_conversations WHERE id = ?", (conversation_id,))
+    return True
+
+
 def append_message(
     conn: sqlite3.Connection,
     *,

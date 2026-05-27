@@ -32,9 +32,7 @@ class _StubClient(AgentClient):
         return ("stub assistant reply", [], 12, 7)
 
 
-@pytest.fixture
-def client(tmp_path: Path) -> TestClient:
-    db_path = tmp_path / "agent_svc.db"
+def _build_client(db_path: Path) -> TestClient:
     conn = connect(db_path)
     apply_migrations(conn)
     seed_settings(conn)  # cost-ceiling rows the send path reads
@@ -51,9 +49,15 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture
+def client(tmp_path: Path) -> TestClient:
+    return _build_client(tmp_path / "agent_svc.db")
+
+
 def test_agent_endpoints_require_token(client: TestClient) -> None:
     assert client.post("/agent/conversations", json={}).status_code == 401
     assert client.get("/agent/conversations").status_code == 401
+    assert client.delete("/agent/conversations/1").status_code == 401
 
 
 def test_start_conversation_and_send_message(client: TestClient) -> None:
@@ -100,6 +104,51 @@ def test_list_conversations(client: TestClient) -> None:
     convos = client.get("/agent/conversations", headers=AUTH).json()["conversations"]
     titles = {c.get("title") for c in convos}
     assert {"one", "two"} <= titles
+
+
+def test_delete_conversation_removes_history_and_preserves_drafts(tmp_path: Path) -> None:
+    db_path = tmp_path / "agent_svc_delete.db"
+    client = _build_client(db_path)
+    cid = client.post(
+        "/agent/conversations", json={"title": "old chat"}, headers=AUTH
+    ).json()["conversation_id"]
+    client.post(
+        f"/agent/conversations/{cid}/messages",
+        json={"text": "hello"},
+        headers=AUTH,
+    )
+
+    conn = connect(db_path)
+    try:
+        draft_id = conn.execute(
+            """
+            INSERT INTO agent_drafts (conversation_id, draft_kind, text)
+            VALUES (?, 'standalone', 'preserved draft')
+            """,
+            (cid,),
+        ).lastrowid
+    finally:
+        conn.close()
+
+    deleted = client.delete(f"/agent/conversations/{cid}", headers=AUTH)
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True, "conversation_id": cid}
+
+    conn = connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM agent_conversations WHERE id = ?", (cid,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM agent_messages WHERE conversation_id = ?", (cid,)
+        ).fetchone()[0] == 0
+        draft = conn.execute(
+            "SELECT conversation_id, text FROM agent_drafts WHERE id = ?", (draft_id,)
+        ).fetchone()
+        assert draft["conversation_id"] is None
+        assert draft["text"] == "preserved draft"
+    finally:
+        conn.close()
 
 
 def test_stream_endpoint_requires_token(client: TestClient) -> None:

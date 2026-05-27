@@ -2,7 +2,7 @@
  * Agent Chat — faithful port of app/pages/9_Agent_Chat.py (spec §14.8).
  *
  * Layout: conversation list sidebar, message thread, input + send, publish confirm.
- * Uses existing endpoints: POST/GET /agent/conversations, GET/POST .../messages.
+ * Uses existing endpoints: POST/GET/DELETE /agent/conversations, GET/POST .../messages.
  * No useEffect — useMutation for sends, useQuery for reads.
  */
 import { useState } from "react";
@@ -44,6 +44,7 @@ export const AgentChatView = () => {
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
 
   // List conversations.
   const { data: convos } = useQuery({
@@ -73,6 +74,26 @@ export const AgentChatView = () => {
       }),
     onSuccess: (data) => {
       setActiveConvoId(data.conversation_id);
+      setDeleteConfirmId(null);
+      qc.invalidateQueries({ queryKey: ["agent-conversations"] });
+    },
+  });
+
+  const deleteConvo = useMutation({
+    mutationFn: (conversationId: number) =>
+      apiFetch<{ ok: boolean; conversation_id: number }>(
+        `/agent/conversations/${conversationId}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: (_data, conversationId) => {
+      if (activeConvoId === conversationId) {
+        setActiveConvoId(null);
+        setStreamingText(null);
+        setThinkingText(null);
+        setStreamError(null);
+      }
+      setDeleteConfirmId(null);
+      qc.removeQueries({ queryKey: ["agent-messages", conversationId] });
       qc.invalidateQueries({ queryKey: ["agent-conversations"] });
     },
   });
@@ -165,6 +186,10 @@ export const AgentChatView = () => {
     createConvo.mutate({ title: "New conversation" });
   };
 
+  const handleDeleteConvo = (conversationId: number) => {
+    deleteConvo.mutate(conversationId);
+  };
+
   const conversations = convos?.conversations ?? [];
   const messages = messagesData?.messages ?? [];
 
@@ -198,20 +223,120 @@ export const AgentChatView = () => {
             + New conversation
           </button>
           <div style={{ maxHeight: "60vh", overflowY: "auto" }}>
-            {conversations.map((c) => (
-              <div
-                key={c.id}
-                onClick={() => setActiveConvoId(c.id)}
-                style={{ cursor: "pointer" }}
-              >
-                <ConsoleLogRow
-                  timestamp={c.created_at?.slice(0, 16) ?? ""}
-                  kind={c.context_seed ?? "chat"}
-                  title={c.title || `Conversation #${c.id}`}
-                  active={c.id === activeConvoId}
-                />
-              </div>
-            ))}
+            {conversations.map((c) => {
+              const isConfirmingDelete = deleteConfirmId === c.id;
+              const isDeleting = deleteConvo.isPending && deleteConvo.variables === c.id;
+              const disableActions = sendMessage.isPending || deleteConvo.isPending;
+              return (
+                <div key={c.id} style={{ marginBottom: "0.35rem" }}>
+                  <div
+                    onClick={() => {
+                      if (!isConfirmingDelete) setActiveConvoId(c.id);
+                    }}
+                    onKeyDown={(e) => {
+                      if ((e.key === "Enter" || e.key === " ") && !isConfirmingDelete) {
+                        e.preventDefault();
+                        setActiveConvoId(c.id);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${c.title || `Conversation ${c.id}`}`}
+                    style={{ cursor: isConfirmingDelete ? "default" : "pointer" }}
+                  >
+                    <ConsoleLogRow
+                      timestamp={c.created_at?.slice(0, 16) ?? ""}
+                      kind={c.context_seed ?? "chat"}
+                      title={c.title || `Conversation #${c.id}`}
+                      active={c.id === activeConvoId}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "flex-end",
+                      gap: "0.35rem",
+                      margin: "0 0 0.25rem 0.6rem",
+                    }}
+                  >
+                    {isConfirmingDelete ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteConvo(c.id)}
+                          disabled={disableActions}
+                          style={{
+                            padding: "0.2rem 0.45rem",
+                            background: palette.warnAmber,
+                            color: palette.ink,
+                            border: "none",
+                            borderRadius: "2px",
+                            fontFamily: fonts.mono,
+                            fontSize: "0.62rem",
+                            letterSpacing: "0.06em",
+                            textTransform: "uppercase",
+                            cursor: disableActions ? "not-allowed" : "pointer",
+                            opacity: disableActions ? 0.55 : 1,
+                          }}
+                        >
+                          {isDeleting ? "Deleting" : "Confirm"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteConfirmId(null)}
+                          disabled={deleteConvo.isPending}
+                          style={{
+                            padding: "0.2rem 0.45rem",
+                            background: palette.surfaceRaised,
+                            color: palette.boneDim,
+                            border: `1px solid ${palette.hairline}`,
+                            borderRadius: "2px",
+                            fontFamily: fonts.mono,
+                            fontSize: "0.62rem",
+                            letterSpacing: "0.06em",
+                            textTransform: "uppercase",
+                            cursor: deleteConvo.isPending ? "not-allowed" : "pointer",
+                            opacity: deleteConvo.isPending ? 0.55 : 1,
+                          }}
+                        >
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteConfirmId(c.id);
+                        }}
+                        disabled={disableActions}
+                        aria-label={`Delete ${c.title || `Conversation ${c.id}`}`}
+                        style={{
+                          padding: "0.16rem 0.45rem",
+                          background: "transparent",
+                          color: palette.boneFaint,
+                          border: `1px solid ${palette.hairline}`,
+                          borderRadius: "2px",
+                          fontFamily: fonts.mono,
+                          fontSize: "0.6rem",
+                          letterSpacing: "0.06em",
+                          textTransform: "uppercase",
+                          cursor: disableActions ? "not-allowed" : "pointer",
+                          opacity: disableActions ? 0.45 : 1,
+                        }}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                  {isConfirmingDelete && deleteConvo.error && (
+                    <p style={{ color: palette.warnAmber, fontSize: "0.72rem", margin: "0 0 0.35rem 0.6rem" }}>
+                      {String((deleteConvo.error as Error).message ?? deleteConvo.error)}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
             {conversations.length === 0 && (
               <p className="faint" style={{ fontSize: "0.85rem" }}>
                 No conversations yet. Start one above.
