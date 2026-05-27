@@ -10,6 +10,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
 import { apiFetch, copyDiagnosticsToClipboard, userSafeApiError } from "../lib/api";
+import type {
+  AgentModePayload,
+  SettingsResponse,
+  SecretsResponse,
+} from "../lib/contracts";
 import { palette } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
@@ -233,14 +238,19 @@ export const SettingsView = () => {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["settings"],
-    queryFn: () => apiFetch<{ settings: Record<string, unknown> }>("/settings"),
+    queryFn: () => apiFetch<SettingsResponse>("/settings"),
     retry: 1,
   });
 
   const { data: secretsData } = useQuery({
     queryKey: ["secrets"],
-    queryFn: () =>
-      apiFetch<{ secrets: Record<string, { present: boolean }> }>("/settings/secrets"),
+    queryFn: () => apiFetch<SecretsResponse>("/settings/secrets"),
+    retry: 1,
+  });
+
+  const { data: agentMode } = useQuery({
+    queryKey: ["agent-mode"],
+    queryFn: () => apiFetch<AgentModePayload>("/agent/mode"),
     retry: 1,
   });
 
@@ -293,6 +303,38 @@ export const SettingsView = () => {
           </p>
         )}
       </div>
+
+      {agentMode && (
+        <div style={{ marginBottom: "1.4rem" }}>
+          <h2>Agent permissions</h2>
+          <p className="dim" style={{ fontSize: "0.82rem", maxWidth: 620 }}>
+            Mode: <strong>{agentMode.data_collection_mode}</strong> · publish via{" "}
+            {agentMode.publish_mode}. The agent cannot publish or edit secrets from chat.
+          </p>
+          <table style={{ width: "100%", maxWidth: 620, fontSize: "0.85rem", marginTop: "0.6rem" }}>
+            <thead>
+              <tr>
+                <th align="left">Capability</th>
+                <th align="left">Allowed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(agentMode.tool_permissions).map(([key, allowed]) => (
+                <tr key={key}>
+                  <td>{key.replaceAll("_", " ")}</td>
+                  <td>{allowed ? "yes" : "no"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {agentMode.niche_gate.blocked && (
+            <p style={{ color: palette.warnAmber, marginTop: "0.6rem", fontSize: "0.85rem" }}>
+              Niche gate active — set niche problem + person before draft tools run.
+            </p>
+          )}
+          <Hairline />
+        </div>
+      )}
 
       <div>
         <h2>API keys</h2>

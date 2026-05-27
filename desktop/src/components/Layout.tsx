@@ -5,6 +5,7 @@
  * pane holds the active view.
  */
 import type { ReactNode } from "react";
+import { CapabilitiesBanner } from "./CapabilitiesBanner";
 import { palette } from "../theme/tokens";
 import type { ViewDef } from "../views";
 
@@ -95,6 +96,7 @@ export function Layout({
           overflowX: "hidden",
         }}
       >
+        <CapabilitiesBanner />
         {children}
       </div>
     </div>

@@ -85,6 +85,17 @@
   font-variation-settings: "opsz" 48, "SOFT" 40;
 }
 
+.agent-chat__mode-chip {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--phosphor);
+  border: 1px solid color-mix(in srgb, var(--phosphor) 35%, transparent);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+}
+
 .agent-chat__topbar-sub {
   font-family: var(--font-mono);
   font-size: 0.6rem;
