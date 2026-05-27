@@ -1,0 +1,555 @@
+{
+  "AgentModeResponse": {
+    "$defs": {
+      "AgentModeLintGate": {
+        "properties": {
+          "reply_intent_required": {
+            "title": "Reply Intent Required",
+            "type": "boolean"
+          },
+          "reply_quality_lint_enabled": {
+            "title": "Reply Quality Lint Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reply_quality_lint_enabled",
+          "reply_intent_required"
+        ],
+        "title": "AgentModeLintGate",
+        "type": "object"
+      },
+      "AgentModeNicheGate": {
+        "properties": {
+          "blocked": {
+            "title": "Blocked",
+            "type": "boolean"
+          },
+          "niche_person_set": {
+            "title": "Niche Person Set",
+            "type": "boolean"
+          },
+          "niche_problem_set": {
+            "title": "Niche Problem Set",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "blocked",
+          "niche_problem_set",
+          "niche_person_set"
+        ],
+        "title": "AgentModeNicheGate",
+        "type": "object"
+      },
+      "AgentModeSecretState": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "configured"
+        ],
+        "title": "AgentModeSecretState",
+        "type": "object"
+      },
+      "AgentModeToolPermissions": {
+        "properties": {
+          "publish": {
+            "title": "Publish",
+            "type": "boolean"
+          },
+          "read_dashboard": {
+            "title": "Read Dashboard",
+            "type": "boolean"
+          },
+          "read_x_api": {
+            "title": "Read X Api",
+            "type": "boolean"
+          },
+          "secrets": {
+            "title": "Secrets",
+            "type": "boolean"
+          },
+          "write_drafts": {
+            "title": "Write Drafts",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read_dashboard",
+          "read_x_api",
+          "write_drafts",
+          "publish",
+          "secrets"
+        ],
+        "title": "AgentModeToolPermissions",
+        "type": "object"
+      }
+    },
+    "description": "GET /agent/mode \u2014 agent gates and permission matrix.",
+    "properties": {
+      "api_read": {
+        "type": "boolean"
+      },
+      "data_collection_mode": {
+        "type": "string"
+      },
+      "lint_gate": {
+        "$ref": "#/$defs/AgentModeLintGate"
+      },
+      "niche_gate": {
+        "$ref": "#/$defs/AgentModeNicheGate"
+      },
+      "publish_mode": {
+        "type": "string"
+      },
+      "secret_state": {
+        "additionalProperties": {
+          "$ref": "#/$defs/AgentModeSecretState"
+        },
+        "type": "object"
+      },
+      "tool_permissions": {
+        "$ref": "#/$defs/AgentModeToolPermissions"
+      }
+    },
+    "required": [
+      "data_collection_mode",
+      "api_read",
+      "publish_mode",
+      "niche_gate",
+      "lint_gate",
+      "secret_state",
+      "tool_permissions"
+    ],
+    "type": "object"
+  },
+  "CapabilitiesResponse": {
+    "$defs": {
+      "CapabilityEntry": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "label"
+        ],
+        "title": "CapabilityEntry",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "GET /capabilities \u2014 dependency availability for degraded-mode UI.",
+    "properties": {
+      "anthropic": {
+        "$ref": "#/$defs/CapabilityEntry"
+      },
+      "grok": {
+        "$ref": "#/$defs/CapabilityEntry"
+      },
+      "keychain": {
+        "$ref": "#/$defs/CapabilityEntry"
+      },
+      "voyage": {
+        "$ref": "#/$defs/CapabilityEntry"
+      },
+      "x_api": {
+        "$ref": "#/$defs/CapabilityEntry"
+      },
+      "xurl": {
+        "$ref": "#/$defs/CapabilityEntry"
+      }
+    },
+    "required": [
+      "anthropic",
+      "voyage",
+      "x_api",
+      "grok",
+      "xurl",
+      "keychain"
+    ],
+    "type": "object"
+  },
+  "ConversationsResponse": {
+    "$defs": {
+      "ConversationSummary": {
+        "additionalProperties": true,
+        "properties": {
+          "context_seed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Context Seed"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ConversationSummary",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "conversations": {
+        "items": {
+          "$ref": "#/$defs/ConversationSummary"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "conversations"
+    ],
+    "type": "object"
+  },
+  "DiagnosticsCopyResponse": {
+    "additionalProperties": true,
+    "description": "GET /diagnostics/copy \u2014 redacted support bundle.",
+    "properties": {
+      "diagnostics": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "text": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "type": "object"
+  },
+  "HealthDetailsResponse": {
+    "additionalProperties": true,
+    "description": "GET /health/details \u2014 sidecar readiness without secrets.",
+    "properties": {
+      "app_version": {
+        "type": "string"
+      },
+      "capabilities": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "data_dir_source": {
+        "type": "string"
+      },
+      "db_path": {
+        "type": "string"
+      },
+      "latest_migration": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "ready": {
+        "type": "boolean"
+      },
+      "resource_root": {
+        "default": "",
+        "type": "string"
+      },
+      "service_version": {
+        "type": "string"
+      },
+      "sidecar_phase": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "ready",
+      "sidecar_phase",
+      "app_version",
+      "service_version",
+      "db_path",
+      "data_dir_source"
+    ],
+    "type": "object"
+  },
+  "MessagesResponse": {
+    "$defs": {
+      "AgentMessage": {
+        "additionalProperties": true,
+        "properties": {
+          "confidence_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confidence Label"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Content"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Tokens"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output Tokens"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "tool_calls_json": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tool Calls Json"
+          }
+        },
+        "required": [
+          "id",
+          "role"
+        ],
+        "title": "AgentMessage",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "conversation_id": {
+        "type": "integer"
+      },
+      "messages": {
+        "items": {
+          "$ref": "#/$defs/AgentMessage"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "conversation_id",
+      "messages"
+    ],
+    "type": "object"
+  },
+  "PublishResponse": {
+    "additionalProperties": true,
+    "properties": {
+      "post_id": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "success": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "success"
+    ],
+    "type": "object"
+  },
+  "ReplyQueueResponse": {
+    "$defs": {
+      "ReplyQueueCounters": {
+        "properties": {
+          "candidates": {
+            "title": "Candidates",
+            "type": "integer"
+          },
+          "drafted": {
+            "title": "Drafted",
+            "type": "integer"
+          },
+          "posted_today": {
+            "title": "Posted Today",
+            "type": "integer"
+          },
+          "skipped_today": {
+            "title": "Skipped Today",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "candidates",
+          "drafted",
+          "posted_today",
+          "skipped_today"
+        ],
+        "title": "ReplyQueueCounters",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "GET /views/reply-queue \u2014 minimum stable contract; extra fields allowed.",
+    "properties": {
+      "counters": {
+        "$ref": "#/$defs/ReplyQueueCounters"
+      },
+      "slice": {
+        "default": "reply_queue",
+        "type": "string"
+      }
+    },
+    "required": [
+      "counters"
+    ],
+    "type": "object"
+  },
+  "SecretsResponse": {
+    "description": "GET /settings/secrets \u2014 presence only, never values.",
+    "properties": {
+      "secrets": {
+        "additionalProperties": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "type": "object"
+        },
+        "type": "object"
+      }
+    },
+    "required": [
+      "secrets"
+    ],
+    "type": "object"
+  },
+  "SettingsResponse": {
+    "description": "GET /settings \u2014 all settings keys (values may be any JSON type).",
+    "properties": {
+      "settings": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    "required": [
+      "settings"
+    ],
+    "type": "object"
+  },
+  "TodayResponse": {
+    "additionalProperties": true,
+    "description": "GET /views/today \u2014 minimum stable contract; extra fields allowed.",
+    "properties": {
+      "slice": {
+        "default": "today",
+        "type": "string"
+      },
+      "today_iso": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "today_iso"
+    ],
+    "type": "object"
+  }
+}
