@@ -68,6 +68,7 @@ from app.forms.queues import needs_post_id, needs_tagging
 from app.forms.stir_event import submit_stir_event
 from app.forms.stir_tester import submit_tester
 from app.forms.weekly_review import submit_weekly_review
+from app.jobs import x_activity_sync
 from app.paths import resolve_db_path
 from app.secret_store import resolve_secret, store_secret
 from app.service.security import BearerTokenAuth
@@ -1480,6 +1481,19 @@ def create_app(
             raise HTTPException(
                 status_code=502,
                 detail=f"X API fetch failed: {exc}",
+            ) from exc
+
+    @app.post("/api/sync-today", dependencies=[Depends(auth)])
+    def sync_today_from_x(
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> dict[str, Any]:
+        """Import owned X activity and reconcile today's manual logging rows."""
+        try:
+            return x_activity_sync.run(conn)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"X activity sync failed: {type(exc).__name__}: {exc}",
             ) from exc
 
     @app.get("/views/today", dependencies=[Depends(auth)])
