@@ -26,6 +26,7 @@ import uvicorn
 from app.paths import migrate_legacy_db_if_needed
 from app.secret_store import resolve_anthropic_api_key
 from app.service.app import create_app
+from app.service.log_redaction import configure_sidecar_logging
 from app.service.security import generate_launch_token
 
 # Stable prefixes the shell greps for on the sidecar's stdout.
@@ -47,6 +48,7 @@ def _bind_free_loopback_socket() -> socket.socket:
 
 
 def main() -> int:
+    configure_sidecar_logging()
     # Load a repo .env if present (dev), then resolve the Anthropic key from
     # env → Keychain and export it so AgentClient picks it up unchanged (§31.5).
     try:
