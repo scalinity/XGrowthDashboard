@@ -13,6 +13,46 @@ uv run streamlit run app/main.py
 
 Then open <http://localhost:8501>.
 
+## Validate environment
+
+Before running tests or native builds, verify the local toolchain:
+
+```bash
+uv run python scripts/doctor.py
+```
+
+The doctor checks `uv`, Python >= 3.11, the provisioned `.venv`, desktop Node/pnpm lockfiles, Rust/Tauri prerequisites, SQLite, `keyring`, env file presence (without printing secret values), and active data-path resolution.
+
+If `uv` is missing, install it with:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Emergency fallback when `.venv` is already provisioned but `uv` is not on `PATH`:
+
+```bash
+.venv/bin/pytest -q
+.venv/bin/ruff check
+```
+
+Targeted checks:
+
+```bash
+uv run pytest tests/service -q      # FastAPI sidecar only
+cd desktop && pnpm lint && pnpm build  # native frontend only
+```
+
+## Reviewing the codebase
+
+Before architectural scans or automated reviews, inspect the working tree so in-progress local edits are not mistaken for baseline code:
+
+```bash
+git status --short
+```
+
+Review reports should distinguish committed baseline behavior from dirty-tree changes. Do not auto-revert or auto-stage local work.
+
 ## Test
 
 ```bash
