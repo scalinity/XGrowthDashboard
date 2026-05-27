@@ -1,17 +1,19 @@
 /**
  * Agent Chat — faithful port of app/pages/9_Agent_Chat.py (spec §14.8).
  *
- * Layout: conversation list sidebar, message thread, input + send, publish confirm.
- * Uses existing endpoints: POST/GET/DELETE /agent/conversations, GET/POST .../messages.
- * No useEffect — useMutation for sends, useQuery for reads.
+ * Facelift: full-height layout, auto-scroll, markdown-lite rendering,
+ * animated thinking indicator, blinking streaming cursor, tool-call badges,
+ * suggested prompts, polished conversation sidebar with delete.
+ *
+ * No useEffect — useMutation for sends, useQuery for reads, imperative
+ * scroll via refs in event handlers and mutation callbacks.
  */
-import { useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { Callout, Hairline, Kicker } from "../components";
-import { ConsoleLogRow } from "../components/cards";
+import { Kicker } from "../components";
 import { apiFetch, waitForSidecar, apiBaseUrl } from "../lib/api";
-import { palette, fonts } from "../theme/tokens";
+import "./AgentChat.css";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +37,144 @@ interface Message {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const SUGGESTED_PROMPTS = [
+  "Analyze my growth this week",
+  "Draft 3 post ideas",
+  "Review my engagement trends",
+  "Find reply opportunities",
+];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function relativeTime(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatTokens(
+  input: number | null,
+  output: number | null,
+): string | null {
+  if (!input && !output) return null;
+  const parts: string[] = [];
+  if (input) parts.push(`${input.toLocaleString()}↓`);
+  if (output) parts.push(`${output.toLocaleString()}↑`);
+  return parts.join(" ");
+}
+
+// -- Markdown-lite rendering ------------------------------------------------
+
+function renderContent(text: string): ReactNode {
+  if (!text) return null;
+
+  const result: ReactNode[] = [];
+  const codeBlockRe = /```(\w*)\n?([\s\S]*?)```/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = codeBlockRe.exec(text)) !== null) {
+    if (m.index > last) {
+      result.push(...renderSegment(text.slice(last, m.index), result.length));
+    }
+    result.push(
+      <pre key={`cb${result.length}`} className="agent-code-block">
+        {m[1] && <span className="agent-code-lang">{m[1]}</span>}
+        <code>{m[2].trimEnd()}</code>
+      </pre>,
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    result.push(...renderSegment(text.slice(last), result.length));
+  }
+  return <>{result}</>;
+}
+
+function renderSegment(text: string, baseKey: number): ReactNode[] {
+  const parts = text.split(/(\[tool: [^\]]+\])/g);
+  return parts
+    .map((part, i) => {
+      const toolMatch = part.match(/^\[tool: ([^\]]+)\]$/);
+      if (toolMatch) {
+        return (
+          <span key={`${baseKey}-t${i}`} className="agent-tool-badge">
+            <span className="agent-tool-badge__icon">{"⚙"}</span>
+            {toolMatch[1]}
+          </span>
+        );
+      }
+      if (!part) return null;
+      return <span key={`${baseKey}-${i}`}>{renderInline(part)}</span>;
+    })
+    .filter(Boolean) as ReactNode[];
+}
+
+function renderInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const codeParts = text.split(/(`[^`\n]+`)/g);
+  for (let i = 0; i < codeParts.length; i++) {
+    const cp = codeParts[i];
+    if (cp.startsWith("`") && cp.endsWith("`") && cp.length > 2) {
+      nodes.push(<code key={`c${i}`}>{cp.slice(1, -1)}</code>);
+    } else {
+      const bolds = cp.split(/(\*\*[^*]+\*\*)/g);
+      for (let j = 0; j < bolds.length; j++) {
+        const b = bolds[j];
+        if (b.startsWith("**") && b.endsWith("**") && b.length > 4) {
+          nodes.push(<strong key={`b${i}.${j}`}>{b.slice(2, -2)}</strong>);
+        } else if (b) {
+          nodes.push(b);
+        }
+      }
+    }
+  }
+  return nodes;
+}
+
+function renderToolCalls(json: string): ReactNode {
+  try {
+    const calls = JSON.parse(json);
+    if (Array.isArray(calls)) {
+      return (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.2rem",
+            marginTop: "0.3rem",
+          }}
+        >
+          {calls.map(
+            (c: { name?: string; tool_name?: string }, i: number) => (
+              <span key={i} className="agent-tool-badge">
+                <span className="agent-tool-badge__icon">{"⚙"}</span>
+                {c.name ?? c.tool_name ?? "tool"}
+              </span>
+            ),
+          )}
+        </div>
+      );
+    }
+  } catch {
+    /* fallback below */
+  }
+  return <div className="agent-tool-json">{json}</div>;
+}
+
+// ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 export const AgentChatView = () => {
@@ -45,8 +185,20 @@ export const AgentChatView = () => {
   const [thinkingText, setThinkingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const scrollAnchorRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // List conversations.
+  const scrollToBottom = (smooth = false) => {
+    requestAnimationFrame(() => {
+      scrollAnchorRef.current?.scrollIntoView({
+        behavior: smooth ? "smooth" : "instant",
+        block: "end",
+      });
+    });
+  };
+
+  // -- Queries --------------------------------------------------------------
+
   const { data: convos } = useQuery({
     queryKey: ["agent-conversations"],
     queryFn: () =>
@@ -54,7 +206,6 @@ export const AgentChatView = () => {
     retry: 1,
   });
 
-  // Messages for active conversation.
   const { data: messagesData } = useQuery({
     queryKey: ["agent-messages", activeConvoId],
     queryFn: () =>
@@ -65,7 +216,8 @@ export const AgentChatView = () => {
     retry: 1,
   });
 
-  // Create conversation mutation.
+  // -- Mutations ------------------------------------------------------------
+
   const createConvo = useMutation({
     mutationFn: (params: { title?: string; context_seed?: string }) =>
       apiFetch<{ conversation_id: number }>("/agent/conversations", {
@@ -98,12 +250,13 @@ export const AgentChatView = () => {
     },
   });
 
-  // Send message via SSE stream — tokens arrive in real time.
   const sendMessage = useMutation({
     mutationFn: async (text: string) => {
       setStreamingText("");
-      setThinkingText("Preparing agent context...");
+      setThinkingText("Preparing agent context…");
       setStreamError(null);
+      scrollToBottom();
+
       const info = await waitForSidecar();
       const url = `${apiBaseUrl(info)}/agent/conversations/${activeConvoId}/stream`;
       const res = await fetch(url, {
@@ -114,7 +267,8 @@ export const AgentChatView = () => {
         },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.ok || !res.body)
+        throw new Error(`${res.status} ${res.statusText}`);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -125,7 +279,6 @@ export const AgentChatView = () => {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        // Parse SSE frames: "event: <type>\ndata: <json>\n\n"
         const frames = buffer.split("\n\n");
         buffer = frames.pop() ?? "";
         for (const frame of frames) {
@@ -138,12 +291,14 @@ export const AgentChatView = () => {
             accumulated += payload.text ?? "";
             setThinkingText(null);
             setStreamingText(accumulated);
+            scrollToBottom();
           } else if (eventType === "assistant") {
             accumulated = payload.text ?? "";
             setThinkingText(null);
             setStreamingText(accumulated);
+            scrollToBottom();
           } else if (eventType === "thinking_delta") {
-            setThinkingText(payload.text ?? "Thinking...");
+            setThinkingText(payload.text ?? "Thinking…");
           } else if (eventType === "done") {
             setThinkingText(null);
           } else if (eventType === "error") {
@@ -151,11 +306,11 @@ export const AgentChatView = () => {
             setStreamError(message);
             throw new Error(message);
           } else if (eventType === "tool_call") {
-            // Show tool call inline during streaming.
             const toolName = payload.name ?? payload.tool_name ?? "tool";
             accumulated += `\n[tool: ${toolName}]\n`;
             setThinkingText(null);
             setStreamingText(accumulated);
+            scrollToBottom();
           }
         }
       }
@@ -165,7 +320,9 @@ export const AgentChatView = () => {
       setInputText("");
       setStreamingText(null);
       setThinkingText(null);
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
       qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
+      scrollToBottom(true);
     },
     onError: () => {
       setStreamingText(null);
@@ -176,128 +333,123 @@ export const AgentChatView = () => {
     },
   });
 
+  // -- Handlers -------------------------------------------------------------
+
   const handleSend = () => {
     const trimmed = inputText.trim();
     if (!trimmed || !activeConvoId) return;
     sendMessage.mutate(trimmed);
   };
 
-  const handleNewConvo = () => {
-    createConvo.mutate({ title: "New conversation" });
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInputText(e.target.value);
+    const ta = e.target;
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
   };
 
-  const handleDeleteConvo = (conversationId: number) => {
-    deleteConvo.mutate(conversationId);
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
   };
+
+  const handlePromptClick = (prompt: string) => {
+    setInputText(prompt);
+    textareaRef.current?.focus();
+  };
+
+  // -- Derived state --------------------------------------------------------
 
   const conversations = convos?.conversations ?? [];
   const messages = messagesData?.messages ?? [];
+  const isStreaming = streamingText != null || thinkingText != null;
+  const disableActions = sendMessage.isPending || deleteConvo.isPending;
+  const errorText =
+    streamError ??
+    (sendMessage.error
+      ? String((sendMessage.error as Error).message ?? sendMessage.error)
+      : null);
+
+  // -- Render ---------------------------------------------------------------
 
   return (
     <>
-      <Kicker>GROWTH AGENT</Kicker>
-      <h1 style={{ fontSize: "2.1rem" }}>Agent Chat</h1>
-      <p className="dim" style={{ maxWidth: 620, marginTop: "-0.2rem" }}>
-        Streaming chat with visible tool calls and publish confirmation.
-        The agent cannot publish without your typed "confirm".
-      </p>
+      <div style={{ marginBottom: "0.7rem" }}>
+        <Kicker>GROWTH AGENT</Kicker>
+        <h1 style={{ fontSize: "1.7rem", marginBottom: "0.1rem" }}>
+          Agent Chat
+        </h1>
+        <p
+          className="faint"
+          style={{ fontSize: "0.8rem", margin: 0, letterSpacing: "0.02em" }}
+        >
+          Real-time reasoning &middot; tool use &middot; publish safeguards
+        </p>
+      </div>
 
-      <div style={{ display: "flex", gap: "1.2rem", marginTop: "1rem" }}>
-        {/* Conversation sidebar */}
-        <div style={{ width: 280, flexShrink: 0 }}>
-          <button
-            onClick={handleNewConvo}
-            disabled={createConvo.isPending}
-            style={{
-              width: "100%",
-              padding: "0.5rem",
-              marginBottom: "0.6rem",
-              background: palette.phosphorDim,
-              color: palette.bone,
-              border: "none",
-              borderRadius: "2px",
-              fontFamily: fonts.body,
-              cursor: "pointer",
-            }}
-          >
-            + New conversation
-          </button>
-          <div style={{ maxHeight: "60vh", overflowY: "auto" }}>
+      <div className="agent-chat">
+        {/* ── Sidebar ── */}
+        <aside className="agent-chat__sidebar">
+          <div className="agent-chat__sidebar-header">
+            <button
+              className="agent-chat__new-btn"
+              onClick={() =>
+                createConvo.mutate({ title: "New conversation" })
+              }
+              disabled={createConvo.isPending}
+            >
+              + New Session
+            </button>
+          </div>
+
+          <div className="agent-chat__convo-list">
             {conversations.map((c) => {
-              const isConfirmingDelete = deleteConfirmId === c.id;
-              const isDeleting = deleteConvo.isPending && deleteConvo.variables === c.id;
-              const disableActions = sendMessage.isPending || deleteConvo.isPending;
+              const isConfirming = deleteConfirmId === c.id;
+              const isDeleting =
+                deleteConvo.isPending && deleteConvo.variables === c.id;
               return (
-                <div key={c.id} style={{ marginBottom: "0.35rem" }}>
+                <div key={c.id} className="agent-chat__convo-row">
                   <div
+                    className={`agent-chat__convo-item${c.id === activeConvoId ? " agent-chat__convo-item--active" : ""}`}
                     onClick={() => {
-                      if (!isConfirmingDelete) setActiveConvoId(c.id);
+                      if (!isConfirming) setActiveConvoId(c.id);
                     }}
-                    onKeyDown={(e) => {
-                      if ((e.key === "Enter" || e.key === " ") && !isConfirmingDelete) {
-                        e.preventDefault();
-                        setActiveConvoId(c.id);
-                      }
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open ${c.title || `Conversation ${c.id}`}`}
-                    style={{ cursor: isConfirmingDelete ? "default" : "pointer" }}
                   >
-                    <ConsoleLogRow
-                      timestamp={c.created_at?.slice(0, 16) ?? ""}
-                      kind={c.context_seed ?? "chat"}
-                      title={c.title || `Conversation #${c.id}`}
-                      active={c.id === activeConvoId}
-                    />
+                    <div className="agent-chat__convo-meta">
+                      <span className="agent-chat__convo-kind">
+                        {c.context_seed ?? "chat"}
+                      </span>
+                      <span className="agent-chat__convo-time">
+                        {relativeTime(c.created_at)}
+                      </span>
+                    </div>
+                    <div className="agent-chat__convo-title">
+                      {c.title || `Session #${c.id}`}
+                    </div>
                   </div>
+
                   <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "flex-end",
-                      gap: "0.35rem",
-                      margin: "0 0 0.25rem 0.6rem",
-                    }}
+                    className={`agent-chat__convo-actions${isConfirming ? " agent-chat__convo-actions--visible" : ""}`}
                   >
-                    {isConfirmingDelete ? (
+                    {isConfirming ? (
                       <>
                         <button
                           type="button"
-                          onClick={() => handleDeleteConvo(c.id)}
+                          className="agent-chat__confirm-btn"
+                          onClick={() => deleteConvo.mutate(c.id)}
                           disabled={disableActions}
-                          style={{
-                            padding: "0.2rem 0.45rem",
-                            background: palette.warnAmber,
-                            color: palette.ink,
-                            border: "none",
-                            borderRadius: "2px",
-                            fontFamily: fonts.mono,
-                            fontSize: "0.62rem",
-                            letterSpacing: "0.06em",
-                            textTransform: "uppercase",
-                            cursor: disableActions ? "not-allowed" : "pointer",
-                            opacity: disableActions ? 0.55 : 1,
-                          }}
+                          aria-label={`Permanently delete ${c.title || `Session ${c.id}`}`}
                         >
                           {isDeleting ? "Deleting" : "Confirm"}
                         </button>
                         <button
                           type="button"
+                          className="agent-chat__keep-btn"
                           onClick={() => setDeleteConfirmId(null)}
                           disabled={deleteConvo.isPending}
-                          style={{
-                            padding: "0.2rem 0.45rem",
-                            background: palette.surfaceRaised,
-                            color: palette.boneDim,
-                            border: `1px solid ${palette.hairline}`,
-                            borderRadius: "2px",
-                            fontFamily: fonts.mono,
-                            fontSize: "0.62rem",
-                            letterSpacing: "0.06em",
-                            textTransform: "uppercase",
-                            cursor: deleteConvo.isPending ? "not-allowed" : "pointer",
-                            opacity: deleteConvo.isPending ? 0.55 : 1,
-                          }}
+                          aria-label={`Keep ${c.title || `Session ${c.id}`}`}
                         >
                           Keep
                         </button>
@@ -305,221 +457,194 @@ export const AgentChatView = () => {
                     ) : (
                       <button
                         type="button"
+                        className="agent-chat__delete-btn"
                         onClick={(e) => {
                           e.stopPropagation();
                           setDeleteConfirmId(c.id);
                         }}
                         disabled={disableActions}
-                        aria-label={`Delete ${c.title || `Conversation ${c.id}`}`}
-                        style={{
-                          padding: "0.16rem 0.45rem",
-                          background: "transparent",
-                          color: palette.boneFaint,
-                          border: `1px solid ${palette.hairline}`,
-                          borderRadius: "2px",
-                          fontFamily: fonts.mono,
-                          fontSize: "0.6rem",
-                          letterSpacing: "0.06em",
-                          textTransform: "uppercase",
-                          cursor: disableActions ? "not-allowed" : "pointer",
-                          opacity: disableActions ? 0.45 : 1,
-                        }}
+                        aria-label={`Delete ${c.title || `Session ${c.id}`}`}
                       >
                         Delete
                       </button>
                     )}
                   </div>
-                  {isConfirmingDelete && deleteConvo.error && (
-                    <p style={{ color: palette.warnAmber, fontSize: "0.72rem", margin: "0 0 0.35rem 0.6rem" }}>
-                      {String((deleteConvo.error as Error).message ?? deleteConvo.error)}
-                    </p>
+
+                  {isConfirming && deleteConvo.error && (
+                    <div className="agent-chat__delete-error">
+                      {String(
+                        (deleteConvo.error as Error).message ??
+                          deleteConvo.error,
+                      )}
+                    </div>
                   )}
                 </div>
               );
             })}
             {conversations.length === 0 && (
-              <p className="faint" style={{ fontSize: "0.85rem" }}>
-                No conversations yet. Start one above.
-              </p>
+              <div
+                style={{
+                  padding: "1.5rem 0.8rem",
+                  textAlign: "center",
+                }}
+              >
+                <p
+                  className="faint"
+                  style={{
+                    fontSize: "0.78rem",
+                    lineHeight: 1.5,
+                    margin: 0,
+                  }}
+                >
+                  No sessions yet
+                </p>
+              </div>
             )}
           </div>
-        </div>
 
-        {/* Message thread + input */}
-        <div style={{ flex: 1, minWidth: 0 }}>
+          {conversations.length > 0 && (
+            <div className="agent-chat__sidebar-footer">
+              {conversations.length} session
+              {conversations.length !== 1 ? "s" : ""}
+            </div>
+          )}
+        </aside>
+
+        {/* ── Thread ── */}
+        <div className="agent-chat__thread">
           {activeConvoId == null ? (
-            <Callout>
-              Select a conversation from the sidebar or start a new one.
-            </Callout>
+            <div className="agent-chat__empty">
+              <div className="agent-chat__empty-glyph">{"◈"}</div>
+              <div className="agent-chat__empty-title">Growth Agent</div>
+              <div className="agent-chat__empty-sub">
+                Select a session from the sidebar or start a new one to begin.
+              </div>
+            </div>
           ) : (
             <>
               {/* Messages */}
-              <div
-                style={{
-                  maxHeight: "55vh",
-                  overflowY: "auto",
-                  marginBottom: "0.8rem",
-                }}
-              >
-                {messages.map((m) => (
-                  <div
-                    key={m.id}
-                    style={{
-                      padding: "0.5rem 0.7rem",
-                      margin: "0.3rem 0",
-                      background:
-                        m.role === "user"
-                          ? palette.surfaceRaised
-                          : palette.surface,
-                      borderLeft: `2px solid ${m.role === "user" ? palette.boneDim : palette.phosphor}`,
-                      borderRadius: "2px",
-                    }}
-                  >
+              <div className="agent-chat__messages">
+                {messages.map((m) => {
+                  const tokenStr = formatTokens(
+                    m.input_tokens,
+                    m.output_tokens,
+                  );
+                  return (
                     <div
-                      className="kicker"
-                      style={{
-                        color:
-                          m.role === "user"
-                            ? palette.boneDim
-                            : palette.phosphor,
-                        marginBottom: "0.2rem",
-                      }}
+                      key={m.id}
+                      className={`agent-msg agent-msg--${m.role}`}
                     >
-                      {m.role.toUpperCase()}
-                      {m.model && (
+                      <div className="agent-msg__bubble">
+                        <div className="agent-msg__header">
+                          <span className="agent-msg__role">{m.role}</span>
+                          {m.model && (
+                            <span className="agent-msg__model">{m.model}</span>
+                          )}
+                          {tokenStr && (
+                            <span className="agent-msg__tokens">
+                              {tokenStr}
+                            </span>
+                          )}
+                        </div>
+                        <div className="agent-msg__content">
+                          {m.role === "assistant"
+                            ? renderContent(m.content ?? "")
+                            : (m.content ?? "")}
+                        </div>
+                        {m.tool_calls_json && renderToolCalls(m.tool_calls_json)}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Live streaming response */}
+                {isStreaming && (
+                  <div className="agent-msg agent-msg--streaming">
+                    <div className="agent-msg__bubble">
+                      <div className="agent-msg__header">
+                        <span className="agent-msg__role">assistant</span>
                         <span
-                          className="numeric"
-                          style={{
-                            fontSize: "0.68rem",
-                            color: palette.boneFaint,
-                            marginLeft: "0.5rem",
-                          }}
+                          className={`agent-msg__status agent-msg__status--${thinkingText ? "thinking" : "streaming"}`}
                         >
-                          {m.model}
+                          {thinkingText ? "reasoning" : "streaming"}
                         </span>
+                      </div>
+                      {thinkingText && (
+                        <div className="agent-thinking">
+                          <div className="agent-thinking__dots">
+                            <div className="agent-thinking__dot" />
+                            <div className="agent-thinking__dot" />
+                            <div className="agent-thinking__dot" />
+                          </div>
+                          <span className="agent-thinking__label">
+                            {thinkingText}
+                          </span>
+                        </div>
+                      )}
+                      {streamingText && (
+                        <div className="agent-msg__content">
+                          {renderContent(streamingText)}
+                          <span className="agent-cursor" />
+                        </div>
                       )}
                     </div>
-                    <div
-                      style={{
-                        color: palette.bone,
-                        fontSize: "0.92rem",
-                        lineHeight: 1.5,
-                        whiteSpace: "pre-wrap",
-                        wordWrap: "break-word",
-                      }}
-                    >
-                      {m.content ?? ""}
-                    </div>
-                    {m.tool_calls_json && (
-                      <div
-                        style={{
-                          marginTop: "0.4rem",
-                          padding: "0.3rem 0.5rem",
-                          background: palette.ink,
-                          borderRadius: "2px",
-                          fontSize: "0.78rem",
-                          fontFamily: fonts.mono,
-                          color: palette.boneDim,
-                          maxHeight: "6rem",
-                          overflowY: "auto",
-                        }}
-                      >
-                        {m.tool_calls_json}
-                      </div>
-                    )}
                   </div>
-                ))}
-                {messages.length === 0 && (
-                  <p className="faint">
-                    No messages in this conversation yet.
-                  </p>
                 )}
-                {/* Live streaming assistant response */}
-                {(streamingText != null || thinkingText != null) && (
-                  <div
-                    style={{
-                      padding: "0.5rem 0.7rem",
-                      margin: "0.3rem 0",
-                      background: palette.surface,
-                      borderLeft: `2px solid ${palette.phosphor}`,
-                      borderRadius: "2px",
-                    }}
-                  >
-                    <div className="kicker" style={{ color: palette.phosphor, marginBottom: "0.2rem" }}>
-                      ASSISTANT <span className="numeric" style={{ fontSize: "0.68rem", color: palette.boneFaint, marginLeft: "0.5rem" }}>{thinkingText ? "thinking..." : "streaming..."}</span>
+
+                {/* Empty conversation — suggested prompts */}
+                {messages.length === 0 && !isStreaming && (
+                  <div className="agent-chat__empty">
+                    <div className="agent-chat__empty-glyph">{"◈"}</div>
+                    <div className="agent-chat__empty-title">
+                      Start a conversation
                     </div>
-                    {thinkingText && (
-                      <div className="faint" style={{ fontSize: "0.82rem", lineHeight: 1.45, marginBottom: streamingText ? "0.35rem" : 0 }}>
-                        {thinkingText}
-                      </div>
-                    )}
-                    <div style={{ color: palette.bone, fontSize: "0.92rem", lineHeight: 1.5, whiteSpace: "pre-wrap", wordWrap: "break-word" }}>
-                      {streamingText || (!thinkingText ? "..." : "")}
+                    <div className="agent-chat__empty-sub">
+                      Ask the Growth Agent to analyze metrics, draft posts, or
+                      strategize your next move.
+                    </div>
+                    <div className="agent-chat__prompts">
+                      {SUGGESTED_PROMPTS.map((p) => (
+                        <button
+                          key={p}
+                          className="agent-chat__prompt-chip"
+                          onClick={() => handlePromptClick(p)}
+                        >
+                          {p}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
+
+                <div ref={scrollAnchorRef} style={{ height: 1 }} />
               </div>
 
-              {/* Input */}
-              <Hairline />
-              <div
-                style={{
-                  display: "flex",
-                  gap: "0.5rem",
-                  marginTop: "0.5rem",
-                }}
-              >
-                <textarea
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Type a message..."
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  style={{
-                    flex: 1,
-                    minHeight: "3rem",
-                    resize: "vertical",
-                    background: palette.surfaceRaised,
-                    border: `1px solid ${palette.hairline}`,
-                    borderRadius: "2px",
-                    padding: "0.5rem",
-                    color: palette.bone,
-                    fontFamily: fonts.body,
-                    fontSize: "0.9rem",
-                  }}
-                />
+              {/* Input bar */}
+              <div className="agent-chat__input-bar">
+                <div className="agent-chat__input-wrap">
+                  <textarea
+                    ref={textareaRef}
+                    className="agent-chat__textarea"
+                    value={inputText}
+                    onChange={handleInputChange}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Message the Growth Agent…"
+                    disabled={sendMessage.isPending}
+                    rows={1}
+                  />
+                </div>
                 <button
+                  className="agent-chat__send-btn"
                   onClick={handleSend}
                   disabled={sendMessage.isPending || !inputText.trim()}
-                  style={{
-                    padding: "0.5rem 1.2rem",
-                    background: palette.phosphor,
-                    color: palette.ink,
-                    border: "none",
-                    borderRadius: "2px",
-                    fontFamily: fonts.body,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    alignSelf: "flex-end",
-                    opacity: sendMessage.isPending ? 0.5 : 1,
-                  }}
                 >
-                  {sendMessage.isPending ? "..." : "Send"}
+                  {sendMessage.isPending ? "···" : "Send"}
                 </button>
               </div>
-              {streamError && (
-                <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
-                  {streamError}
-                </p>
-              )}
-              {sendMessage.error && (
-                <p style={{ color: palette.warnAmber, fontSize: "0.82rem", marginTop: "0.3rem" }}>
-                  {String((sendMessage.error as Error).message ?? sendMessage.error)}
-                </p>
+
+              {/* Errors */}
+              {errorText && (
+                <div className="agent-chat__error">{errorText}</div>
               )}
             </>
           )}
