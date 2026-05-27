@@ -161,11 +161,11 @@ def test_secrets_status_and_set(
     touches the real macOS Keychain (which holds Daniel's actual key), and the
     env mutation the handler does is reverted on teardown via setenv.
     """
-    import app.service.app as svc
+    import app.service.routes.registry as registry
 
     store: dict[str, str] = {}
-    monkeypatch.setattr(svc, "store_secret", lambda name, value: store.update({name: value}))
-    monkeypatch.setattr(svc, "resolve_secret", store.get)
+    monkeypatch.setattr(registry, "store_secret", lambda name, value: store.update({name: value}))
+    monkeypatch.setattr(registry, "resolve_secret", store.get)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")  # reverted on teardown
 
     H = {"Authorization": f"Bearer {TOKEN}"}

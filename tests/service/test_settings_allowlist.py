@@ -71,11 +71,11 @@ def test_unknown_secret_name_rejected(client: TestClient) -> None:
 def test_secret_value_not_returned_from_secrets_endpoint(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import app.service.app as svc
+    import app.service.routes.registry as registry
 
-    store: dict[str, str] = { "ANTHROPIC_API_KEY": SENTINEL }
-    monkeypatch.setattr(svc, "store_secret", lambda name, value: store.update({name: value}))
-    monkeypatch.setattr(svc, "resolve_secret", store.get)
+    store: dict[str, str] = {"ANTHROPIC_API_KEY": SENTINEL}
+    monkeypatch.setattr(registry, "store_secret", lambda name, value: store.update({name: value}))
+    monkeypatch.setattr(registry, "resolve_secret", store.get)
 
     resp = client.get("/settings/secrets", headers={"Authorization": f"Bearer {TOKEN}"})
     assert resp.status_code == 200
