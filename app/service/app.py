@@ -70,6 +70,7 @@ from app.forms.weekly_review import submit_weekly_review
 from app.paths import resolve_db_path
 from app.secret_store import resolve_secret, store_secret
 from app.service.security import BearerTokenAuth
+from scripts import collect_account_snapshot
 
 def _weekly_review_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     """Gather every data slice the Weekly Review view (§14.6) needs.
@@ -1426,25 +1427,42 @@ def create_app(
     def get_user_metrics(
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict[str, Any]:
-        """Fetch the authenticated user's live metrics from X API (Phase 7).
+        """Fetch and persist today's account metrics from X API (Phase 7).
 
-        Returns followers, following, posts, listed counts for the snapshot
-        form. As a side-effect, auto-populates the ``x_handle`` and
-        ``profile_url`` settings if they're empty (so subsequent snapshots
-        don't fail validation).
+        The desktop Today view treats this as the foreground refresh path: it
+        writes an immutable API snapshot when possible, then returns the same
+        metric shape the form can display. If a manual snapshot already exists,
+        the scheduled-job helper skips the insert and we return the canonical
+        row that is already driving Today.
         """
         try:
-            from app.x_client import api_get_user_metrics
-
-            metrics = api_get_user_metrics()
-            # Auto-seed settings when not yet configured.
-            username = metrics.get("username")
-            if username:
-                if not get_setting(conn, "x_handle"):
-                    set_setting(conn, "x_handle", username)
-                if not get_setting(conn, "profile_url"):
-                    set_setting(conn, "profile_url", f"https://x.com/{username}")
-            return metrics
+            summary = collect_account_snapshot.run(conn)
+            today_iso = _date_t.today().isoformat()
+            row = conn.execute(
+                """
+                SELECT username, profile_url, x_user_id, followers_count,
+                       following_count, post_count, listed_count
+                FROM account_snapshots
+                WHERE snapshot_date = ?
+                ORDER BY collected_at_utc ASC
+                LIMIT 1
+                """,
+                (today_iso,),
+            ).fetchone()
+            if row is None:
+                if summary.get("error"):
+                    raise RuntimeError(str(summary["error"]))
+                return {
+                    **summary,
+                    "username": get_setting(conn, "x_handle", "") or "",
+                    "profile_url": get_setting(conn, "profile_url", "") or "",
+                    "x_user_id": get_setting(conn, "x_user_id"),
+                    "followers_count": None,
+                    "following_count": None,
+                    "post_count": None,
+                    "listed_count": None,
+                }
+            return {**summary, **dict(row)}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 status_code=502,
@@ -2032,100 +2050,50 @@ def create_app(
     def stream_message(
         conversation_id: int, body: SendMessageBody
     ) -> StreamingResponse:
-        """SSE surface for the Agent Chat view (§14.8, §31.3).
+        """SSE surface for Agent Chat using the canonical agent turn path.
 
-        Streams tokens in real time via the Anthropic streaming API. Events:
-        ``start`` → ``text_delta`` (per chunk) → ``done`` (totals), or
-        ``error``. Opens its own DB connection inside the generator so it
-        outlives the handler return.
+        The stream endpoint must share the same injected AgentClient as
+        ``/messages`` so tests, persistence, tool dispatch, cost ceiling, and
+        missing-key errors all behave identically. It emits coarse-grained SSE
+        frames around that turn so the desktop UI never looks hung.
         """
 
         def event_gen() -> Iterator[str]:
             conn = factory()
             try:
                 yield _sse("start", {"conversation_id": conversation_id})
+                yield _sse("thinking_delta", {"text": "Preparing agent context..."})
 
-                api_key = os.environ.get("ANTHROPIC_API_KEY")
-                if not api_key:
-                    yield _sse("error", {"error": "Anthropic API key not configured. Set it in Settings → API keys."})
-                    return
-
-                import anthropic as _anthropic
-                from app.agent import prompt_builder
-                from app.agent import tools as _agent_tools
-
-                # Check coach mode.
                 ctx = conn.execute(
                     "SELECT context_seed FROM agent_conversations WHERE id = ?",
                     (conversation_id,),
                 ).fetchone()
-                is_coach = ctx and ctx["context_seed"] == "coach"
+                if ctx and ctx["context_seed"] == "coach":
+                    coach_turn = _coach_turn(conn, conversation_id, body.text)
+                    if coach_turn.get("error"):
+                        yield _sse("error", {"error": coach_turn["error"]})
+                        return
+                    assistant_text = coach_turn.get("assistant_text") or ""
+                    yield _sse("assistant", {"text": assistant_text})
+                    yield _sse("done", coach_turn)
+                    return
 
-                # Persist user message.
-                conn.execute(
-                    "INSERT INTO agent_messages (conversation_id, role, content) "
-                    "VALUES (?, 'user', ?)",
-                    (conversation_id, body.text),
+                client = agent_factory()
+                turn = client.send_message_sync(
+                    conn, conversation_id=conversation_id, user_text=body.text
                 )
-                conn.commit()
+                if turn.error:
+                    yield _sse("error", {"error": turn.error})
+                    return
 
-                # Load conversation history + system prompt.
-                rows = conn.execute(
-                    "SELECT role, content FROM agent_messages "
-                    "WHERE conversation_id = ? ORDER BY id",
-                    (conversation_id,),
-                ).fetchall()
-                messages = [{"role": r["role"], "content": r["content"]} for r in rows]
-                system_prompt = prompt_builder.build_system_prompt(conn)
-                model = "claude-sonnet-4-20250514"
-
-                api_kwargs: dict[str, Any] = {
-                    "model": model,
-                    "max_tokens": 4096,
-                    "system": system_prompt,
-                    "messages": messages,
-                }
-                if not is_coach:
-                    api_kwargs["tools"] = [
-                        t.to_anthropic_spec() for t in _agent_tools.AGENT_TOOLS
-                    ]
-
-                client_api = _anthropic.Anthropic(api_key=api_key, timeout=120.0)
-
-                # Stream tokens.
-                full_text: list[str] = []
-                in_tok = 0
-                out_tok = 0
-                with client_api.messages.stream(**api_kwargs) as stream:
-                    for text in stream.text_stream:
-                        full_text.append(text)
-                        yield _sse("text_delta", {"text": text})
-                    final = stream.get_final_message()
-                    in_tok = final.usage.input_tokens
-                    out_tok = final.usage.output_tokens
-                    # Report tool calls (if any — agent mode).
-                    for block in final.content:
-                        if getattr(block, "type", None) == "tool_use":
-                            yield _sse("tool_call", {
-                                "name": block.name,
-                                "input": block.input,
-                            })
-
-                assistant_text = "".join(full_text)
-
-                # Persist assistant message.
-                conn.execute(
-                    "INSERT INTO agent_messages "
-                    "(conversation_id, role, content, model, input_tokens, output_tokens) "
-                    "VALUES (?, 'assistant', ?, ?, ?, ?)",
-                    (conversation_id, assistant_text, model, in_tok, out_tok),
-                )
-                conn.commit()
-
+                yield _sse("assistant", {"text": turn.assistant_text})
+                for tool_call in turn.tool_calls:
+                    yield _sse("tool_call", tool_call)
                 yield _sse("done", {
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
-                    "cost_usd": None,
+                    "input_tokens": turn.input_tokens,
+                    "output_tokens": turn.output_tokens,
+                    "cost_usd": turn.cost_usd,
+                    "model": turn.model,
                     "error": None,
                 })
             except Exception as exc:  # noqa: BLE001

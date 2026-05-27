@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 
 from app.db import apply_migrations, connect
 from app.service.app import create_app
+from app import x_client
+from scripts import collect_account_snapshot
 from scripts.seed_settings import seed_settings
 
 TOKEN = "writes-test-token"
@@ -54,6 +56,54 @@ def test_post_snapshot_ok(client: TestClient) -> None:
     resp = client.post("/forms/snapshot", json=VALID_SNAPSHOT, headers=AUTH)
     assert resp.status_code == 200
     assert isinstance(resp.json()["snapshot_id"], int)
+
+
+def test_user_metrics_fetch_persists_today_snapshot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_api_get_user_metrics() -> dict[str, int | str | None]:
+        return {
+            "username": "dannyscalant",
+            "followers_count": 88,
+            "following_count": 351,
+            "post_count": 57,
+            "listed_count": 2,
+        }
+
+    def fake_x_request(*args: object, **kwargs: object) -> x_client.XApiResponse:
+        return x_client.XApiResponse(
+            status_code=200,
+            body={
+                "data": {
+                    "id": "42",
+                    "username": "dannyscalant",
+                    "description": "builder",
+                    "public_metrics": {
+                        "followers_count": 88,
+                        "following_count": 351,
+                        "tweet_count": 57,
+                        "listed_count": 2,
+                    },
+                }
+            },
+            raw_response_id=None,
+            endpoint="/2/users/me?user.fields=public_metrics,description",
+            method="GET",
+            elapsed_seconds=0.01,
+        )
+
+    monkeypatch.setattr(x_client, "api_get_user_metrics", fake_api_get_user_metrics)
+    monkeypatch.setattr(collect_account_snapshot.x_client, "request", fake_x_request)
+
+    resp = client.get("/api/user-metrics", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["snapshot_inserted"] is True
+    assert body["followers_count"] == 88
+    assert body["username"] == "dannyscalant"
+
+    today = client.get("/views/today", headers=AUTH).json()
+    assert today["snapshot"]["followers_count"] == 88
 
 
 def test_post_snapshot_validation_returns_400_with_field_errors(

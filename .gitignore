@@ -44,6 +44,7 @@ phase*.png
 # work dir and the Tauri release bundle output.
 build/
 desktop/src-tauri/bin/
+desktop/src-tauri/target/
 
 # OS
 .DS_Store

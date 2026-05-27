@@ -127,6 +127,19 @@ interface TodayData {
   };
 }
 
+interface UserMetricsRefresh {
+  username: string | null;
+  profile_url?: string | null;
+  x_user_id?: string | null;
+  followers_count: number | null;
+  following_count: number | null;
+  post_count: number | null;
+  listed_count: number | null;
+  snapshot_inserted?: boolean;
+  skipped_reason?: string | null;
+  error?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -170,19 +183,14 @@ function SnapshotForm({
 
   const fetchMetrics = useMutation({
     mutationFn: () =>
-      apiFetch<{
-        followers_count: number;
-        following_count: number;
-        post_count: number;
-        listed_count: number;
-        username: string;
-      }>("/api/user-metrics"),
+      apiFetch<UserMetricsRefresh>("/api/user-metrics"),
     onSuccess: (data) => {
       if (data.followers_count != null) setFollowers(String(data.followers_count));
       if (data.following_count != null) setFollowing(String(data.following_count));
       if (data.post_count != null) setPosts(String(data.post_count));
       if (data.listed_count != null) setListed(String(data.listed_count));
       if (data.username) setFetchedUsername(data.username);
+      onSuccess();
     },
   });
 
@@ -253,7 +261,7 @@ function SnapshotForm({
         )}
         {fetchMetrics.isSuccess && (
           <span style={{ color: palette.phosphor, fontSize: "0.82rem", marginLeft: "0.6rem" }}>
-            ✓ Fields populated from @{fetchMetrics.data?.username}
+            ✓ Snapshot refreshed from @{fetchMetrics.data?.username}
           </span>
         )}
       </div>
@@ -298,6 +306,17 @@ export const TodayView = () => {
     queryFn: () => apiFetch<TodayData>("/views/today"),
     retry: 1,
   });
+  const autoMetrics = useQuery({
+    queryKey: ["today-auto-user-metrics", data?.today_iso],
+    queryFn: async () => {
+      const result = await apiFetch<UserMetricsRefresh>("/api/user-metrics");
+      await queryClient.invalidateQueries({ queryKey: ["today"] });
+      return result;
+    },
+    enabled: Boolean(data && !data.snapshot),
+    retry: false,
+    staleTime: Infinity,
+  });
 
   if (isLoading) return <p className="dim">Reading the local service…</p>;
   if (error) {
@@ -329,6 +348,10 @@ export const TodayView = () => {
           <Callout>
             <em>Pin today's snapshot first.</em> The rest of the dashboard reads from the canonical
             daily row; without it everything else below shows yesterday's last-known state.
+            {autoMetrics.isFetching && <span className="faint"> Refreshing from X...</span>}
+            {autoMetrics.isError && (
+              <span style={{ color: palette.warnAmber }}> {String((autoMetrics.error as Error).message ?? autoMetrics.error)}</span>
+            )}
           </Callout>
           <SnapshotForm
             defaults={d.snapshot_defaults}

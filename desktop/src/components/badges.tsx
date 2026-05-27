@@ -9,7 +9,7 @@ import type { CSSProperties } from "react";
 import { palette } from "../theme/tokens";
 
 /** Base mono chip styling shared by every badge (matches theme.py spans). */
-export function chipStyle(bg: string, fg: string, extra?: CSSProperties): CSSProperties {
+function chipStyle(bg: string, fg: string, extra?: CSSProperties): CSSProperties {
   return {
     fontFamily: "var(--font-mono)",
     fontSize: "0.74rem",

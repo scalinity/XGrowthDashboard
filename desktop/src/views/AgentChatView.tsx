@@ -42,6 +42,7 @@ export const AgentChatView = () => {
   const [activeConvoId, setActiveConvoId] = useState<number | null>(null);
   const [inputText, setInputText] = useState("");
   const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [thinkingText, setThinkingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
 
   // List conversations.
@@ -80,6 +81,7 @@ export const AgentChatView = () => {
   const sendMessage = useMutation({
     mutationFn: async (text: string) => {
       setStreamingText("");
+      setThinkingText("Preparing agent context...");
       setStreamError(null);
       const info = await waitForSidecar();
       const url = `${apiBaseUrl(info)}/agent/conversations/${activeConvoId}/stream`;
@@ -112,13 +114,26 @@ export const AgentChatView = () => {
           const eventType = eventMatch[1].trim();
           const payload = JSON.parse(dataMatch[1]);
           if (eventType === "text_delta") {
-            accumulated += payload.text;
+            accumulated += payload.text ?? "";
+            setThinkingText(null);
             setStreamingText(accumulated);
+          } else if (eventType === "assistant") {
+            accumulated = payload.text ?? "";
+            setThinkingText(null);
+            setStreamingText(accumulated);
+          } else if (eventType === "thinking_delta") {
+            setThinkingText(payload.text ?? "Thinking...");
+          } else if (eventType === "done") {
+            setThinkingText(null);
           } else if (eventType === "error") {
-            setStreamError(payload.error);
+            const message = payload.error ?? "Agent stream failed.";
+            setStreamError(message);
+            throw new Error(message);
           } else if (eventType === "tool_call") {
             // Show tool call inline during streaming.
-            accumulated += `\n[tool: ${payload.name}]\n`;
+            const toolName = payload.name ?? payload.tool_name ?? "tool";
+            accumulated += `\n[tool: ${toolName}]\n`;
+            setThinkingText(null);
             setStreamingText(accumulated);
           }
         }
@@ -128,10 +143,15 @@ export const AgentChatView = () => {
     onSuccess: () => {
       setInputText("");
       setStreamingText(null);
+      setThinkingText(null);
       qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
     },
     onError: () => {
       setStreamingText(null);
+      setThinkingText(null);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
     },
   });
 
@@ -290,7 +310,7 @@ export const AgentChatView = () => {
                   </p>
                 )}
                 {/* Live streaming assistant response */}
-                {streamingText != null && (
+                {(streamingText != null || thinkingText != null) && (
                   <div
                     style={{
                       padding: "0.5rem 0.7rem",
@@ -301,10 +321,15 @@ export const AgentChatView = () => {
                     }}
                   >
                     <div className="kicker" style={{ color: palette.phosphor, marginBottom: "0.2rem" }}>
-                      ASSISTANT <span className="numeric" style={{ fontSize: "0.68rem", color: palette.boneFaint, marginLeft: "0.5rem" }}>streaming…</span>
+                      ASSISTANT <span className="numeric" style={{ fontSize: "0.68rem", color: palette.boneFaint, marginLeft: "0.5rem" }}>{thinkingText ? "thinking..." : "streaming..."}</span>
                     </div>
+                    {thinkingText && (
+                      <div className="faint" style={{ fontSize: "0.82rem", lineHeight: 1.45, marginBottom: streamingText ? "0.35rem" : 0 }}>
+                        {thinkingText}
+                      </div>
+                    )}
                     <div style={{ color: palette.bone, fontSize: "0.92rem", lineHeight: 1.5, whiteSpace: "pre-wrap", wordWrap: "break-word" }}>
-                      {streamingText || "⏳"}
+                      {streamingText || (!thinkingText ? "..." : "")}
                     </div>
                   </div>
                 )}
