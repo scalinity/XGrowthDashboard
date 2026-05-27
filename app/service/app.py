@@ -70,6 +70,12 @@ from app.forms.weekly_review import submit_weekly_review
 from app.jobs import x_activity_sync, post_classification_sync, agent_ops
 from app.paths import resolve_db_path
 from app.secret_store import resolve_secret, store_secret
+from app.service.settings_schema import (
+    MANAGED_SECRETS,
+    assert_known_secret_name,
+    assert_known_setting_key,
+    assert_valid_setting_value,
+)
 from app.service.security import BearerTokenAuth
 from scripts import collect_account_snapshot
 
@@ -2183,8 +2189,9 @@ def create_app(
         # silently creating dead rows in the settings table.
         known = conn.execute("SELECT key FROM settings").fetchall()
         known_keys = {r["key"] for r in known}
-        if key not in known_keys:
-            raise HTTPException(status_code=400, detail=f"Unknown setting key: {key!r}")
+        assert_known_setting_key(key, known_keys)
+        current_value = get_setting(conn, key)
+        assert_valid_setting_value(key, body.value, current_value=current_value)
         # set_setting handles the JSON encode + §28.30 audit-log write-through.
         set_setting(conn, key, body.value)
         return {"ok": True, "key": key, "value": body.value}
@@ -2196,21 +2203,19 @@ def create_app(
     # at client construction; __main__ exports Keychain->env at boot, and the PUT
     # below also updates os.environ so a freshly-set key takes effect without a
     # restart.
-    _MANAGED_SECRETS = {"ANTHROPIC_API_KEY"}
 
     @app.get("/settings/secrets", dependencies=[Depends(auth)])
     def read_secrets() -> dict[str, Any]:
         return {
             "secrets": {
                 name: {"present": bool(resolve_secret(name))}
-                for name in sorted(_MANAGED_SECRETS)
+                for name in sorted(MANAGED_SECRETS)
             }
         }
 
     @app.put("/settings/secrets/{name}", dependencies=[Depends(auth)])
     def update_secret(name: str, body: SecretBody) -> dict[str, Any]:
-        if name not in _MANAGED_SECRETS:
-            raise HTTPException(status_code=400, detail=f"Unknown secret: {name!r}")
+        assert_known_secret_name(name)
         value = body.value.strip()
         if not value:
             raise HTTPException(
