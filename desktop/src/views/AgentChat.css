@@ -285,15 +285,21 @@
 }
 
 .agent-chat__sidebar-footer {
-  padding: 0.4rem 0.7rem;
+  padding: 0.65rem 0.9rem;
   border-top: 1px solid var(--hairline);
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 0.7rem;
   color: var(--bone-faint);
-  letter-spacing: 0.06em;
   text-transform: uppercase;
-  text-align: center;
-  flex-shrink: 0;
+  letter-spacing: 0.08em;
+}
+
+.agent-chat__sidebar-empty {
+  padding: 1rem;
+  color: var(--bone-faint);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 /* ── Thread ── */
@@ -309,9 +315,11 @@
 .agent-chat__messages {
   flex: 1;
   overflow-y: auto;
-  padding: 1rem 1.5rem;
+  padding: 1.2rem;
   display: flex;
   flex-direction: column;
+  gap: 0.8rem;
+  scroll-behavior: smooth;
 }
 .agent-chat__messages::-webkit-scrollbar { width: 5px; }
 .agent-chat__messages::-webkit-scrollbar-track { background: transparent; }
@@ -321,6 +329,12 @@
 }
 .agent-chat__messages::-webkit-scrollbar-thumb:hover {
   background: var(--bone-faint);
+}
+
+.agent-chat__messages--coach {
+  max-height: 55vh;
+  margin-bottom: 0.8rem;
+  padding: 0;
 }
 
 /* ── Messages ── */
