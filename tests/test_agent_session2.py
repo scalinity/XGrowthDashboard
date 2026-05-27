@@ -9,6 +9,7 @@ than the perimeter itself.
 
 from __future__ import annotations
 
+import json
 import os
 import zlib
 
@@ -402,6 +403,167 @@ class TestAgentClientToolLoop:
                 "status": "error",
             }
         ]
+
+    def test_tool_round_cap_pairs_orphaned_tool_uses_with_results(
+        self, db_conn, monkeypatch
+    ):
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "success",
+                "result": {"ok": True},
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class CapExceedClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return (
+                    f"tool round {self.calls}",
+                    [
+                        {
+                            "id": f"toolu_cap_{self.calls}",
+                            "name": "query_dashboard_state",
+                            "input": {"slice": "today"},
+                        }
+                    ],
+                    5,
+                    3,
+                )
+
+        conversation_id = start_conversation(db_conn, title="tool round cap test")
+        client = CapExceedClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="keep calling tools",
+        )
+
+        assert turn.error is not None
+        assert "too many tool-use rounds" in turn.error
+        assert client.calls == 5
+        rows = db_conn.execute(
+            """
+            SELECT role, tool_call_id, content
+            FROM agent_messages
+            WHERE conversation_id = ?
+            ORDER BY id
+            """,
+            (conversation_id,),
+        ).fetchall()
+        tool_results = [row for row in rows if row["role"] == "tool_result"]
+        assert len(tool_results) == 5
+        assert tool_results[-1]["tool_call_id"] == "toolu_cap_5"
+        assert "too many tool-use rounds" in tool_results[-1]["content"]
+
+    def test_partial_tool_status_persists_result_payload(
+        self, db_conn, monkeypatch
+    ):
+        partial_payload = {"post_id": 42, "context": {"text": "hello"}}
+
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "partial",
+                "result": partial_payload,
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class PartialThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        "Extracting lesson context.",
+                        [
+                            {
+                                "id": "toolu_lesson",
+                                "name": "extract_lesson",
+                                "input": {"post_id": 42},
+                            }
+                        ],
+                        10,
+                        4,
+                    )
+                return ("Lesson context received.", [], 8, 2)
+
+        conversation_id = start_conversation(db_conn, title="partial tool result test")
+        client = PartialThenFinalClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="extract lesson for post 42",
+        )
+
+        assert turn.error is None
+        tool_result_row = db_conn.execute(
+            """
+            SELECT content
+            FROM agent_messages
+            WHERE conversation_id = ? AND role = 'tool_result'
+            ORDER BY id
+            LIMIT 1
+            """,
+            (conversation_id,),
+        ).fetchone()
+        assert tool_result_row is not None
+        assert json.loads(tool_result_row["content"]) == partial_payload
+
+    def test_malformed_tool_input_replays_object_in_history(self, db_conn):
+        class MalformedInputThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.history_snapshots = []
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                history = self._load_messages_history(conn, conversation_id)
+                self.history_snapshots.append(history)
+                if len(self.history_snapshots) == 1:
+                    return (
+                        "Malformed tool input incoming.",
+                        [
+                            {
+                                "id": "toolu_bad_input",
+                                "name": "query_dashboard_state",
+                                "input": [],
+                            }
+                        ],
+                        10,
+                        4,
+                    )
+                tool_use = self.history_snapshots[-1][-2]["content"][-1]
+                assert tool_use["type"] == "tool_use"
+                assert tool_use["input"] == {}
+                return ("Recovered after malformed tool input.", [], 8, 2)
+
+        conversation_id = start_conversation(
+            db_conn, title="malformed tool input replay test"
+        )
+        client = MalformedInputThenFinalClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="query with bad tool input",
+        )
+
+        assert turn.error is None
+        assert turn.assistant_text == "Recovered after malformed tool input."
 
 
 # ===========================================================================
