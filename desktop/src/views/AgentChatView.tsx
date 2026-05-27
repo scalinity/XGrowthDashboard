@@ -1,9 +1,8 @@
 /**
  * Agent Chat — faithful port of app/pages/9_Agent_Chat.py (spec §14.8).
  *
- * Facelift: full-height layout, auto-scroll, markdown-lite rendering,
- * animated thinking indicator, blinking streaming cursor, tool-call badges,
- * suggested prompts, polished conversation sidebar with delete.
+ * Full-screen layout with collapsible sidebar, modern chat bubbles,
+ * per-chunk fade-in streaming, animated thinking indicator.
  *
  * No useEffect — useMutation for sends, useQuery for reads, imperative
  * scroll via refs in event handlers and mutation callbacks.
@@ -11,7 +10,6 @@
 import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { Kicker } from "../components";
 import { apiFetch, waitForSidecar, apiBaseUrl } from "../lib/api";
 import "./AgentChat.css";
 
@@ -45,6 +43,8 @@ const SUGGESTED_PROMPTS = [
   "Review my engagement trends",
   "Find reply opportunities",
 ];
+
+const VISIBLE_CHUNK_WINDOW = 60;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,6 +174,50 @@ function renderToolCalls(json: string): ReactNode {
   return <div className="agent-tool-json">{json}</div>;
 }
 
+// -- Stream chunk rendering with fade-in ------------------------------------
+
+function StreamChunks({
+  chunks,
+  showCursor,
+}: {
+  chunks: string[];
+  showCursor: boolean;
+}) {
+  const historicalText =
+    chunks.length > VISIBLE_CHUNK_WINDOW
+      ? chunks.slice(0, -VISIBLE_CHUNK_WINDOW).join("")
+      : "";
+  const recentChunks =
+    chunks.length > VISIBLE_CHUNK_WINDOW
+      ? chunks.slice(-VISIBLE_CHUNK_WINDOW)
+      : chunks;
+  const offset = chunks.length - recentChunks.length;
+
+  return (
+    <div className="agent-msg__content">
+      {historicalText && <span>{historicalText}</span>}
+      {recentChunks.map((chunk, localIdx) => {
+        const key = offset + localIdx;
+        const toolMatch = chunk.match(/^\n?\[tool: ([^\]]+)\]\n?$/);
+        if (toolMatch) {
+          return (
+            <span key={key} className="agent-tool-badge agent-stream-chunk">
+              <span className="agent-tool-badge__icon">{"⚙"}</span>
+              {toolMatch[1]}
+            </span>
+          );
+        }
+        return (
+          <span key={key} className="agent-stream-chunk">
+            {chunk}
+          </span>
+        );
+      })}
+      {showCursor && <span className="agent-cursor" />}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
@@ -181,10 +225,11 @@ export const AgentChatView = () => {
   const qc = useQueryClient();
   const [activeConvoId, setActiveConvoId] = useState<number | null>(null);
   const [inputText, setInputText] = useState("");
-  const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [streamChunks, setStreamChunks] = useState<string[]>([]);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -240,7 +285,7 @@ export const AgentChatView = () => {
     onSuccess: (_data, conversationId) => {
       if (activeConvoId === conversationId) {
         setActiveConvoId(null);
-        setStreamingText(null);
+        setStreamChunks([]);
         setThinkingText(null);
         setStreamError(null);
       }
@@ -252,7 +297,7 @@ export const AgentChatView = () => {
 
   const sendMessage = useMutation({
     mutationFn: async (text: string) => {
-      setStreamingText("");
+      setStreamChunks([]);
       setThinkingText("Preparing agent context…");
       setStreamError(null);
       scrollToBottom();
@@ -288,14 +333,15 @@ export const AgentChatView = () => {
           const eventType = eventMatch[1].trim();
           const payload = JSON.parse(dataMatch[1]);
           if (eventType === "text_delta") {
-            accumulated += payload.text ?? "";
+            const chunk = payload.text ?? "";
+            accumulated += chunk;
             setThinkingText(null);
-            setStreamingText(accumulated);
+            setStreamChunks((prev) => [...prev, chunk]);
             scrollToBottom();
           } else if (eventType === "assistant") {
             accumulated = payload.text ?? "";
             setThinkingText(null);
-            setStreamingText(accumulated);
+            setStreamChunks([accumulated]);
             scrollToBottom();
           } else if (eventType === "thinking_delta") {
             setThinkingText(payload.text ?? "Thinking…");
@@ -307,9 +353,10 @@ export const AgentChatView = () => {
             throw new Error(message);
           } else if (eventType === "tool_call") {
             const toolName = payload.name ?? payload.tool_name ?? "tool";
-            accumulated += `\n[tool: ${toolName}]\n`;
+            const marker = `\n[tool: ${toolName}]\n`;
+            accumulated += marker;
             setThinkingText(null);
-            setStreamingText(accumulated);
+            setStreamChunks((prev) => [...prev, marker]);
             scrollToBottom();
           }
         }
@@ -318,14 +365,14 @@ export const AgentChatView = () => {
     },
     onSuccess: () => {
       setInputText("");
-      setStreamingText(null);
+      setStreamChunks([]);
       setThinkingText(null);
       if (textareaRef.current) textareaRef.current.style.height = "auto";
       qc.invalidateQueries({ queryKey: ["agent-messages", activeConvoId] });
       scrollToBottom(true);
     },
     onError: () => {
-      setStreamingText(null);
+      setStreamChunks([]);
       setThinkingText(null);
     },
     onSettled: () => {
@@ -364,7 +411,7 @@ export const AgentChatView = () => {
 
   const conversations = convos?.conversations ?? [];
   const messages = messagesData?.messages ?? [];
-  const isStreaming = streamingText != null || thinkingText != null;
+  const hasStreamContent = streamChunks.length > 0 || thinkingText != null;
   const disableActions = sendMessage.isPending || deleteConvo.isPending;
   const errorText =
     streamError ??
@@ -375,21 +422,26 @@ export const AgentChatView = () => {
   // -- Render ---------------------------------------------------------------
 
   return (
-    <>
-      <div style={{ marginBottom: "0.7rem" }}>
-        <Kicker>GROWTH AGENT</Kicker>
-        <h1 style={{ fontSize: "1.7rem", marginBottom: "0.1rem" }}>
-          Agent Chat
-        </h1>
-        <p
-          className="faint"
-          style={{ fontSize: "0.8rem", margin: 0, letterSpacing: "0.02em" }}
+    <div className="agent-chat-wrapper">
+      {/* ── Top bar ── */}
+      <div className="agent-chat__topbar">
+        <button
+          className="agent-chat__sidebar-toggle"
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
         >
+          {sidebarOpen ? "◀" : "▶"}
+        </button>
+        <span className="agent-chat__topbar-title">Agent Chat</span>
+        <span className="agent-chat__topbar-sub">
           Real-time reasoning &middot; tool use &middot; publish safeguards
-        </p>
+        </span>
       </div>
 
-      <div className="agent-chat">
+      {/* ── Main container ── */}
+      <div
+        className={`agent-chat${sidebarOpen ? "" : " agent-chat--sidebar-collapsed"}`}
+      >
         {/* ── Sidebar ── */}
         <aside className="agent-chat__sidebar">
           <div className="agent-chat__sidebar-header">
@@ -436,34 +488,28 @@ export const AgentChatView = () => {
                     {isConfirming ? (
                       <>
                         <button
-                          type="button"
                           className="agent-chat__confirm-btn"
                           onClick={() => deleteConvo.mutate(c.id)}
                           disabled={disableActions}
-                          aria-label={`Permanently delete ${c.title || `Session ${c.id}`}`}
                         >
                           {isDeleting ? "Deleting" : "Confirm"}
                         </button>
                         <button
-                          type="button"
                           className="agent-chat__keep-btn"
                           onClick={() => setDeleteConfirmId(null)}
                           disabled={deleteConvo.isPending}
-                          aria-label={`Keep ${c.title || `Session ${c.id}`}`}
                         >
                           Keep
                         </button>
                       </>
                     ) : (
                       <button
-                        type="button"
                         className="agent-chat__delete-btn"
                         onClick={(e) => {
                           e.stopPropagation();
                           setDeleteConfirmId(c.id);
                         }}
                         disabled={disableActions}
-                        aria-label={`Delete ${c.title || `Session ${c.id}`}`}
                       >
                         Delete
                       </button>
@@ -484,14 +530,14 @@ export const AgentChatView = () => {
             {conversations.length === 0 && (
               <div
                 style={{
-                  padding: "1.5rem 0.8rem",
+                  padding: "1.5rem 0.7rem",
                   textAlign: "center",
                 }}
               >
                 <p
                   className="faint"
                   style={{
-                    fontSize: "0.78rem",
+                    fontSize: "0.76rem",
                     lineHeight: 1.5,
                     margin: 0,
                   }}
@@ -558,7 +604,7 @@ export const AgentChatView = () => {
                 })}
 
                 {/* Live streaming response */}
-                {isStreaming && (
+                {hasStreamContent && (
                   <div className="agent-msg agent-msg--streaming">
                     <div className="agent-msg__bubble">
                       <div className="agent-msg__header">
@@ -570,7 +616,7 @@ export const AgentChatView = () => {
                         </span>
                       </div>
                       {thinkingText && (
-                        <div className="agent-thinking">
+                        <div key={thinkingText} className="agent-thinking">
                           <div className="agent-thinking__dots">
                             <div className="agent-thinking__dot" />
                             <div className="agent-thinking__dot" />
@@ -581,18 +627,18 @@ export const AgentChatView = () => {
                           </span>
                         </div>
                       )}
-                      {streamingText && (
-                        <div className="agent-msg__content">
-                          {renderContent(streamingText)}
-                          <span className="agent-cursor" />
-                        </div>
+                      {streamChunks.length > 0 && (
+                        <StreamChunks
+                          chunks={streamChunks}
+                          showCursor={sendMessage.isPending}
+                        />
                       )}
                     </div>
                   </div>
                 )}
 
                 {/* Empty conversation — suggested prompts */}
-                {messages.length === 0 && !isStreaming && (
+                {messages.length === 0 && !hasStreamContent && (
                   <div className="agent-chat__empty">
                     <div className="agent-chat__empty-glyph">{"◈"}</div>
                     <div className="agent-chat__empty-title">
@@ -650,6 +696,6 @@ export const AgentChatView = () => {
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 };
