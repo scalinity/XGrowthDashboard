@@ -2265,23 +2265,13 @@ def create_app(
                     return
 
                 client = agent_factory()
-                turn = client.send_message_sync(
+                for event_type, payload in client.send_message_stream_sync(
                     conn, conversation_id=conversation_id, user_text=body.text
-                )
-                if turn.error:
-                    yield _sse("error", {"error": turn.error})
-                    return
-
-                yield _sse("assistant", {"text": turn.assistant_text})
-                for tool_call in turn.tool_calls:
-                    yield _sse("tool_call", tool_call)
-                yield _sse("done", {
-                    "input_tokens": turn.input_tokens,
-                    "output_tokens": turn.output_tokens,
-                    "cost_usd": turn.cost_usd,
-                    "model": turn.model,
-                    "error": None,
-                })
+                ):
+                    yield _sse(event_type, payload)
+                    if event_type == "error":
+                        return
+                return
             except Exception as exc:  # noqa: BLE001
                 yield _sse("error", {"error": f"{type(exc).__name__}: {exc}"})
             finally:

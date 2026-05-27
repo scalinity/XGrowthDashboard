@@ -57,6 +57,116 @@ class _ToolUsingStubClient(AgentClient):
         return ("No queued reply targets are ready yet.", [], 8, 11)
 
 
+class _StreamingStubClient(AgentClient):
+    """A deterministic client that exposes token deltas for the SSE surface."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key="stub-key")
+
+    def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        return ("stub assistant reply", [], 12, 7)
+
+    def _call_model_stream(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        yield ("text_delta", {"text": "stub assistant "})
+        yield ("text_delta", {"text": "reply"})
+        return ("stub assistant reply", [], 12, 7)
+
+
+class _ToolStreamingStubClient(AgentClient):
+    """A deterministic client that streams around a tool-use round."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key="stub-key")
+        self.calls = 0
+
+    def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "I'll inspect the reply lane first.",
+                [
+                    {
+                        "id": "toolu_dashboard_state",
+                        "name": "query_dashboard_state",
+                        "input": {"slice": "next_rep"},
+                    }
+                ],
+                12,
+                7,
+            )
+        return ("No queued reply targets are ready yet.", [], 8, 11)
+
+    def _call_model_stream(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            yield ("text_delta", {"text": "I'll inspect "})
+            yield ("text_delta", {"text": "the reply lane first."})
+            yield (
+                "tool_call",
+                {
+                    "id": "toolu_dashboard_state",
+                    "name": "query_dashboard_state",
+                    "input": {"slice": "next_rep"},
+                    "status": "requested",
+                },
+            )
+            return (
+                "I'll inspect the reply lane first.",
+                [
+                    {
+                        "id": "toolu_dashboard_state",
+                        "name": "query_dashboard_state",
+                        "input": {"slice": "next_rep"},
+                    }
+                ],
+                12,
+                7,
+            )
+        yield ("text_delta", {"text": "No queued reply targets "})
+        yield ("text_delta", {"text": "are ready yet."})
+        return ("No queued reply targets are ready yet.", [], 8, 11)
+
+
+class _MalformedToolStreamingStubClient(AgentClient):
+    """A streaming path that emits a malformed tool-call shape on round one."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key="stub-key")
+        self.calls = 0
+
+    def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        # Not used by the stream code path, but kept for interface parity.
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "I'll recover from malformed calls.",
+                [
+                    {
+                        "id": "toolu_invalid",
+                        # name omitted on purpose — should become "invalid tool call".
+                        "input": {},
+                    }
+                ],
+                10,
+                5,
+            )
+        return ("Done.", [], 8, 7)
+
+    def _call_model_stream(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            yield ("text_delta", {"text": "I'll recover from "})
+            yield ("tool_call", {"id": "toolu_invalid", "name": None, "input": []})
+            return (
+                "Recovered after malformed tool input.",
+                [{"id": "toolu_invalid"}],
+                12,
+                7,
+            )
+        yield ("text_delta", {"text": "Done."})
+        return ("Done.", [], 8, 7)
+
+
 def _build_client_with_agent(db_path: Path, agent_factory) -> TestClient:  # type: ignore[no-untyped-def]
     conn = connect(db_path)
     apply_migrations(conn)
@@ -241,3 +351,71 @@ def test_stream_message_echoes_user_before_agent_work(client: TestClient) -> Non
     assert "event: user" in text
     assert "Find reply opportunities" in text
     assert text.index("event: user") < text.index("event: assistant")
+
+
+def test_stream_message_emits_text_deltas_before_final_assistant(tmp_path: Path) -> None:
+    client = _build_client_with_agent(tmp_path / "agent_svc_streaming.db", _StreamingStubClient)
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "stream this"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    text = resp.text
+    assert "event: text_delta" in text
+    assert "stub assistant reply" in text
+    assert text.index("event: text_delta") < text.index("event: assistant")
+
+
+def test_stream_message_emits_tool_progress_before_final_summary(tmp_path: Path) -> None:
+    client = _build_client_with_agent(
+        tmp_path / "agent_svc_tool_streaming.db", _ToolStreamingStubClient
+    )
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "Find reply opportunities"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    text = resp.text
+    assert "event: tool_call" in text
+    assert "event: tool_result" in text
+    assert "No queued reply targets are ready yet." in text
+    assert text.index("event: tool_call") < text.index("event: tool_result")
+    assert text.index("event: tool_result") < text.rindex("event: text_delta")
+    assert text.rindex("event: text_delta") < text.index("event: done")
+
+
+def test_stream_message_handles_empty_tool_calls_and_completes(tmp_path: Path) -> None:
+    client = _build_client_with_agent(
+        tmp_path / "agent_svc_tool_streaming_malformed.db",
+        _MalformedToolStreamingStubClient,
+    )
+    cid = client.post("/agent/conversations", json={}, headers=AUTH).json()[
+        "conversation_id"
+    ]
+
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "Try the broken tool"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    text = resp.text
+    assert "event: assistant" in text
+    assert "event: tool_call" in text
+    assert "event: tool_result" in text
+    assert "event: done" in text
+    assert "event: error" not in text
+    assert "invalid tool call" in text

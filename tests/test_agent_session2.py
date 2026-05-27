@@ -311,6 +311,98 @@ class TestAgentClientToolLoop:
         ]
         assert rows[-1]["content"] == "There are no queued reply targets yet."
 
+    def test_tool_calls_with_empty_tool_name_recover_and_continue(self, db_conn):
+        class EmptyNameThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        "I need a tool, but I won't name it.",
+                        [
+                            {
+                                "id": "toolu_bad_name",
+                                # name intentionally omitted -> malformed payload
+                                "input": {},
+                            }
+                        ],
+                        12,
+                        4,
+                    )
+                return ("Done after the malformed tool call.", [], 8, 2)
+
+        conversation_id = start_conversation(db_conn, title="tool call recovery test")
+        client = EmptyNameThenFinalClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="Run that diagnostic tool.",
+        )
+
+        assert turn.error is None
+        assert turn.assistant_text == "Done after the malformed tool call."
+        assert turn.tool_calls == [
+            {
+                "tool_name": "invalid tool call",
+                "status": "error",
+                "error": "tool use block missing a tool name",
+            }
+        ]
+        rows = db_conn.execute(
+            "SELECT role, content FROM agent_messages WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        ).fetchall()
+        assert [row["role"] for row in rows] == [
+            "user",
+            "assistant",
+            "tool_result",
+            "assistant",
+        ]
+
+    def test_unknown_tool_name_returns_structured_error(self, db_conn):
+        class UnknownToolThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        "I need a tool, but I named it wrong.",
+                        [
+                            {
+                                "id": "toolu_unknown",
+                                "name": "does_not_exist",
+                                "input": {},
+                            }
+                        ],
+                        10,
+                        4,
+                    )
+                return ("Recovered from unknown tool.", [], 8, 2)
+
+        conversation_id = start_conversation(db_conn, title="unknown tool recovery test")
+        client = UnknownToolThenFinalClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="Run bad tool",
+        )
+
+        assert turn.error is None
+        assert turn.assistant_text == "Recovered from unknown tool."
+        assert turn.tool_calls == [
+            {
+                "tool_name": "does_not_exist",
+                "error": "unknown tool 'does_not_exist'",
+                "status": "error",
+            }
+        ]
+
 
 # ===========================================================================
 # IWH decision orchestrator

@@ -295,9 +295,16 @@ def _render_history(conn, conversation_id: int) -> None:
             st.markdown(_strip_confidence_tags(row["content"] or ""))
             if role == "assistant" and row["tool_calls_json"]:
                 last_assistant_message_id = int(row["id"])
-                tool_calls = json.loads(row["tool_calls_json"])
+                try:
+                    tool_calls = json.loads(row["tool_calls_json"])
+                except (json.JSONDecodeError, TypeError):
+                    tool_calls = []
+                if not isinstance(tool_calls, list):
+                    tool_calls = []
                 # Render each tool call + its persisted result.
                 for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
                     result_row = conn.execute(
                         """
                         SELECT content FROM agent_messages

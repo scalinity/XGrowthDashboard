@@ -9,18 +9,12 @@ The client:
   4. Enforces the §28.6 monthly cost ceiling before each round trip.
   5. Dispatches tool_use blocks to local handlers via ``dispatch_tool_call``.
   6. Persists every assistant message + tool call to the DB.
-
-S11: at MVP the client is **synchronous-only** — ``send_message_sync``
-performs the full round trip and persists the result in one call. A
-streaming surface (``st.write_stream``-compatible iterator) is on the
-roadmap for V1.1+ but is not implemented yet; the architecture already
-separates the SDK boundary (``_call_model``) from the persistence path
-so the streaming upgrade is a future iteration on the existing surface.
+  7. Exposes an SSE-friendly streaming path for the native desktop app (§31).
 
 The publish tools deliberately have no path into this client. The
-``dispatch_tool_call`` helper raises ``KeyError`` for any unknown name —
-including the publish names — so even a hypothetical leak would fail
-loudly rather than execute.
+``dispatch_tool_call`` helper treats unknown names and malformed
+tool-call payloads as structured errors and returns them as ``error`` tool
+results instead of surfacing runtime exceptions to the user-facing turn.
 """
 
 from __future__ import annotations
@@ -29,8 +23,10 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Any
 
 from app.agent import audit, cost, prompt_builder, session, tools
@@ -46,6 +42,49 @@ SAVE_DRAFT_TOOLS: frozenset[str] = frozenset(
     {"save_draft_post", "save_draft_reply"}
 )
 MAX_TOOL_ROUNDS = 4
+INVALID_TOOL_CALL_LABEL = "invalid tool call"
+_TOOL_CALL_FALLBACK_ID = "toolu_invalid"
+
+
+def _normalize_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
+    """Normalize tool calls so malformed entries never crash the turn loop."""
+
+    normalized: list[dict[str, Any]] = []
+    for idx, raw_tc in enumerate(tool_calls or []):
+        tool_id = f"{_TOOL_CALL_FALLBACK_ID}_{idx}_{uuid4().hex[:12]}"
+        raw_name = ""
+        raw_input: Any = {}
+        history_input: dict[str, Any] = {}
+
+        if isinstance(raw_tc, Mapping):
+            candidate_id = raw_tc.get("id")
+            if isinstance(candidate_id, str) and candidate_id.strip():
+                tool_id = candidate_id.strip()
+
+            candidate_name = raw_tc.get("name", "")
+            if isinstance(candidate_name, str):
+                raw_name = candidate_name.strip()
+            elif candidate_name is not None:
+                raw_name = str(candidate_name).strip()
+
+            candidate_input = raw_tc.get("input", {})
+            if candidate_input is None:
+                candidate_input = {}
+            raw_input = candidate_input
+            if isinstance(candidate_input, Mapping):
+                history_input = dict(candidate_input)
+
+        display_name = raw_name or INVALID_TOOL_CALL_LABEL
+        normalized.append(
+            {
+                "id": tool_id,
+                "name": display_name,
+                "raw_name": raw_name,
+                "input": history_input,
+                "dispatch_input": raw_input,
+            }
+        )
+    return normalized
 
 
 # Phase 10 / §29.5 reply_intent promotion. Cached defaults match the
@@ -270,18 +309,15 @@ def dispatch_tool_call(
     conn: sqlite3.Connection,
     *,
     tool_name: str,
-    tool_input: dict[str, Any],
+    tool_input: Any,
     message_id: int,
     assistant_text: str = "",
     current_attempt_index: int = 1,
 ) -> dict[str, Any]:
     """Dispatch a tool_use block to its handler and log the call.
 
-    Raises ``KeyError`` if the tool name is unknown — including any
-    publish-tool name that somehow appears in a model response. The publish
-    tools are not in AGENT_TOOLS, so a valid model response can never name
-    them; the explicit KeyError is defense-in-depth against a corrupt SDK
-    payload or a future leak.
+    Unknown or malformed payloads are converted into ``error`` tool results
+    (instead of bubbling exceptions), so the turn can continue and recover.
 
     §28.2 rule #12 + #13 enforcement: for tool_name in SAVE_DRAFT_TOOLS,
     run the orchestrator gate (IWH score parse + dark-pattern lint preflight)
@@ -291,8 +327,53 @@ def dispatch_tool_call(
     and ``current_attempt_index`` here.
     """
     start = datetime.now(timezone.utc)
+    normalized_tool_name = tool_name.strip() if isinstance(tool_name, str) else ""
 
-    if tool_name in SAVE_DRAFT_TOOLS:
+    if not normalized_tool_name:
+        duration_ms = int(
+            (datetime.now(timezone.utc) - start).total_seconds() * 1000
+        )
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=INVALID_TOOL_CALL_LABEL,
+            arguments=tool_input if isinstance(tool_input, Mapping) else {},
+            status="error",
+            error_message="tool use block missing a tool name",
+            duration_ms=duration_ms,
+            notes="tool-call payload malformed",
+        )
+        return {
+            "tool_name": INVALID_TOOL_CALL_LABEL,
+            "status": "error",
+            "error": "tool use block missing a tool name",
+        }
+
+    if not isinstance(tool_input, Mapping):
+        duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=normalized_tool_name,
+            arguments={},
+            status="error",
+            error_message=(
+                "tool use block had malformed input; expected a JSON object "
+                f"for tool {normalized_tool_name!r}"
+            ),
+            duration_ms=duration_ms,
+            notes="tool-call payload malformed",
+        )
+        return {
+            "tool_name": normalized_tool_name,
+            "status": "error",
+            "error": (
+                "tool use block had malformed input; expected a JSON object "
+                f"for tool {normalized_tool_name!r}"
+            ),
+        }
+
+    if normalized_tool_name in SAVE_DRAFT_TOOLS:
         # Phase 10 / §29.5 — reply_intent promotion gate. Runs BEFORE
         # niche/IWH/lint so the agent can't propose-and-then-skip the
         # other gates by burning a turn on a reply that will get
@@ -300,7 +381,7 @@ def dispatch_tool_call(
         # axis is reply-only). The reply_intent_required setting
         # (default ON) is the calibration escape hatch — when OFF
         # the dispatcher accepts NULL and writes through.
-        if tool_name == "save_draft_reply":
+        if normalized_tool_name == "save_draft_reply":
             intent_gate_error = _validate_reply_intent_or_error(
                 conn, tool_input
             )
@@ -308,7 +389,7 @@ def dispatch_tool_call(
                 audit.log_tool_call(
                     conn,
                     message_id=message_id,
-                    tool_name=tool_name,
+                    tool_name=normalized_tool_name,
                     arguments=tool_input,
                     status="error",
                     error_message=f"reply-intent gate refuse: {intent_gate_error}",
@@ -318,7 +399,7 @@ def dispatch_tool_call(
                     notes="reply-intent gate refused",
                 )
                 return {
-                    "tool_name": tool_name,
+                    "tool_name": normalized_tool_name,
                     "status": "error",
                     "error": f"refused by reply-intent gate: {intent_gate_error}",
                 }
@@ -331,7 +412,7 @@ def dispatch_tool_call(
             audit.log_tool_call(
                 conn,
                 message_id=message_id,
-                tool_name=tool_name,
+                tool_name=normalized_tool_name,
                 arguments=tool_input,
                 status="error",
                 error_message=f"niche-gate refuse: {n_gate.rationale}",
@@ -341,13 +422,15 @@ def dispatch_tool_call(
                 notes="niche-gate refused",
             )
             return {
-                "tool_name": tool_name,
+                "tool_name": normalized_tool_name,
                 "status": "error",
                 "error": f"refused by niche gate: {n_gate.rationale}",
             }
         # Phase 5.9 / §28.18 — pass draft_kind + target_post_text so the
         # reply-quality lint runs in-band with the IWH/dark-pattern gate.
-        _draft_kind = "reply" if tool_name == "save_draft_reply" else "standalone"
+        _draft_kind = (
+            "reply" if normalized_tool_name == "save_draft_reply" else "standalone"
+        )
         _target_post_text = tool_input.get("target_post_text") if _draft_kind == "reply" else None
         decision = session.decide_save_or_revise(
             conn,
@@ -361,7 +444,7 @@ def dispatch_tool_call(
             audit.log_tool_call(
                 conn,
                 message_id=message_id,
-                tool_name=tool_name,
+                tool_name=normalized_tool_name,
                 arguments=tool_input,
                 status="error",
                 error_message=f"IWH refuse: {decision.rationale}",
@@ -371,7 +454,7 @@ def dispatch_tool_call(
                 notes="iwh-gate refused",
             )
             return {
-                "tool_name": tool_name,
+                "tool_name": normalized_tool_name,
                 "status": "error",
                 "error": f"refused by IWH gate: {decision.rationale}",
             }
@@ -379,7 +462,7 @@ def dispatch_tool_call(
             audit.log_tool_call(
                 conn,
                 message_id=message_id,
-                tool_name=tool_name,
+                tool_name=normalized_tool_name,
                 arguments=tool_input,
                 status="error",
                 error_message=f"IWH revise: {decision.rationale}",
@@ -389,7 +472,7 @@ def dispatch_tool_call(
                 notes="iwh-gate revise",
             )
             return {
-                "tool_name": tool_name,
+                "tool_name": normalized_tool_name,
                 "status": "revise_required",
                 "rationale": decision.rationale,
                 "next_attempt_index": decision.next_attempt_index,
@@ -422,7 +505,7 @@ def dispatch_tool_call(
                 tool_input["reply_quality_lint_failure_mode"] = rq.failure_mode
 
     try:
-        tool = tools.get_tool(tool_name)
+        tool = tools.get_tool(normalized_tool_name)
         result = tool.handler(conn, **tool_input)
         duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
         # W26: handlers can signal stub/partial completion via a private
@@ -437,26 +520,43 @@ def dispatch_tool_call(
         audit.log_tool_call(
             conn,
             message_id=message_id,
-            tool_name=tool_name,
+            tool_name=normalized_tool_name,
             arguments=tool_input,
             status=audit_status,
             result=result,
             duration_ms=duration_ms,
         )
-        return {"tool_name": tool_name, "result": result, "status": audit_status}
+        return {"tool_name": normalized_tool_name, "result": result, "status": audit_status}
+    except KeyError:
+        duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+        audit.log_tool_call(
+            conn,
+            message_id=message_id,
+            tool_name=normalized_tool_name,
+            arguments=tool_input,
+            status="error",
+            error_message=f"unknown tool: {normalized_tool_name!r}",
+            duration_ms=duration_ms,
+            notes="tool name not in AGENT_TOOLS",
+        )
+        return {
+            "tool_name": normalized_tool_name,
+            "error": f"unknown tool {normalized_tool_name!r}",
+            "status": "error",
+        }
     except Exception as exc:
         duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
         audit.log_tool_call(
             conn,
             message_id=message_id,
-            tool_name=tool_name,
+            tool_name=normalized_tool_name,
             arguments=tool_input,
             status="error",
             error_message=f"{type(exc).__name__}: {exc}",
             duration_ms=duration_ms,
         )
         return {
-            "tool_name": tool_name,
+            "tool_name": normalized_tool_name,
             "error": f"{type(exc).__name__}: {exc}",
             "status": "error",
         }
@@ -477,6 +577,11 @@ class AgentTurn:
     cost_usd: float = 0.0
     model: str = ""
     error: str | None = None
+
+
+AgentStreamFrame = tuple[str, dict[str, Any]]
+ModelStreamResult = tuple[str, list[dict], int, int]
+ModelStream = Generator[AgentStreamFrame, None, ModelStreamResult]
 
 
 class AgentClient:
@@ -564,6 +669,7 @@ class AgentClient:
 
             total_in_tok += in_tok
             total_out_tok += out_tok
+            tool_calls = _normalize_tool_calls(tool_calls)
             call_estimate = cost.estimate_cost(
                 input_tokens=in_tok, output_tokens=out_tok, model=self.model
             )
@@ -602,8 +708,10 @@ class AgentClient:
 
             tool_rounds += 1
             for tc in tool_calls:
-                tc_name = tc.get("name", "")
-                tc_input = tc.get("input", {}) or {}
+                tc_name = tc["name"]
+                tc_input = tc.get("dispatch_input", {})
+                dispatch_tool_name = tc.get("raw_name", tc_name)
+                tc_id = tc.get("id")
                 # For save_draft_* tools, look up the conversation's current
                 # IWH attempt count so the orchestrator's refuse-on-N+1 gate
                 # has the right starting index. Counter increments via
@@ -622,7 +730,7 @@ class AgentClient:
                         current_attempt = int(row["next_idx"])
                 result = dispatch_tool_call(
                     conn,
-                    tool_name=tc_name,
+                    tool_name=dispatch_tool_name,
                     tool_input=tc_input,
                     message_id=msg_id,
                     assistant_text=assistant_text,
@@ -647,7 +755,7 @@ class AgentClient:
                     conversation_id=conversation_id,
                     role="tool_result",
                     content=json.dumps(content_payload, default=str),
-                    tool_call_id=tc.get("id"),
+                    tool_call_id=tc_id,
                 )
 
         estimate = cost.estimate_cost(
@@ -658,6 +766,200 @@ class AgentClient:
         turn.output_tokens = total_out_tok
         turn.cost_usd = estimate.total_usd
         return turn
+
+    def send_message_stream_sync(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        conversation_id: int,
+        user_text: str,
+    ) -> Generator[AgentStreamFrame, None, None]:
+        """Streaming turn path for the native UI while preserving persistence."""
+        turn = AgentTurn(user_text=user_text, model=self.model)
+        try:
+            cost.check_ceiling_or_raise(
+                conn,
+                projected_call_cost_usd=cost.PROJECTED_CALL_COST_GUESS_USD,
+            )
+        except cost.MonthlyCostCeilingExceeded as exc:
+            yield ("error", {"error": str(exc)})
+            return
+
+        append_message(
+            conn,
+            conversation_id=conversation_id,
+            role="user",
+            content=user_text,
+        )
+
+        if not self.is_available():
+            yield (
+                "error",
+                {
+                    "error": (
+                        "Growth Agent disabled — set ANTHROPIC_API_KEY in .env. "
+                        "See spec §28.8 for the env setup."
+                    )
+                },
+            )
+            return
+
+        total_in_tok = 0
+        total_out_tok = 0
+        dispatched: list[dict] = []
+        tool_rounds = 0
+
+        while True:
+            yield (
+                "thinking_delta",
+                {
+                    "text": (
+                        "Sending tool results back to Claude..."
+                        if tool_rounds
+                        else "Calling Claude..."
+                    )
+                },
+            )
+            try:
+                assistant_text, tool_calls, in_tok, out_tok = yield from self._call_model_stream(
+                    conn, conversation_id=conversation_id
+                )
+            except Exception as exc:
+                _log.exception(
+                    "Anthropic stream failed for conversation_id=%s model=%s status_code=%s",
+                    conversation_id,
+                    self.model,
+                    _anthropic_status_code(exc),
+                )
+                yield ("error", {"error": _format_anthropic_error_for_user(exc)})
+                return
+
+            total_in_tok += in_tok
+            total_out_tok += out_tok
+            tool_calls = _normalize_tool_calls(tool_calls)
+            call_estimate = cost.estimate_cost(
+                input_tokens=in_tok, output_tokens=out_tok, model=self.model
+            )
+            from app.agent.session import (
+                dominant_confidence_label,
+                extract_confidence_labels,
+            )
+            _conf_labels = extract_confidence_labels(assistant_text)
+            _dominant_conf = dominant_confidence_label(_conf_labels)
+
+            msg_id = append_message(
+                conn,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_text,
+                model=self.model,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                rate_snapshot=call_estimate.rate_snapshot,
+                tool_calls=tool_calls or None,
+                confidence_label=_dominant_conf,
+            )
+            turn.assistant_text = assistant_text
+            yield (
+                "assistant",
+                {
+                    "text": assistant_text,
+                    "model": self.model,
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                },
+            )
+
+            if not tool_calls:
+                break
+            if tool_rounds >= MAX_TOOL_ROUNDS:
+                yield (
+                    "error",
+                    {
+                        "error": (
+                            "Growth Agent stopped after too many tool-use rounds. "
+                            "Try narrowing the request and run it again."
+                        )
+                    },
+                )
+                return
+
+            tool_rounds += 1
+            for tc in tool_calls:
+                tc_name = tc["name"]
+                tc_input = tc.get("dispatch_input", {})
+                dispatch_tool_name = tc.get("raw_name", tc_name)
+                tc_id = tc.get("id")
+                yield (
+                    "tool_call",
+                    {
+                        "id": tc_id,
+                        "name": tc_name,
+                        "input": tc.get("input", {}),
+                        "status": "running",
+                    },
+                )
+                current_attempt = 1
+                if tc_name in SAVE_DRAFT_TOOLS:
+                    row = conn.execute(
+                        """
+                        SELECT COALESCE(MAX(iwh_attempt_index), 0) + 1 AS next_idx
+                        FROM agent_drafts
+                        WHERE conversation_id = ? AND status != 'rejected'
+                        """,
+                        (conversation_id,),
+                    ).fetchone()
+                    if row is not None and row["next_idx"] is not None:
+                        current_attempt = int(row["next_idx"])
+                result = dispatch_tool_call(
+                    conn,
+                    tool_name=dispatch_tool_name,
+                    tool_input=tc_input,
+                    message_id=msg_id,
+                    assistant_text=assistant_text,
+                    current_attempt_index=current_attempt,
+                )
+                dispatched.append(result)
+                if result.get("status") == "success":
+                    content_payload = result.get("result")
+                else:
+                    content_payload = result.get("error") or result.get("rationale") or ""
+                yield (
+                    "tool_result",
+                    {
+                        "id": tc_id,
+                        "name": tc_name,
+                        "status": result.get("status"),
+                        "result": result.get("result"),
+                        "error": result.get("error"),
+                        "rationale": result.get("rationale"),
+                    },
+                )
+                append_message(
+                    conn,
+                    conversation_id=conversation_id,
+                    role="tool_result",
+                    content=json.dumps(content_payload, default=str),
+                    tool_call_id=tc_id,
+                )
+
+        estimate = cost.estimate_cost(
+            input_tokens=total_in_tok, output_tokens=total_out_tok, model=self.model
+        )
+        turn.tool_calls = dispatched
+        turn.input_tokens = total_in_tok
+        turn.output_tokens = total_out_tok
+        turn.cost_usd = estimate.total_usd
+        yield (
+            "done",
+            {
+                "input_tokens": turn.input_tokens,
+                "output_tokens": turn.output_tokens,
+                "cost_usd": turn.cost_usd,
+                "model": turn.model,
+                "error": None,
+            },
+        )
 
     # ---------------------------------------------------------------------
     # SDK boundary — overridable for tests.
@@ -707,6 +1009,95 @@ class AgentClient:
         out_tok = int(getattr(usage, "output_tokens", 0) or 0)
         return ("\n\n".join(text_parts), tool_calls, in_tok, out_tok)
 
+    def _call_model_stream(
+        self, conn: sqlite3.Connection, *, conversation_id: int
+    ) -> ModelStream:
+        """Stream one Anthropic round and return its accumulated message."""
+        if type(self)._call_model is not AgentClient._call_model:
+            assistant_text, tool_calls, in_tok, out_tok = self._call_model(
+                conn, conversation_id=conversation_id
+            )
+            if assistant_text:
+                yield ("text_delta", {"text": assistant_text})
+            return (assistant_text, tool_calls, in_tok, out_tok)
+
+        import anthropic  # local import keeps the offline path cheap
+
+        client = anthropic.Anthropic(api_key=self._api_key, timeout=120.0)
+        system_prompt = prompt_builder.build_system_prompt(conn)
+        messages = self._load_messages_history(conn, conversation_id)
+        tool_specs = [t.to_anthropic_spec() for t in tools.AGENT_TOOLS]
+        with client.messages.stream(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system_prompt,
+            tools=tool_specs,
+            messages=messages,
+        ) as stream:
+            for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "text":
+                    yield ("text_delta", {"text": getattr(event, "text", "")})
+                elif event_type == "thinking":
+                    thinking = getattr(event, "thinking", "")
+                    if thinking:
+                        yield ("thinking_delta", {"text": thinking})
+                elif event_type == "input_json":
+                    yield (
+                        "tool_input_delta",
+                        {
+                            "partial_json": getattr(event, "partial_json", ""),
+                            "snapshot": getattr(event, "snapshot", ""),
+                        },
+                    )
+                elif event_type in {"content_block_start", "content_block_stop"}:
+                    block = getattr(event, "content_block", None)
+                    if getattr(block, "type", None) == "tool_use":
+                        block_name = getattr(block, "name", None)
+                        safe_name = (
+                            block_name.strip()
+                            if isinstance(block_name, str) and block_name.strip()
+                            else INVALID_TOOL_CALL_LABEL
+                        )
+                        block_input = getattr(block, "input", {})
+                        if block_input is None:
+                            block_input = {}
+                        if not isinstance(block_input, Mapping):
+                            block_input = {}
+                        yield (
+                            "tool_call",
+                            {
+                                "id": getattr(block, "id", None),
+                                "name": safe_name,
+                                "input": block_input,
+                                "status": (
+                                    "requested"
+                                    if event_type == "content_block_stop"
+                                    else "forming"
+                                ),
+                            },
+                        )
+            final = stream.get_final_message()
+
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        for block in final.content:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text_parts.append(block.text)
+            elif btype == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+        usage = getattr(final, "usage", None)
+        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+        return ("\n\n".join(text_parts), tool_calls, in_tok, out_tok)
+
     def _load_messages_history(
         self, conn: sqlite3.Connection, conversation_id: int
     ) -> list[dict[str, Any]]:
@@ -741,13 +1132,17 @@ class AgentClient:
                 blocks: list[dict[str, Any]] = []
                 if r["content"]:
                     blocks.append({"type": "text", "text": r["content"]})
-                for tc in json.loads(r["tool_calls_json"]):
+                try:
+                    raw_tool_calls = json.loads(r["tool_calls_json"])
+                except (TypeError, json.JSONDecodeError):
+                    raw_tool_calls = []
+                for tc in _normalize_tool_calls(raw_tool_calls):
                     blocks.append(
                         {
                             "type": "tool_use",
                             "id": tc.get("id"),
-                            "name": tc.get("name"),
-                            "input": tc.get("input") or {},
+                            "name": tc["name"],
+                            "input": tc["dispatch_input"],
                         }
                     )
                 history.append({"role": "assistant", "content": blocks})
