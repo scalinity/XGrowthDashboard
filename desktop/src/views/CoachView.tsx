@@ -427,7 +427,7 @@ export const CoachView = () => {
             })}
 
             {coachConvos.length === 0 && (
-              <div className="agent-chat__empty-sub" style={{ padding: "1rem" }}>
+              <div className="agent-chat__sidebar-empty">
                 No coach sessions yet.
               </div>
             )}
@@ -461,7 +461,7 @@ export const CoachView = () => {
           ) : (
             <>
               <div
-                className="agent-chat__messages"
+                className="agent-chat__messages agent-chat__messages--coach"
                 style={{ maxHeight: "55vh", marginBottom: "0.8rem", padding: 0 }}
               >
                 {visibleMessages.map((m) => {
