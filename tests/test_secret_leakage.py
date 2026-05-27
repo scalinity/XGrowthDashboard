@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
@@ -54,6 +53,5 @@ def test_log_redaction_strips_sentinel_and_bearer() -> None:
 
 
 def test_log_redaction_filter_on_logger_record() -> None:
-    logger = logging.getLogger("tests.secret_leakage")
     message = redact_text(f"token={SENTINEL}", extra_secrets=[SENTINEL])
     assert SENTINEL not in message
