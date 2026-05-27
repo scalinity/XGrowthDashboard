@@ -142,6 +142,47 @@ The point of the per-sub-task push is the same point Linear would serve: an exte
 
 ---
 
+## Cursor Cloud specific instructions
+
+### Environment bootstrap
+
+- `uv` must be on `PATH`. It is installed to `~/.local/bin` via `curl -LsSf https://astral.sh/uv/install.sh | sh`. The update script handles this idempotently.
+- After `uv sync`, the `.venv/` is ready. All commands go through `uv run`.
+
+### Running the Streamlit app
+
+```bash
+uv run streamlit run app/main.py --server.headless true --server.port 8501
+```
+
+The `--server.headless true` flag is required in Cloud Agent VMs (no TTY for the "Email:" prompt). The database auto-initializes on first access if migrations have been applied.
+
+### Database initialization
+
+```bash
+mkdir -p data && uv run python -m scripts.init_db
+```
+
+Creates `data/dashboard.db` and applies all migrations + seeds settings/milestones. Idempotent — safe to re-run.
+
+### Verification commands
+
+| Area | Commands |
+|------|----------|
+| Lint | `uv run ruff check` |
+| Tests | `uv run pytest -q` |
+| Streamlit boot smoke | `uv run streamlit run app/main.py --server.headless true` (check no exception in first 5s) |
+
+### Known test failures (pre-existing)
+
+15 tests in `test_agent.py`, `test_grok_integration.py`, and `test_x_api_writes.py` fail due to X API fixture cassette mismatches (xurl subprocess mock). These are pre-existing on `main` and unrelated to environment setup. Core functionality (1239 tests) passes.
+
+### API keys
+
+No API keys are required for basic development. The app starts and the full test suite (minus X/Grok integration) runs without any `.env` secrets. For AI agent features, set `ANTHROPIC_API_KEY` in `.env` at repo root.
+
+---
+
 ## What this file is not
 
 This file is project-specific operational rules. Architecture decisions and product reasoning live in `spec.md`. Day-to-day status lives in `docs/index.html` (interactive). `docs/IMPLEMENTATION_STATUS.md` is frozen at Phase 5.8 — don't append to it. Don't duplicate any of this here.
