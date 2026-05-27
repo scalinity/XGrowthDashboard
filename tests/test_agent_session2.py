@@ -14,6 +14,7 @@ import os
 import pytest
 
 from app.agent import cost, lint, prompt_builder, session, voice
+from app.agent.client import AgentClient, start_conversation
 from app.exports.allowlists import columns_for_export
 
 
@@ -190,6 +191,33 @@ class TestMonthlyCostCeiling:
             (msg,),
         )
         assert cost.month_to_date_spend_usd(db_conn) == 0.0
+
+
+class TestAgentClientApiErrors:
+    def test_anthropic_overload_returns_retryable_user_message(self, db_conn):
+        class FakeOverloadedError(Exception):
+            status_code = 529
+
+        class OverloadedClient(AgentClient):
+            def _call_model(self, conn, *, conversation_id):
+                raise FakeOverloadedError(
+                    "Error code: 529 - {'type': 'error', 'error': {'type': "
+                    "'overloaded_error', 'message': 'Overloaded'}, "
+                    "'request_id': 'req_011CbSYPJynqnwFvwWi8McVg'}"
+                )
+
+        conversation_id = start_conversation(db_conn, title="overload test")
+        turn = OverloadedClient(api_key="test-key").send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="draft something",
+        )
+
+        assert turn.error is not None
+        assert "Anthropic is overloaded" in turn.error
+        assert "try again" in turn.error.lower()
+        assert "OverloadedError" not in turn.error
+        assert "request_id" not in turn.error
 
 
 # ===========================================================================

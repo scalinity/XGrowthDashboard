@@ -26,6 +26,7 @@ loudly rather than execute.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.agent import audit, cost, prompt_builder, session, tools
+
+_log = logging.getLogger(__name__)
 
 # §28.2 rule #12 + #13: every save_draft_* call MUST run through the
 # orchestrator gate (IWH self-score parse + dark-pattern lint preflight)
@@ -78,6 +81,45 @@ REPLY_INTENT_GATE_CODES: tuple[str, ...] = (
     "INTENT_MISSING",
     "INTENT_INVALID",
 )
+
+
+def _anthropic_status_code(exc: Exception) -> int | None:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if isinstance(response_status, int):
+        return response_status
+    return None
+
+
+def _format_anthropic_error_for_user(exc: Exception) -> str:
+    """Return a chat-safe provider error; raw SDK payloads stay in logs."""
+    status_code = _anthropic_status_code(exc)
+    exc_name = type(exc).__name__
+    raw = str(exc).lower()
+
+    if status_code == 529 or exc_name == "OverloadedError" or "overloaded_error" in raw:
+        return (
+            "Anthropic is overloaded right now (HTTP 529). The SDK already retried this "
+            "request, so wait a minute and try again; your message was saved in this "
+            "conversation."
+        )
+    if status_code == 429 or exc_name == "RateLimitError":
+        return (
+            "Anthropic rate-limited the Growth Agent request. Wait a bit and try again; "
+            "your message was saved in this conversation."
+        )
+    if status_code is not None and status_code >= 500:
+        return (
+            f"Anthropic returned a temporary server error (HTTP {status_code}). "
+            "Try again shortly; your message was saved in this conversation."
+        )
+    return (
+        f"Growth Agent call failed before a response came back ({exc_name}). "
+        "The underlying error was logged for debugging."
+    )
 
 
 def _validate_reply_intent_or_error(
@@ -498,7 +540,13 @@ class AgentClient:
                 conn, conversation_id=conversation_id
             )
         except Exception as exc:
-            turn.error = f"{type(exc).__name__}: {exc}"
+            _log.exception(
+                "Anthropic call failed for conversation_id=%s model=%s status_code=%s",
+                conversation_id,
+                self.model,
+                _anthropic_status_code(exc),
+            )
+            turn.error = _format_anthropic_error_for_user(exc)
             return turn
 
         # Estimate cost from token counts using the rate snapshot.
