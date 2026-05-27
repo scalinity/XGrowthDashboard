@@ -167,6 +167,17 @@ type ToolResultView = {
   content?: string | null;
 };
 
+type LiveToolCall = {
+  id: string;
+  name: string;
+  input?: unknown;
+  inputSnapshot?: string;
+  status: string;
+  result?: unknown;
+  error?: string | null;
+  rationale?: string | null;
+};
+
 function formatToolPayload(value: unknown): string {
   if (typeof value === "string") {
     try {
@@ -176,6 +187,38 @@ function formatToolPayload(value: unknown): string {
     }
   }
   return JSON.stringify(value ?? {}, null, 2);
+}
+
+function parseToolPayload(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function isEmptyToolInput(value: unknown, snapshot?: string): boolean {
+  const payload = snapshot != null ? parseToolPayload(snapshot) : value;
+  if (payload == null) return true;
+  return (
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    Object.keys(payload).length === 0
+  );
+}
+
+function formatToolInputPayload(value: unknown, snapshot?: string): string {
+  if (isEmptyToolInput(value, snapshot)) {
+    return "No explicit input; exact payload is {}. Tool defaults are being used.";
+  }
+  return snapshot ?? formatToolPayload(value ?? {});
+}
+
+function toolInputClassName(value: unknown, snapshot?: string): string {
+  return isEmptyToolInput(value, snapshot)
+    ? "agent-tool-json agent-tool-json--empty-input"
+    : "agent-tool-json";
 }
 
 function toolResultsByCallId(json?: string | null): Map<string, string> {
@@ -218,7 +261,9 @@ function renderToolCalls(json: string, resultJson?: string | null): ReactNode {
                 </summary>
                 <div className="agent-tool-detail__body">
                   <div className="agent-tool-detail__label">input</div>
-                  <pre className="agent-tool-json">{formatToolPayload(c.input ?? {})}</pre>
+                  <pre className={toolInputClassName(c.input)}>
+                    {formatToolInputPayload(c.input)}
+                  </pre>
                   {result && (
                     <>
                       <div className="agent-tool-detail__label">output</div>
@@ -236,6 +281,106 @@ function renderToolCalls(json: string, resultJson?: string | null): ReactNode {
     /* fallback below */
   }
   return <div className="agent-tool-json">{json}</div>;
+}
+
+function renderLiveToolCalls(calls: LiveToolCall[]): ReactNode {
+  if (calls.length === 0) return null;
+  return (
+    <div className="agent-tool-stack agent-tool-stack--live">
+      {calls.map((c) => {
+        const state = c.error ? "error" : c.status || "running";
+        const output = c.error ?? c.rationale ?? c.result;
+        return (
+          <details key={c.id} className="agent-tool-detail agent-tool-detail--live" open>
+            <summary className="agent-tool-detail__summary">
+              <span className="agent-tool-badge">
+                <span className="agent-tool-badge__icon">{"⚙"}</span>
+                {c.name}
+              </span>
+              <span className={`agent-tool-detail__state agent-tool-detail__state--${state}`}>
+                {state.replaceAll("_", " ")}
+              </span>
+            </summary>
+            <div className="agent-tool-detail__body">
+              <div className="agent-tool-detail__label">input</div>
+              <pre className={toolInputClassName(c.input, c.inputSnapshot)}>
+                {formatToolInputPayload(c.input, c.inputSnapshot)}
+              </pre>
+              {output != null && (
+                <>
+                  <div className="agent-tool-detail__label">output</div>
+                  <pre className="agent-tool-json">{formatToolPayload(output)}</pre>
+                </>
+              )}
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
+function mergeLiveToolCall(
+  current: LiveToolCall[],
+  payload: Record<string, unknown>,
+): LiveToolCall[] {
+  const name = String(payload.name ?? payload.tool_name ?? "tool");
+  const id = String(payload.id ?? `${name}-${current.length}`);
+  const next: LiveToolCall = {
+    id,
+    name,
+    input: payload.input,
+    status: String(payload.status ?? "running"),
+  };
+  const index = current.findIndex((item) => item.id === id);
+  if (index === -1) return [...current, next];
+  return current.map((item, itemIndex) =>
+    itemIndex === index
+      ? {
+          ...item,
+          ...next,
+          input: payload.input ?? item.input,
+          inputSnapshot: item.inputSnapshot,
+          result: item.result,
+          error: item.error,
+          rationale: item.rationale,
+        }
+      : item,
+  );
+}
+
+function mergeLiveToolInput(
+  current: LiveToolCall[],
+  snapshot: string,
+): LiveToolCall[] {
+  if (current.length === 0) return current;
+  const lastIndex = current.length - 1;
+  return current.map((item, itemIndex) =>
+    itemIndex === lastIndex
+      ? { ...item, inputSnapshot: snapshot, status: "forming" }
+      : item,
+  );
+}
+
+function mergeLiveToolResult(
+  current: LiveToolCall[],
+  payload: Record<string, unknown>,
+): LiveToolCall[] {
+  const name = String(payload.name ?? payload.tool_name ?? "tool");
+  const id = String(payload.id ?? `${name}-${Math.max(0, current.length - 1)}`);
+  const index = current.findIndex((item) => item.id === id);
+  const result = {
+    result: payload.result,
+    error: (payload.error as string | null | undefined) ?? null,
+    rationale: (payload.rationale as string | null | undefined) ?? null,
+    status: String(payload.status ?? "result_ready"),
+  };
+  if (index === -1) {
+    return [...current, { id, name, ...result }];
+  }
+  return current.map((item, itemIndex) =>
+    itemIndex === index ? { ...item, ...result } : item,
+  );
 }
 
 // -- Stream chunk rendering with fade-in ------------------------------------
@@ -291,6 +436,7 @@ export const AgentChatView = () => {
   const [inputText, setInputText] = useState("");
   const [streamChunks, setStreamChunks] = useState<string[]>([]);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
+  const [liveToolCalls, setLiveToolCalls] = useState<LiveToolCall[]>([]);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -351,6 +497,7 @@ export const AgentChatView = () => {
         setActiveConvoId(null);
         setStreamChunks([]);
         setThinkingText(null);
+        setLiveToolCalls([]);
         setStreamError(null);
       }
       setDeleteConfirmId(null);
@@ -398,9 +545,12 @@ export const AgentChatView = () => {
             setStreamChunks((prev) => [...prev, chunk]);
             scrollToBottom();
           } else if (eventType === "assistant") {
-            accumulated = payload.text ?? "";
+            const finalText = payload.text ?? "";
+            if (finalText && !accumulated.endsWith(finalText)) {
+              accumulated = accumulated ? `${accumulated}\n\n${finalText}` : finalText;
+            }
             setThinkingText(null);
-            setStreamChunks([accumulated]);
+            setStreamChunks(accumulated ? [accumulated] : []);
             scrollToBottom();
           } else if (eventType === "user") {
             scrollToBottom();
@@ -414,10 +564,21 @@ export const AgentChatView = () => {
             throw new Error(message);
           } else if (eventType === "tool_call") {
             const toolName = payload.name ?? payload.tool_name ?? "tool";
-            const marker = `\n[tool: ${toolName}]\n`;
-            accumulated += marker;
+            setThinkingText(`Running ${toolName}…`);
+            setLiveToolCalls((prev) =>
+              mergeLiveToolCall(prev, payload as Record<string, unknown>),
+            );
+            scrollToBottom();
+          } else if (eventType === "tool_input_delta") {
+            setLiveToolCalls((prev) =>
+              mergeLiveToolInput(prev, String(payload.snapshot ?? "")),
+            );
+            scrollToBottom();
+          } else if (eventType === "tool_result") {
             setThinkingText(null);
-            setStreamChunks((prev) => [...prev, marker]);
+            setLiveToolCalls((prev) =>
+              mergeLiveToolResult(prev, payload as Record<string, unknown>),
+            );
             scrollToBottom();
           }
         }
@@ -428,6 +589,7 @@ export const AgentChatView = () => {
       const queryKey = ["agent-messages", conversationId] as const;
       setStreamChunks([]);
       setThinkingText("Preparing agent context…");
+      setLiveToolCalls([]);
       setStreamError(null);
       setInputText("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -452,12 +614,14 @@ export const AgentChatView = () => {
     onSuccess: (_data, variables) => {
       setStreamChunks([]);
       setThinkingText(null);
+      setLiveToolCalls([]);
       qc.invalidateQueries({ queryKey: ["agent-messages", variables.conversationId] });
       scrollToBottom(true);
     },
     onError: (_error, variables) => {
       setStreamChunks([]);
       setThinkingText(null);
+      setLiveToolCalls([]);
       qc.invalidateQueries({ queryKey: ["agent-messages", variables.conversationId] });
     },
     onSettled: () => {
@@ -497,7 +661,8 @@ export const AgentChatView = () => {
   const conversations = convos?.conversations ?? [];
   const messages = messagesData?.messages ?? [];
   const visibleMessages = messages.filter((m) => m.role !== "tool_result");
-  const hasStreamContent = streamChunks.length > 0 || thinkingText != null;
+  const hasStreamContent =
+    streamChunks.length > 0 || thinkingText != null || liveToolCalls.length > 0;
   const disableActions = sendMessage.isPending || deleteConvo.isPending;
   const errorText =
     streamError ??
@@ -720,6 +885,7 @@ export const AgentChatView = () => {
                           showCursor={sendMessage.isPending}
                         />
                       )}
+                      {renderLiveToolCalls(liveToolCalls)}
                     </div>
                   </div>
                 )}
