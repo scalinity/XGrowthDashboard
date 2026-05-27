@@ -1,10 +1,11 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
+description = "Private local-only macOS shell for Daniel's X Growth Dashboard (not distributed)."
+authors = ["Daniel <private@local>"]
+license = "UNLICENSED"
 repository = ""
+# repository intentionally blank: private local-only app, not published.
 edition = "2021"
 rust-version = "1.77.2"
 
