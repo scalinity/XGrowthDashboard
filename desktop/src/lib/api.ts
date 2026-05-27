@@ -19,6 +19,25 @@ export interface SidecarInfo {
   ready: boolean;
 }
 
+export type SidecarPhase =
+  | "launching_sidecar"
+  | "applying_migrations"
+  | "connecting_db"
+  | "ready"
+  | "failed";
+
+export interface HealthDetails {
+  ready: boolean;
+  sidecar_phase: SidecarPhase;
+  app_version: string;
+  service_version: string;
+  db_path: string;
+  latest_migration: string | null;
+  data_dir_source: string;
+  resource_root: string;
+  capabilities: Record<string, unknown>;
+}
+
 let cached: SidecarInfo | null = null;
 
 /** True only inside the Tauri WKWebView (the shell injects __TAURI_INTERNALS__). */
@@ -67,7 +86,11 @@ export async function waitForSidecar(timeoutMs = 60_000): Promise<SidecarInfo> {
       cached = info;
       return info;
     }
-    if (Date.now() > deadline) throw new Error("sidecar did not become ready in time");
+    if (Date.now() > deadline) {
+      throw new Error(
+        "The local service did not start in time. Restart the app or copy diagnostics from Settings.",
+      );
+    }
     await new Promise((r) => setTimeout(r, 150));
   }
 }
@@ -75,6 +98,26 @@ export async function waitForSidecar(timeoutMs = 60_000): Promise<SidecarInfo> {
 export function apiBaseUrl(info: SidecarInfo): string {
   if (info.baseUrl) return info.baseUrl;
   return `http://127.0.0.1:${info.port}`;
+}
+
+export function userSafeApiError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/bearer|token|sk-|xai-|authorization/i.test(raw)) {
+    return "The local service returned an authentication error. Restart the app and try again.";
+  }
+  if (/500|502|503|504/.test(raw)) {
+    return "The local service hit an internal error. Copy diagnostics from Settings if it persists.";
+  }
+  if (/401|403/.test(raw)) {
+    return "The local service rejected the request. Restart the app and try again.";
+  }
+  if (/did not start in time/i.test(raw)) {
+    return raw;
+  }
+  if (/Couldn't reach|Load failed|Failed to fetch|NetworkError/i.test(raw)) {
+    return "Couldn't reach the local service. Confirm the app finished launching, then retry.";
+  }
+  return raw.length > 180 ? `${raw.slice(0, 180)}…` : raw;
 }
 
 /** Authenticated JSON fetch against the sidecar. */
@@ -91,9 +134,24 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    const technical = `${res.status} ${res.statusText}: ${body}`;
+    console.error(`apiFetch ${path} failed:`, technical);
+    throw new Error(userSafeApiError(new Error(technical)));
   }
   return (await res.json()) as T;
+}
+
+export async function fetchHealthDetails(): Promise<HealthDetails> {
+  return apiFetch<HealthDetails>("/health/details");
+}
+
+export async function copyDiagnosticsToClipboard(): Promise<string> {
+  const payload = await apiFetch<{ text: string }>("/diagnostics/copy");
+  const text = payload.text;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+  }
+  return text;
 }
 
 // S3: removed dead api.* convenience wrappers — views use apiFetch<T> directly.

@@ -16,6 +16,7 @@ import "@fontsource/jetbrains-mono/600.css";
 
 import "./theme/tokens.css";
 import { App } from "./App";
+import { SidecarBootstrap } from "./components/SidecarBootstrap";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("root element missing");
@@ -27,7 +28,9 @@ const queryClient = new QueryClient({
 createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <SidecarBootstrap>
+        <App />
+      </SidecarBootstrap>
     </QueryClientProvider>
   </StrictMode>,
 );

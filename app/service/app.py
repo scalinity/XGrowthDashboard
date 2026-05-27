@@ -76,6 +76,12 @@ from app.service.settings_schema import (
     assert_known_setting_key,
     assert_valid_setting_value,
 )
+from app.service.diagnostics import (
+    build_diagnostics_payload,
+    build_health_details,
+    format_diagnostics_text,
+    record_failed_request,
+)
 from app.service.security import BearerTokenAuth
 from scripts import collect_account_snapshot
 
@@ -1538,6 +1544,18 @@ def create_app(
     app = FastAPI(title="X Growth Dashboard — local service", version=SERVICE_VERSION)
     auth = BearerTokenAuth(token)
 
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(request, exc: HTTPException):  # type: ignore[no-untyped-def]
+        if exc.status_code >= 400:
+            record_failed_request(
+                request.url.path,
+                exc.status_code,
+                str(exc.detail),
+            )
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
     # CORS for the native webview's cross-origin fetch to the loopback sidecar.
     # In dev (browser screenshot-diffing) the caller passes explicit origins; in
     # the packaged app we allow the Tauri webview origin. Either way the loopback
@@ -1570,6 +1588,19 @@ def create_app(
     def health() -> dict[str, Any]:
         """Liveness probe for the Tauri shell's sidecar handshake. Unauthenticated."""
         return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
+
+    @app.get("/health/details", dependencies=[Depends(auth)])
+    def health_details(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """Structured non-sensitive sidecar readiness details for the native shell."""
+        return build_health_details(conn, service_version=SERVICE_VERSION)
+
+    @app.get("/diagnostics/copy", dependencies=[Depends(auth)])
+    def diagnostics_copy(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        payload = build_diagnostics_payload(conn, service_version=SERVICE_VERSION)
+        return {
+            "diagnostics": payload,
+            "text": format_diagnostics_text(payload),
+        }
 
     @app.get("/api/user-metrics", dependencies=[Depends(auth)])
     def get_user_metrics(

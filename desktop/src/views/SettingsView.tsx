@@ -9,7 +9,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Callout, Hairline, Kicker } from "../components";
-import { apiFetch } from "../lib/api";
+import { apiFetch, copyDiagnosticsToClipboard, userSafeApiError } from "../lib/api";
 import { palette } from "../theme/tokens";
 
 // ---------------------------------------------------------------------------
@@ -228,6 +228,9 @@ function ApiKeyRow({ name, present }: { name: string; present: boolean }) {
 // View
 // ---------------------------------------------------------------------------
 export const SettingsView = () => {
+  const [diagMessage, setDiagMessage] = useState<string | null>(null);
+  const [diagError, setDiagError] = useState<string | null>(null);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["settings"],
     queryFn: () => apiFetch<{ settings: Record<string, unknown> }>("/settings"),
@@ -245,7 +248,7 @@ export const SettingsView = () => {
   if (error) {
     return (
       <Callout>
-        Couldn't reach the local service. <em>{String((error as Error).message ?? error)}</em>
+        Couldn't reach the local service. <em>{userSafeApiError(error)}</em>
       </Callout>
     );
   }
@@ -262,6 +265,34 @@ export const SettingsView = () => {
         Every settings key, grouped by area. Configurable keys persist on save.
         Read-only keys are shown but not editable.
       </p>
+
+      <div style={{ marginBottom: "1rem" }}>
+        <button
+          className="secondary"
+          onClick={async () => {
+            setDiagMessage(null);
+            setDiagError(null);
+            try {
+              await copyDiagnosticsToClipboard();
+              setDiagMessage("Diagnostics copied to clipboard.");
+            } catch (err) {
+              setDiagError(userSafeApiError(err));
+            }
+          }}
+        >
+          Copy diagnostics
+        </button>
+        {diagMessage && (
+          <p className="dim" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
+            {diagMessage}
+          </p>
+        )}
+        {diagError && (
+          <p style={{ color: palette.warnAmber, marginTop: "0.4rem", fontSize: "0.85rem" }}>
+            {diagError}
+          </p>
+        )}
+      </div>
 
       <div>
         <h2>API keys</h2>
