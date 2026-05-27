@@ -29,6 +29,7 @@ import streamlit as st
 
 from app.components.theme import PALETTE, apply_theme, callout, hairline, kicker
 from app.forms import get_setting, snapshot as snapshot_form
+from app.jobs import x_activity_sync
 from app.pages import open_connection
 
 
@@ -106,6 +107,11 @@ st.caption(
     "Daily operating cockpit per §14.1. Numbers, not narratives. "
     "Trend judgements live in **Progress**; this view is the morning ritual."
 )
+
+if "today_x_sync_message" in st.session_state:
+    st.success(st.session_state.pop("today_x_sync_message"))
+if "today_x_sync_error" in st.session_state:
+    st.error(st.session_state.pop("today_x_sync_error"))
 
 # 1. Snapshot form — pinned until today's snapshot exists.
 if today_row is None:
@@ -372,13 +378,22 @@ hairline()
 st.markdown("## Quick actions")
 b1, b2, b3 = st.columns(3)
 
-# Each button: clicking sets the active-tab session-state hint and
-# navigates to the Manual Entry page in one click. `st.switch_page`
-# (Streamlit 1.30+) handles the navigation; the hint primes the right
-# tab once Manual Entry boots.
-if b1.button("Log a post", width="stretch"):
-    st.session_state.manual_entry_active_tab = "Post / Reply"
-    st.switch_page("pages/8_Manual_Entry.py")
+# X activity sync is explicit: one click runs the existing API jobs, then
+# refreshes the page so the daily reps and recent activity blocks read the row.
+if b1.button("Sync X activity", type="primary", width="stretch"):
+    try:
+        _summary = x_activity_sync.run(conn)
+        _activity = _summary["activity"]["daily_activity"]
+        st.session_state.today_x_sync_message = (
+            "X sync complete: "
+            f"+{_summary['import_posts']['posts_inserted']} imported, "
+            f"{_summary['metrics']['posts_refreshed']} metrics refreshed, "
+            f"reps {_activity['posts_shipped']}/{_activity['replies_shipped']}/"
+            f"{_activity['quotes_shipped']}."
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.session_state.today_x_sync_error = f"X activity sync failed: {exc}"
+    st.rerun()
 if b2.button("Classify untagged", width="stretch"):
     st.session_state.manual_entry_active_tab = "Needs tagging"
     st.switch_page("pages/8_Manual_Entry.py")
@@ -387,8 +402,8 @@ if b3.button("Log Stir tester", width="stretch"):
     st.switch_page("pages/8_Manual_Entry.py")
 
 st.markdown(
-    "<p class='faint'>Each button jumps straight to the Manual Entry page "
-    "with the right tab pre-flagged.</p>",
+    "<p class='faint'>X sync imports your owned posts/replies from the API. "
+    "Manual Entry remains available for corrections, classification, and tester logs.</p>",
     unsafe_allow_html=True,
 )
 

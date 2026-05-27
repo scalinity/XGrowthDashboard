@@ -8,12 +8,14 @@ existing pure forms/settings helpers — validation + FormError semantics unchan
 from __future__ import annotations
 
 import sqlite3
+from datetime import date as _date_t
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.db import apply_migrations, connect
+from app.jobs import x_activity_sync
 from app.service.app import create_app
 from app import x_client
 from scripts import collect_account_snapshot
@@ -104,6 +106,71 @@ def test_user_metrics_fetch_persists_today_snapshot(
 
     today = client.get("/views/today", headers=AUTH).json()
     assert today["snapshot"]["followers_count"] == 88
+
+
+def test_sync_today_from_x_imports_posts_and_updates_daily_reps(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    today_iso = _date_t.today().isoformat()
+
+    def fake_snapshot_run(conn: sqlite3.Connection) -> dict[str, object]:
+        return {
+            "snapshot_inserted": False,
+            "skipped_reason": "duplicate_day_manual_entry_present",
+            "error": None,
+        }
+
+    def fake_import_run(
+        conn: sqlite3.Connection, *, backfill: bool = False
+    ) -> dict[str, object]:
+        assert backfill is False
+        conn.executemany(
+            """
+            INSERT INTO posts
+              (x_post_id, created_at_utc, created_date, text, type,
+               posted_via, manual_confirmation_status)
+            VALUES (?, datetime('now'), ?, ?, ?, 'api', 'needs_metrics')
+            """,
+            [
+                ("sync-post", today_iso, "today post", "standalone"),
+                ("sync-reply", today_iso, "today reply", "reply"),
+                ("sync-quote", today_iso, "today quote", "quote"),
+            ],
+        )
+        return {
+            "posts_inserted": 3,
+            "posts_skipped_existing": 0,
+            "rate_limit_hits": 0,
+            "error": None,
+        }
+
+    def fake_metrics_run(
+        conn: sqlite3.Connection, *, batch_limit: int = 100
+    ) -> dict[str, object]:
+        assert batch_limit == 100
+        return {"posts_refreshed": 3, "candidates_considered": 3, "error": None}
+
+    monkeypatch.setattr(
+        x_activity_sync.collect_account_snapshot, "run", fake_snapshot_run
+    )
+    monkeypatch.setattr(x_activity_sync.import_recent_posts, "run", fake_import_run)
+    monkeypatch.setattr(x_activity_sync.post_metrics_refresh, "run", fake_metrics_run)
+
+    resp = client.post("/api/sync-today", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["import_posts"]["posts_inserted"] == 3
+    assert body["metrics"]["posts_refreshed"] == 3
+    assert body["activity"]["daily_activity"]["posts_shipped"] == 1
+    assert body["activity"]["daily_activity"]["replies_shipped"] == 1
+    assert body["activity"]["daily_activity"]["quotes_shipped"] == 1
+    assert body["activity"]["daily_activity"]["reply_sessions_completed"] == 1
+
+    today = client.get("/views/today", headers=AUTH).json()
+    assert today["daily_reps"]["row"]["posts_shipped"] == 1
+    assert today["daily_reps"]["row"]["replies_shipped"] == 1
+    assert today["recent_posts"][0]["confirm_status"] == "needs_metrics"
 
 
 def test_post_snapshot_validation_returns_400_with_field_errors(
