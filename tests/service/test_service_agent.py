@@ -8,7 +8,9 @@ endpoints reuse the existing client.send_message_sync persistence path.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -419,3 +421,73 @@ def test_stream_message_handles_empty_tool_calls_and_completes(tmp_path: Path) -
     assert "event: done" in text
     assert "event: error" not in text
     assert "invalid tool call" in text
+
+
+def test_stream_message_streams_coach_text_before_final_assistant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _FakeStream:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return None
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            yield SimpleNamespace(type="text", text="coach says ")
+            yield SimpleNamespace(type="text", text="move now")
+
+        def get_final_message(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="coach says move now")],
+                usage=SimpleNamespace(input_tokens=11, output_tokens=5),
+            )
+
+    class _FakeMessages:
+        def create(self, **kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="coach says move now")],
+                usage=SimpleNamespace(input_tokens=11, output_tokens=5),
+            )
+
+        def stream(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert "tools" not in kwargs
+            return _FakeStream()
+
+    class _FakeAnthropic:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.messages = _FakeMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stub-key")
+    monkeypatch.setitem(
+        sys.modules,
+        "anthropic",
+        SimpleNamespace(Anthropic=_FakeAnthropic),
+    )
+    client = _build_client(tmp_path / "coach_streaming.db")
+    cid = client.post(
+        "/agent/conversations",
+        json={"title": "Coach session", "context_seed": "coach"},
+        headers=AUTH,
+    ).json()["conversation_id"]
+
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "What should I do next?"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    text = resp.text
+    assert "event: text_delta" in text
+    assert "coach says move now" in text
+    assert text.index("event: text_delta") < text.index("event: assistant")
+    assert "event: done" in text
+
+    listed = client.get(f"/agent/conversations/{cid}/messages", headers=AUTH)
+    assert listed.status_code == 200
+    messages = listed.json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == "coach says move now"
+    assert messages[1]["input_tokens"] == 11
+    assert messages[1]["output_tokens"] == 5

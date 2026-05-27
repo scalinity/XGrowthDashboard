@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.agent import _internal_tools, confirmation, invariants
+from app.agent import _internal_tools, confirmation, invariants, coach as _coach
 from app.agent.client import AgentClient, start_conversation, delete_conversation
 from app.agent.content_types import get_content_type_gaps, get_recommendation_window_days
 from app.agent.velocity import (
@@ -1343,18 +1343,29 @@ def _coach_turn(
         assistant_text = "".join(text_parts).strip()
         in_tok = int(getattr(resp.usage, "input_tokens", 0) or 0)
         out_tok = int(getattr(resp.usage, "output_tokens", 0) or 0)
+        result = _coach.enforce(
+            assistant_text,
+            conn,
+            refuse_without_evidence=bool(get_setting(conn, "coach_refuse_without_evidence", True)),
+        )
 
         # Persist assistant message.
         conn.execute(
             "INSERT INTO agent_messages "
-            "(conversation_id, role, content, model, input_tokens, output_tokens) "
-            "VALUES (?, 'assistant', ?, ?, ?, ?)",
-            (conversation_id, assistant_text, model, in_tok, out_tok),
+            "(conversation_id, role, content, model, input_tokens, output_tokens, evidence_citations_json) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+            (
+                conversation_id,
+                result.clean_text,
+                model,
+                in_tok,
+                out_tok,
+                json.dumps([c.to_dict() for c in result.surviving]) if result.surviving else None,
+            ),
         )
         conn.commit()
-
         return {
-            "user_text": user_text, "assistant_text": assistant_text,
+            "user_text": user_text, "assistant_text": result.clean_text,
             "tool_calls": [], "input_tokens": in_tok, "output_tokens": out_tok,
             "cost_usd": None, "model": model, "error": None,
         }
@@ -1366,6 +1377,110 @@ def _coach_turn(
         }
 
 
+def _coach_turn_stream(
+    conn: sqlite3.Connection, conversation_id: int, user_text: str
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Coach SSE turn: advice-only streaming text with no tool surface."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        yield (
+            "error",
+            {
+                "error": "Anthropic API key not configured. Set it in Settings → API keys."
+            },
+        )
+        return
+
+    from app.agent import prompt_builder  # lazy to avoid circular imports
+
+    import anthropic
+
+    conn.execute(
+        "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'user', ?)",
+        (conversation_id, user_text),
+    )
+    conn.commit()
+
+    system_prompt = prompt_builder.build_system_prompt(conn)
+    rows = conn.execute(
+        "SELECT role, content FROM agent_messages "
+        "WHERE conversation_id = ? ORDER BY id",
+        (conversation_id,),
+    ).fetchall()
+    messages = [{"role": r["role"], "content": r["content"]} for r in rows]
+
+    model = "claude-sonnet-4-20250514"
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
+        with client.messages.stream(
+            model=model,
+            max_tokens=2048,
+            system=system_prompt,
+            messages=messages,
+        ) as stream:
+            for event in stream:
+                if getattr(event, "type", None) == "text":
+                    yield ("text_delta", {"text": getattr(event, "text", "")})
+            resp = stream.get_final_message()
+
+        text_parts = [
+            getattr(b, "text", "")
+            for b in resp.content
+            if getattr(b, "type", None) == "text"
+        ]
+        assistant_text = "".join(text_parts).strip()
+        usage = getattr(resp, "usage", None)
+        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+        result = _coach.enforce(
+            assistant_text,
+            conn,
+            refuse_without_evidence=bool(get_setting(conn, "coach_refuse_without_evidence", True)),
+        )
+
+        conn.execute(
+            "INSERT INTO agent_messages "
+            "(conversation_id, role, content, model, input_tokens, output_tokens, evidence_citations_json) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+            (
+                conversation_id,
+                result.clean_text,
+                model,
+                in_tok,
+                out_tok,
+                json.dumps([c.to_dict() for c in result.surviving]) if result.surviving else None,
+            ),
+        )
+        conn.commit()
+        yield (
+            "assistant",
+            {
+                "text": result.clean_text,
+                "model": model,
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+            },
+        )
+        yield (
+            "done",
+            {
+                "user_text": user_text,
+                "assistant_text": result.clean_text,
+                "tool_calls": [],
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "cost_usd": None,
+                "model": model,
+                "error": None,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — surface all errors to the UI
+        yield ("error", {"error": f"{type(exc).__name__}: {exc}"})
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
 def create_app(
     *,
     token: str,
@@ -2150,7 +2265,7 @@ def create_app(
         rows = conn.execute(
             """
             SELECT id, role, content, tool_calls_json, tool_call_id, model,
-                   input_tokens, output_tokens, confidence_label
+                   input_tokens, output_tokens, confidence_label, evidence_citations_json
             FROM agent_messages
             WHERE conversation_id = ?
               AND role != 'tool_result'
@@ -2255,13 +2370,12 @@ def create_app(
                     (conversation_id,),
                 ).fetchone()
                 if ctx and ctx["context_seed"] == "coach":
-                    coach_turn = _coach_turn(conn, conversation_id, body.text)
-                    if coach_turn.get("error"):
-                        yield _sse("error", {"error": coach_turn["error"]})
-                        return
-                    assistant_text = coach_turn.get("assistant_text") or ""
-                    yield _sse("assistant", {"text": assistant_text})
-                    yield _sse("done", coach_turn)
+                    for event_type, payload in _coach_turn_stream(
+                        conn, conversation_id, body.text
+                    ):
+                        yield _sse(event_type, payload)
+                        if event_type == "error":
+                            return
                     return
 
                 client = agent_factory()
