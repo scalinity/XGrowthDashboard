@@ -52,6 +52,7 @@ def run(conn: sqlite3.Connection, *, limit: int = 50) -> dict[str, Any]:
           FROM posts p
           LEFT JOIN post_classifications c ON c.post_id = p.id
          WHERE c.id IS NULL
+           AND p.posted_via IN ('api', 'xurl', 'imported')
          ORDER BY p.created_at_utc DESC, p.id DESC
          LIMIT ?
         """,

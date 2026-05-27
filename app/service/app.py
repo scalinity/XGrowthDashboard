@@ -45,7 +45,6 @@ from app.agent.reply_targets import engagement_footnote as _engagement_footnote
 from app.agent.tools import (
     _load_engagement_surface_settings,
     _score_reply_candidates,
-    _find_reply_targets,
     _save_draft_reply,
     _record_reply_target,
     _outline_blog_to_dict,
@@ -60,7 +59,7 @@ from app.agent import inspiration as _inspiration
 from app.db import apply_migrations, connect
 from app.forms import FormError, get_setting, set_setting
 from app.forms.correction import submit_correction
-from app.forms.post_log import submit_post
+from app.forms.post_log import submit_post, add_post_id
 from app.forms.snapshot import submit_snapshot
 from app.forms.classify import submit_classification
 from app.forms.daily_reps import submit_daily_activity
@@ -68,7 +67,7 @@ from app.forms.queues import needs_post_id, needs_tagging
 from app.forms.stir_event import submit_stir_event
 from app.forms.stir_tester import submit_tester
 from app.forms.weekly_review import submit_weekly_review
-from app.jobs import x_activity_sync, post_classification_sync
+from app.jobs import x_activity_sync, post_classification_sync, agent_ops
 from app.paths import resolve_db_path
 from app.secret_store import resolve_secret, store_secret
 from app.service.security import BearerTokenAuth
@@ -577,6 +576,20 @@ def _form_error(exc: FormError) -> HTTPException:
         status_code=400,
         detail={"message": str(exc), "field_errors": exc.field_errors},
     )
+
+
+def _automation_queue_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Normalize manual cleanup queue rows for Streamlit-era and native clients."""
+    payload = dict(row)
+    preview = payload.get("preview") or payload.get("text_preview") or ""
+    created = (
+        payload.get("created_at_utc")
+        or payload.get("created_at")
+        or payload.get("created_date")
+    )
+    payload["text_preview"] = preview
+    payload["created_at"] = created
+    return payload
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -1744,8 +1757,7 @@ def create_app(
     ) -> dict[str, Any]:
         """Score all pending reply-target candidates."""
         try:
-            result = _score_reply_candidates(conn)
-            return {"ok": True, **result}
+            return agent_ops.score_pending_reply_targets(conn)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1757,7 +1769,7 @@ def create_app(
         try:
             from app.jobs import grok_discovery_sweep
 
-            summary = grok_discovery_sweep.run(conn)
+            summary = grok_discovery_sweep.run_once_locked(conn)
             severity, message = grok_discovery_sweep.format_sweep_summary_for_ui(summary)
             return {
                 "ok": severity != "error",
@@ -1782,10 +1794,9 @@ def create_app(
     def find_reply_targets(
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict[str, Any]:
-        """Discover new reply-target candidates via the agent."""
+        """Load active target accounts used by reply discovery workflows."""
         try:
-            result = _find_reply_targets(conn)
-            return {"ok": True, **result}
+            return agent_ops.find_reply_targets(conn)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1957,6 +1968,25 @@ def create_app(
             raise _form_error(exc) from exc
         return {"post_id": post_id}
 
+    @app.put("/forms/post-id", dependencies=[Depends(auth)])
+    def put_post_id(
+        payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
+    ) -> dict[str, Any]:
+        try:
+            post_id = int(payload.get("post_id"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="post_id must be an integer") from exc
+        try:
+            add_post_id(
+                conn,
+                post_id,
+                str(payload.get("x_post_id") or ""),
+                manual_url=payload.get("manual_url"),
+            )
+        except FormError as exc:
+            raise _form_error(exc) from exc
+        return {"ok": True, "post_id": post_id}
+
     @app.post("/forms/correction", dependencies=[Depends(auth)])
     def post_correction(
         payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
@@ -1972,7 +2002,9 @@ def create_app(
         payload: dict[str, Any], conn: sqlite3.Connection = Depends(get_conn)
     ) -> dict[str, Any]:
         try:
-            cid = submit_classification(conn, payload)
+            cid = submit_classification(
+                conn, payload, allow_overwrite=bool(payload.get("allow_overwrite"))
+            )
         except FormError as exc:
             raise _form_error(exc) from exc
         return {"classification_id": cid}
@@ -2012,14 +2044,14 @@ def create_app(
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict[str, Any]:
         rows = needs_tagging(conn)
-        return {"posts": [dict(r) for r in rows]}
+        return {"posts": [_automation_queue_row(r) for r in rows]}
 
     @app.get("/views/needs-post-id", dependencies=[Depends(auth)])
     def view_needs_post_id(
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> dict[str, Any]:
         rows = needs_post_id(conn)
-        return {"posts": [dict(r) for r in rows]}
+        return {"posts": [_automation_queue_row(r) for r in rows]}
 
     # ----- Settings read/update (§14.7) -----
 
@@ -2121,13 +2153,45 @@ def create_app(
                    input_tokens, output_tokens, confidence_label
             FROM agent_messages
             WHERE conversation_id = ?
+              AND role != 'tool_result'
             ORDER BY id ASC
             """,
             (conversation_id,),
         ).fetchall()
+        tool_result_rows = conn.execute(
+            """
+            SELECT tool_call_id, content
+            FROM agent_messages
+            WHERE conversation_id = ?
+              AND role = 'tool_result'
+              AND tool_call_id IS NOT NULL
+            ORDER BY id ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
+        tool_results_by_id = {
+            r["tool_call_id"]: r["content"] for r in tool_result_rows
+        }
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            msg = dict(row)
+            msg["tool_results_json"] = None
+            if msg.get("tool_calls_json"):
+                try:
+                    calls = json.loads(msg["tool_calls_json"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    calls = []
+                results = [
+                    {"tool_call_id": call.get("id"), "content": tool_results_by_id[call.get("id")]}
+                    for call in calls
+                    if isinstance(call, dict) and call.get("id") in tool_results_by_id
+                ]
+                if results:
+                    msg["tool_results_json"] = json.dumps(results)
+            messages.append(msg)
         return {
             "conversation_id": conversation_id,
-            "messages": [dict(r) for r in rows],
+            "messages": messages,
         }
 
     @app.post(
@@ -2183,6 +2247,7 @@ def create_app(
             conn = factory()
             try:
                 yield _sse("start", {"conversation_id": conversation_id})
+                yield _sse("user", {"text": body.text})
                 yield _sse("thinking_delta", {"text": "Preparing agent context..."})
 
                 ctx = conn.execute(

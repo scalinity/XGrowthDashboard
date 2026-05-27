@@ -8,6 +8,7 @@
  * No useEffect.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import type { ReactNode } from "react";
 
 import { Callout, Hairline, Kicker } from "../components";
@@ -69,6 +70,24 @@ interface NeedsTaggingPost {
 interface NeedsIdPost {
   id: number;
   text_preview: string;
+  created_at: string;
+}
+
+interface FindReplyTargetsResponse {
+  ok: boolean;
+  account_count: number;
+  accounts: Array<{
+    x_handle: string;
+    display_name?: string | null;
+    lane?: string | null;
+  }>;
+}
+
+interface ScoreCandidatesResponse {
+  ok: boolean;
+  considered: number;
+  scored_count: number;
+  errors: string[];
 }
 
 interface ActionCardProps {
@@ -194,6 +213,296 @@ function QueueList({
   );
 }
 
+function ErrorText({ error }: { error: unknown }) {
+  if (!error) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  return <ResultLine tone="warn">{message}</ResultLine>;
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label style={{ display: "grid", gap: "0.3rem", color: palette.boneDim, fontSize: "0.78rem" }}>
+      <span className="kicker">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function ManualFallback({ onChanged }: { onChanged: () => void }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [postType, setPostType] = useState("post");
+  const [postText, setPostText] = useState("");
+  const [postXId, setPostXId] = useState("");
+  const [postUrl, setPostUrl] = useState("");
+  const [classifyPostId, setClassifyPostId] = useState("");
+  const [pillar, setPillar] = useState("stir");
+  const [audience, setAudience] = useState("icp");
+  const [cta, setCta] = useState("none");
+  const [allowOverwrite, setAllowOverwrite] = useState(false);
+  const [idPostId, setIdPostId] = useState("");
+  const [idXPostId, setIdXPostId] = useState("");
+  const [idUrl, setIdUrl] = useState("");
+  const [dailyDate, setDailyDate] = useState(today);
+  const [dailyPosts, setDailyPosts] = useState("0");
+  const [dailyReplies, setDailyReplies] = useState("0");
+  const [dailyQuotes, setDailyQuotes] = useState("0");
+  const [snapshotId, setSnapshotId] = useState("");
+  const [correctionField, setCorrectionField] = useState("followers_count");
+  const [correctionValue, setCorrectionValue] = useState("");
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [testerAlias, setTesterAlias] = useState("");
+  const [testerFirstSeen, setTesterFirstSeen] = useState(today);
+  const [testerStatus, setTesterStatus] = useState("lead");
+
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box" as const,
+    minHeight: 34,
+    border: `1px solid ${palette.hairline}`,
+    borderRadius: 6,
+    background: palette.ink,
+    color: palette.bone,
+    padding: "0.45rem 0.55rem",
+  };
+
+  const logPost = useMutation({
+    mutationFn: () => apiFetch<{ post_id: number }>("/forms/post", {
+      method: "POST",
+      body: JSON.stringify({
+        type: postType,
+        text: postText,
+        x_post_id: postXId,
+        manual_url: postUrl,
+      }),
+    }),
+    onSuccess: onChanged,
+  });
+
+  const classifyPost = useMutation({
+    mutationFn: () => apiFetch<{ classification_id: number }>("/forms/classify", {
+      method: "POST",
+      body: JSON.stringify({
+        post_id: Number(classifyPostId),
+        pillar,
+        audience,
+        cta,
+        allow_overwrite: allowOverwrite,
+      }),
+    }),
+    onSuccess: onChanged,
+  });
+
+  const confirmPostId = useMutation({
+    mutationFn: () => apiFetch<{ ok: boolean }>("/forms/post-id", {
+      method: "PUT",
+      body: JSON.stringify({ post_id: Number(idPostId), x_post_id: idXPostId, manual_url: idUrl }),
+    }),
+    onSuccess: onChanged,
+  });
+
+  const saveDaily = useMutation({
+    mutationFn: () => apiFetch<{ result: string }>("/forms/daily-activity", {
+      method: "POST",
+      body: JSON.stringify({
+        activity_date: dailyDate,
+        posts_shipped: Number(dailyPosts),
+        replies_shipped: Number(dailyReplies),
+        quotes_shipped: Number(dailyQuotes),
+        reply_sessions_completed: Number(dailyReplies) > 0 ? 1 : 0,
+        high_quality_reply_targets_found: 0,
+      }),
+    }),
+    onSuccess: onChanged,
+  });
+
+  const saveCorrection = useMutation({
+    mutationFn: () => apiFetch<{ correction_id: number }>("/forms/correction", {
+      method: "POST",
+      body: JSON.stringify({
+        snapshot_id: Number(snapshotId),
+        field_name: correctionField,
+        new_value: correctionValue,
+        reason: correctionReason,
+      }),
+    }),
+    onSuccess: onChanged,
+  });
+
+  const saveTester = useMutation({
+    mutationFn: () => apiFetch<{ tester_id: number }>("/forms/stir-tester", {
+      method: "POST",
+      body: JSON.stringify({ alias: testerAlias, first_seen_date: testerFirstSeen, status: testerStatus }),
+    }),
+    onSuccess: onChanged,
+  });
+
+  return (
+    <details style={{ borderTop: `1px solid ${palette.hairline}`, paddingTop: "1rem" }}>
+      <summary style={{ cursor: "pointer", color: palette.bone, fontSize: "1rem" }}>
+        Manual fallback
+      </summary>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+          gap: "1rem",
+          marginTop: "1rem",
+        }}
+      >
+        <section style={{ border: `1px solid ${palette.hairline}`, borderRadius: 6, padding: "0.8rem" }}>
+          <Kicker>POST LOG</Kicker>
+          <div style={{ display: "grid", gap: "0.55rem", marginTop: "0.65rem" }}>
+            <Field label="type">
+              <select value={postType} onChange={(event) => setPostType(event.target.value)} style={inputStyle}>
+                <option value="post">post</option>
+                <option value="reply">reply</option>
+                <option value="quote">quote</option>
+              </select>
+            </Field>
+            <Field label="text">
+              <textarea value={postText} onChange={(event) => setPostText(event.target.value)} rows={3} style={inputStyle} />
+            </Field>
+            <Field label="x post id">
+              <input value={postXId} onChange={(event) => setPostXId(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="url">
+              <input value={postUrl} onChange={(event) => setPostUrl(event.target.value)} style={inputStyle} />
+            </Field>
+            <button onClick={() => logPost.mutate()} disabled={logPost.isPending}>Log post</button>
+            {logPost.isSuccess && <ResultLine>Post #{logPost.data.post_id} logged.</ResultLine>}
+            <ErrorText error={logPost.error} />
+          </div>
+        </section>
+
+        <section style={{ border: `1px solid ${palette.hairline}`, borderRadius: 6, padding: "0.8rem" }}>
+          <Kicker>CLASSIFY</Kicker>
+          <div style={{ display: "grid", gap: "0.55rem", marginTop: "0.65rem" }}>
+            <Field label="post id">
+              <input value={classifyPostId} onChange={(event) => setClassifyPostId(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="pillar">
+              <select value={pillar} onChange={(event) => setPillar(event.target.value)} style={inputStyle}>
+                <option value="stir">stir</option>
+                <option value="build">build</option>
+                <option value="self">self</option>
+              </select>
+            </Field>
+            <Field label="audience">
+              <select value={audience} onChange={(event) => setAudience(event.target.value)} style={inputStyle}>
+                <option value="icp">icp</option>
+                <option value="other">other</option>
+              </select>
+            </Field>
+            <Field label="cta">
+              <select value={cta} onChange={(event) => setCta(event.target.value)} style={inputStyle}>
+                <option value="none">none</option>
+                <option value="ask">ask</option>
+              </select>
+            </Field>
+            <label style={{ color: palette.boneDim, fontSize: "0.82rem" }}>
+              <input type="checkbox" checked={allowOverwrite} onChange={(event) => setAllowOverwrite(event.target.checked)} /> overwrite
+            </label>
+            <button onClick={() => classifyPost.mutate()} disabled={classifyPost.isPending}>Save classification</button>
+            {classifyPost.isSuccess && <ResultLine>Classification #{classifyPost.data.classification_id} saved.</ResultLine>}
+            <ErrorText error={classifyPost.error} />
+          </div>
+        </section>
+
+        <section style={{ border: `1px solid ${palette.hairline}`, borderRadius: 6, padding: "0.8rem" }}>
+          <Kicker>QUEUE FIX</Kicker>
+          <div style={{ display: "grid", gap: "0.55rem", marginTop: "0.65rem" }}>
+            <Field label="post id">
+              <input value={idPostId} onChange={(event) => setIdPostId(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="x post id">
+              <input value={idXPostId} onChange={(event) => setIdXPostId(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="url">
+              <input value={idUrl} onChange={(event) => setIdUrl(event.target.value)} style={inputStyle} />
+            </Field>
+            <button onClick={() => confirmPostId.mutate()} disabled={confirmPostId.isPending}>Confirm X ID</button>
+            {confirmPostId.isSuccess && <ResultLine>X ID saved.</ResultLine>}
+            <ErrorText error={confirmPostId.error} />
+          </div>
+        </section>
+
+        <section style={{ border: `1px solid ${palette.hairline}`, borderRadius: 6, padding: "0.8rem" }}>
+          <Kicker>DAILY REPS</Kicker>
+          <div style={{ display: "grid", gap: "0.55rem", marginTop: "0.65rem" }}>
+            <Field label="date">
+              <input value={dailyDate} onChange={(event) => setDailyDate(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="posts">
+              <input value={dailyPosts} onChange={(event) => setDailyPosts(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="replies">
+              <input value={dailyReplies} onChange={(event) => setDailyReplies(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="quotes">
+              <input value={dailyQuotes} onChange={(event) => setDailyQuotes(event.target.value)} style={inputStyle} />
+            </Field>
+            <button onClick={() => saveDaily.mutate()} disabled={saveDaily.isPending}>Save reps</button>
+            {saveDaily.isSuccess && <ResultLine>Daily reps saved.</ResultLine>}
+            <ErrorText error={saveDaily.error} />
+          </div>
+        </section>
+
+        <section style={{ border: `1px solid ${palette.hairline}`, borderRadius: 6, padding: "0.8rem" }}>
+          <Kicker>CORRECTION</Kicker>
+          <div style={{ display: "grid", gap: "0.55rem", marginTop: "0.65rem" }}>
+            <Field label="snapshot id">
+              <input value={snapshotId} onChange={(event) => setSnapshotId(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="field">
+              <select value={correctionField} onChange={(event) => setCorrectionField(event.target.value)} style={inputStyle}>
+                <option value="followers_count">followers_count</option>
+                <option value="following_count">following_count</option>
+                <option value="post_count">post_count</option>
+                <option value="listed_count">listed_count</option>
+                <option value="bio_text">bio_text</option>
+              </select>
+            </Field>
+            <Field label="new value">
+              <input value={correctionValue} onChange={(event) => setCorrectionValue(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="reason">
+              <textarea value={correctionReason} onChange={(event) => setCorrectionReason(event.target.value)} rows={2} style={inputStyle} />
+            </Field>
+            <button onClick={() => saveCorrection.mutate()} disabled={saveCorrection.isPending}>Save correction</button>
+            {saveCorrection.isSuccess && <ResultLine>Correction #{saveCorrection.data.correction_id} saved.</ResultLine>}
+            <ErrorText error={saveCorrection.error} />
+          </div>
+        </section>
+
+        <section style={{ border: `1px solid ${palette.hairline}`, borderRadius: 6, padding: "0.8rem" }}>
+          <Kicker>TESTER</Kicker>
+          <div style={{ display: "grid", gap: "0.55rem", marginTop: "0.65rem" }}>
+            <Field label="alias">
+              <input value={testerAlias} onChange={(event) => setTesterAlias(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="first seen">
+              <input value={testerFirstSeen} onChange={(event) => setTesterFirstSeen(event.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="status">
+              <select value={testerStatus} onChange={(event) => setTesterStatus(event.target.value)} style={inputStyle}>
+                <option value="lead">lead</option>
+                <option value="downloaded">downloaded</option>
+                <option value="activated">activated</option>
+                <option value="cook_mode_used">cook_mode_used</option>
+                <option value="churned">churned</option>
+                <option value="unknown">unknown</option>
+              </select>
+            </Field>
+            <button onClick={() => saveTester.mutate()} disabled={saveTester.isPending}>Save tester</button>
+            {saveTester.isSuccess && <ResultLine>Tester #{saveTester.data.tester_id} saved.</ResultLine>}
+            <ErrorText error={saveTester.error} />
+          </div>
+        </section>
+      </div>
+    </details>
+  );
+}
+
 export const ManualEntryView = () => {
   const nav = useNav();
   const queryClient = useQueryClient();
@@ -231,12 +540,12 @@ export const ManualEntryView = () => {
   });
 
   const findReplyTargets = useMutation({
-    mutationFn: () => apiFetch<Record<string, unknown>>("/agent/find-reply-targets", { method: "POST" }),
+    mutationFn: () => apiFetch<FindReplyTargetsResponse>("/agent/find-reply-targets", { method: "POST" }),
     onSuccess: refreshAutomationData,
   });
 
   const scoreCandidates = useMutation({
-    mutationFn: () => apiFetch<Record<string, unknown>>("/agent/score-candidates", { method: "POST" }),
+    mutationFn: () => apiFetch<ScoreCandidatesResponse>("/agent/score-candidates", { method: "POST" }),
     onSuccess: refreshAutomationData,
   });
 
@@ -330,14 +639,19 @@ export const ManualEntryView = () => {
 
       <ActionCard
         kicker="AGENT"
-        title="Find reply targets from the agent context"
-        body="Use the existing agent target-account and discovery tools to propose new reply candidates without hand-logging a thread."
-        button="Find targets"
+        title="Load target accounts from agent context"
+        body="Read active target-account rows that guide reply discovery. Candidate creation happens through Grok discovery or the reply-target form."
+        button="Load targets"
         pending={findReplyTargets.isPending}
         onClick={() => findReplyTargets.mutate()}
         result={
           <>
-            {findReplyTargets.isSuccess && <ResultLine>Reply discovery completed.</ResultLine>}
+            {findReplyTargets.isSuccess && (
+              <ResultLine>
+                {findReplyTargets.data.account_count} target accounts loaded
+                {findReplyTargets.data.accounts.length > 0 && ` · ${findReplyTargets.data.accounts.slice(0, 3).map((account) => account.x_handle).join(" · ")}`}
+              </ResultLine>
+            )}
             {findReplyTargets.isError && <ResultLine tone="warn">{String((findReplyTargets.error as Error).message ?? findReplyTargets.error)}</ResultLine>}
           </>
         }
@@ -346,13 +660,18 @@ export const ManualEntryView = () => {
       <ActionCard
         kicker="QUEUE SCORING"
         title="Score candidate replies"
-        body="Run the scoring model and thread-classifier lint over pending candidates so Reply Target Queue can rank the next best action."
+        body="Recompute scores for every pending reply target so Reply Target Queue can rank the next best action."
         button="Score queue"
         pending={scoreCandidates.isPending}
         onClick={() => scoreCandidates.mutate()}
         result={
           <>
-            {scoreCandidates.isSuccess && <ResultLine>Candidate scoring completed.</ResultLine>}
+            {scoreCandidates.isSuccess && (
+              <ResultLine tone={scoreCandidates.data.errors.length ? "warn" : "ok"}>
+                {scoreCandidates.data.scored_count}/{scoreCandidates.data.considered} candidates scored
+                {scoreCandidates.data.errors.length > 0 && ` · ${scoreCandidates.data.errors.join(" · ")}`}
+              </ResultLine>
+            )}
             {scoreCandidates.isError && <ResultLine tone="warn">{String((scoreCandidates.error as Error).message ?? scoreCandidates.error)}</ResultLine>}
           </>
         }
@@ -382,6 +701,8 @@ export const ManualEntryView = () => {
           items={idItems}
         />
       </div>
+
+      <ManualFallback onChanged={refreshAutomationData} />
 
       <Hairline />
 

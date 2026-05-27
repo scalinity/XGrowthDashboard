@@ -1,4 +1,4 @@
-"""Agent Ops — automation cockpit replacing the old manual-entry hub."""
+"""Agent Ops — automation cockpit with manual fallback write paths."""
 
 from __future__ import annotations
 
@@ -11,11 +11,22 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import streamlit as st
 
-from app.agent.tools import _find_reply_targets, _score_reply_candidates
 from app.components.theme import apply_theme, callout, hairline, kicker
-from app.forms import queues
-from app.jobs import post_classification_sync, x_activity_sync
-from app.jobs.grok_discovery_sweep import format_sweep_summary_for_ui, run as run_grok_sweep
+from app.forms import (
+    classify,
+    correction,
+    daily_reps,
+    post_log,
+    queues,
+    snapshot,
+    stir_event,
+    stir_tester,
+)
+from app.jobs import agent_ops, post_classification_sync, x_activity_sync
+from app.jobs.grok_discovery_sweep import (
+    format_sweep_summary_for_ui,
+    run_once_locked as run_grok_sweep,
+)
 from app.pages import open_connection
 
 st.title("Agent Ops")
@@ -40,6 +51,7 @@ for _kind, _renderer in (("success", st.success), ("warning", st.warning), ("err
 needs_tagging = queues.needs_tagging(conn)
 needs_post_id = queues.needs_post_id(conn)
 queue_debt = len(needs_tagging) + len(needs_post_id)
+
 
 callout(
     "Run the collectors first, then let the agent resolve and score the work. "
@@ -100,18 +112,23 @@ st.markdown("## Agent work")
 a1, a2, a3 = st.columns(3)
 if a1.button("Find reply targets", type="primary", width="stretch"):
     try:
-        with st.spinner("Finding reply targets…"):
-            _find_reply_targets(conn)
-        _remember("success", "Reply target discovery completed.")
+        with st.spinner("Loading target accounts…"):
+            result = agent_ops.find_reply_targets(conn)
+        _remember("success", f"Loaded {result['account_count']} active target accounts.")
     except Exception as exc:  # noqa: BLE001
-        _remember("error", f"Reply discovery failed: {type(exc).__name__}: {exc}")
+        _remember("error", f"Target-account load failed: {type(exc).__name__}: {exc}")
     st.rerun()
 
 if a2.button("Score candidate queue", width="stretch"):
     try:
         with st.spinner("Scoring reply candidates…"):
-            _score_reply_candidates(conn)
-        _remember("success", "Candidate scoring completed.")
+            result = agent_ops.score_pending_reply_targets(conn)
+        errors = result.get("errors") or []
+        _remember(
+            "warning" if errors else "success",
+            f"Scored {result['scored_count']}/{result['considered']} candidates."
+            + (" Notes: " + " · ".join(errors) if errors else ""),
+        )
     except Exception as exc:  # noqa: BLE001
         _remember("error", f"Candidate scoring failed: {type(exc).__name__}: {exc}")
     st.rerun()
@@ -143,3 +160,40 @@ if r3.button("Account Researcher", width="stretch"):
     st.switch_page("pages/13_Account_Researcher.py")
 if r4.button("Settings", width="stretch"):
     st.switch_page("pages/7_Settings.py")
+
+hairline()
+st.markdown("## Manual fallback")
+st.caption(
+    "Automation is the default path, but every write primitive remains available "
+    "for recovery, inspection, or data the X API cannot supply."
+)
+with st.expander("Open manual forms", expanded=False):
+    tabs = st.tabs(
+        [
+            "Snapshot",
+            "Post / reply",
+            "Classify",
+            "Correction",
+            "Daily reps",
+            "Stir event",
+            "Tester",
+            "Queues",
+        ]
+    )
+    with tabs[0]:
+        snapshot.render(conn, key_prefix="agent_ops_snapshot")
+    with tabs[1]:
+        post_log.render(conn, key_prefix="agent_ops_post")
+    with tabs[2]:
+        classify.render(conn, key_prefix="agent_ops_classify")
+    with tabs[3]:
+        correction.render(conn, key_prefix="agent_ops_correction")
+    with tabs[4]:
+        daily_reps.render(conn, key_prefix="agent_ops_daily")
+    with tabs[5]:
+        stir_event.render(conn, key_prefix="agent_ops_event")
+    with tabs[6]:
+        stir_tester.render(conn, key_prefix="agent_ops_tester")
+    with tabs[7]:
+        queues.render_needs_tagging(conn, key_prefix="agent_ops_needs_tagging")
+        queues.render_needs_post_id(conn, key_prefix="agent_ops_needs_id")

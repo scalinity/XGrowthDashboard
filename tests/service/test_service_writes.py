@@ -47,7 +47,9 @@ def client(tmp_path: Path) -> TestClient:
     def conn_factory() -> sqlite3.Connection:
         return connect(db_path)
 
-    return TestClient(create_app(token=TOKEN, conn_factory=conn_factory))
+    app = create_app(token=TOKEN, conn_factory=conn_factory)
+    app.state.db_path = db_path
+    return TestClient(app)
 
 
 def test_write_endpoints_require_token(client: TestClient) -> None:
@@ -174,17 +176,22 @@ def test_sync_today_from_x_imports_posts_and_updates_daily_reps(
 
 
 def test_agent_classify_posts_tags_untagged_imports(client: TestClient) -> None:
-    post = client.post(
-        "/forms/post",
-        json={
-            "type": "post",
-            "text": "Building Stir so weeknight dinner stops being a tiny kitchen crisis.",
-            "manual_confirmation_status": "needs_metrics",
-        },
-        headers=AUTH,
-    )
-    assert post.status_code == 200
-    post_id = post.json()["post_id"]
+    db_path = client.app.state.db_path
+    conn = connect(db_path)
+    try:
+        post_id = conn.execute(
+            """
+            INSERT INTO posts
+              (x_post_id, created_at_utc, created_date, text, type,
+               posted_via, manual_confirmation_status)
+            VALUES ('api-classify-1', datetime('now'), '2026-05-24', ?,
+                    'standalone', 'api', 'needs_metrics')
+            """,
+            ("Building Stir so weeknight dinner stops being a tiny kitchen crisis.",),
+        ).lastrowid
+        conn.commit()
+    finally:
+        conn.close()
 
     resp = client.post("/agent/classify-posts", headers=AUTH)
     assert resp.status_code == 200
@@ -196,6 +203,133 @@ def test_agent_classify_posts_tags_untagged_imports(client: TestClient) -> None:
     assert body["classified"][0]["audience"] == "icp"
 
     assert client.get("/views/needs-tagging", headers=AUTH).json()["posts"] == []
+
+
+def test_agent_classify_posts_leaves_manual_fallback_rows_in_queue(client: TestClient) -> None:
+    post = client.post(
+        "/forms/post",
+        json={
+            "type": "post",
+            "text": "Manual note that Daniel still wants to inspect before tagging.",
+            "manual_confirmation_status": "needs_metrics",
+        },
+        headers=AUTH,
+    )
+    assert post.status_code == 200
+    post_id = post.json()["post_id"]
+
+    resp = client.post("/agent/classify-posts", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["classified_count"] == 0
+    assert body["considered"] == 0
+
+    queue = client.get("/views/needs-tagging", headers=AUTH).json()["posts"]
+    assert [row["id"] for row in queue] == [post_id]
+
+
+def test_agent_score_candidates_scores_pending_reply_targets(client: TestClient) -> None:
+    created = client.post(
+        "/reply-targets",
+        json={
+            "target_post_url": "https://x.com/example/status/12345",
+            "target_user": "example",
+            "target_post_text": "A thoughtful post about weeknight cooking systems.",
+            "like_count": 0,
+            "reply_count": 0,
+            "repost_count": 0,
+            "pillar": "stir",
+            "reply_intent": "icp_discovery",
+        },
+        headers=AUTH,
+    )
+    assert created.status_code == 200
+    reply_target_id = created.json()["reply_target_id"]
+
+    resp = client.post("/agent/score-candidates", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["errors"] == []
+    assert body["scored_count"] == 1
+    assert body["scored"][0]["reply_target_id"] == reply_target_id
+
+
+def test_automation_debt_views_return_native_queue_shape(client: TestClient) -> None:
+    post = client.post(
+        "/forms/post",
+        json={
+            "type": "post",
+            "text": "Queue preview text should reach the native Agent Ops card.",
+        },
+        headers=AUTH,
+    )
+    assert post.status_code == 200
+    post_id = post.json()["post_id"]
+
+    needs_tagging = client.get("/views/needs-tagging", headers=AUTH)
+    assert needs_tagging.status_code == 200
+    tagging_row = needs_tagging.json()["posts"][0]
+    assert tagging_row["id"] == post_id
+    assert tagging_row["text_preview"] == "Queue preview text should reach the native Agent Ops card."
+    assert tagging_row["created_at"]
+
+    needs_post_id = client.get("/views/needs-post-id", headers=AUTH)
+    assert needs_post_id.status_code == 200
+    id_row = needs_post_id.json()["posts"][0]
+    assert id_row["id"] == post_id
+    assert id_row["text_preview"] == "Queue preview text should reach the native Agent Ops card."
+    assert id_row["created_at"]
+
+
+def test_post_id_confirmation_clears_needs_id_queue(client: TestClient) -> None:
+    post = client.post(
+        "/forms/post",
+        json={"type": "post", "text": "Manual row waiting on the X post id."},
+        headers=AUTH,
+    )
+    assert post.status_code == 200
+    post_id = post.json()["post_id"]
+
+    resp = client.put(
+        "/forms/post-id",
+        json={
+            "post_id": post_id,
+            "x_post_id": "manual-confirmed-1",
+            "manual_url": "https://x.com/dannyscalant/status/manual-confirmed-1",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+    queue = client.get("/views/needs-post-id", headers=AUTH).json()["posts"]
+    assert [row["id"] for row in queue] == []
+
+
+def test_agent_find_reply_targets_reports_target_accounts(client: TestClient) -> None:
+    db_path = client.app.state.db_path
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_target_accounts
+              (x_handle, display_name, lane, priority, is_active, notes)
+            VALUES ('dinnerbuilder', 'Dinner Builder', 'stir', 1, 1,
+                    'Strong ICP-adjacent account')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resp = client.post("/agent/find-reply-targets", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["account_count"] == 1
+    assert body["accounts"][0]["x_handle"] == "dinnerbuilder"
 
 
 def test_agent_grok_sweep_endpoint_formats_summary(
@@ -211,7 +345,7 @@ def test_agent_grok_sweep_endpoint_formats_summary(
             "error": None,
         }
 
-    monkeypatch.setattr(grok_discovery_sweep, "run", fake_run)
+    monkeypatch.setattr(grok_discovery_sweep, "run_once_locked", fake_run)
 
     resp = client.post("/agent/grok-sweep", headers=AUTH)
     assert resp.status_code == 200

@@ -636,6 +636,36 @@ def _finalize_summary(summary: dict[str, Any], started: float) -> dict[str, Any]
     return summary
 
 
+def run_once_locked(
+    conn: sqlite3.Connection,
+    *,
+    max_results_per_query: int = grok_client.DEFAULT_MAX_RESULTS,
+) -> dict[str, Any]:
+    """Run one sweep behind the shared filesystem lock.
+
+    Used by both the scheduled-job CLI and the foreground Agent Ops action so
+    launchd, Streamlit, and the native sidecar cannot double-spend the same
+    Grok/X API budget concurrently.
+    """
+    started = time.perf_counter()
+    try:
+        with _sweep_lock():
+            return run(conn, max_results_per_query=max_results_per_query)
+    except SweepAlreadyRunning as locked:
+        summary = {
+            "queries_run": 0,
+            "candidates_discovered": 0,
+            "candidates_verified": 0,
+            "candidates_inserted": 0,
+            "candidates_rejected_404": 0,
+            "error": str(locked),
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "concurrent_skip": True,
+        }
+        _LOG.info("grok_discovery_sweep: %s", locked)
+        return summary
+
+
 def _log_verification_404(
     conn: sqlite3.Connection,
     *,
@@ -755,18 +785,7 @@ def main(argv: list[str] | None = None) -> int:
         # can't double-spend at xAI. A second sweep attempting to
         # enter the lock raises SweepAlreadyRunning and writes a
         # short audit row instead.
-        try:
-            with _sweep_lock():
-                summary = run(conn, max_results_per_query=args.max_results)
-        except SweepAlreadyRunning as locked:
-            summary = {
-                "queries_run": 0,
-                "candidates_discovered": 0,
-                "error": str(locked),
-                "elapsed_seconds": round(time.perf_counter() - started, 3),
-                "concurrent_skip": True,
-            }
-            _LOG.info("grok_discovery_sweep: %s", locked)
+        summary = run_once_locked(conn, max_results_per_query=args.max_results)
     except BaseException as exc:  # noqa: BLE001 — catch-all for audit safety
         unhandled_exc = exc
         summary["error"] = f"unhandled exception in run(): {exc!r}"[:500]
