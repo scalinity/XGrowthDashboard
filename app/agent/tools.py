@@ -87,6 +87,115 @@ class ToolDef:
         }
 
 
+def _reply_target_recovery_steps() -> list[dict[str, Any]]:
+    """Safe local actions the model can try when reply sources are empty."""
+    return [
+        {
+            "tool": "run_local_bash",
+            "input": {
+                "command": (
+                    "uv run python -m app.jobs.grok_discovery_sweep "
+                    "--max-results 5"
+                ),
+                "timeout_seconds": 120,
+                "purpose": (
+                    "run the configured Grok reply-target discovery sweep "
+                    "when reply-target data is empty"
+                ),
+            },
+            "why": "populate reply_targets from configured discovery queries",
+        },
+        {
+            "tool": "run_local_bash",
+            "input": {
+                "command": "uv run python -m scripts.import_recent_posts",
+                "timeout_seconds": 120,
+                "purpose": "refresh recent owned X activity for reply context",
+            },
+            "why": "refresh local X activity before deciding reply strategy",
+        },
+        {
+            "tool": "query_x_api",
+            "input": {
+                "endpoint": "/2/users/me?user.fields=public_metrics,description",
+                "timeout_seconds": 30,
+            },
+            "why": "verify X API connectivity and current account context",
+        },
+    ]
+
+
+def _reply_target_autonomy(
+    *,
+    status: str,
+    should_continue: bool,
+    reason: str,
+    next_tool_options: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": status,
+        "should_continue": should_continue,
+        "reason": reason,
+        "instruction": (
+            "Do not ask Daniel to fill this manually until local recovery "
+            "options have been attempted or are blocked by credentials, "
+            "confirmation, or a concrete runtime error."
+        ),
+    }
+    if next_tool_options is not None:
+        payload["next_tool_options"] = next_tool_options
+    return payload
+
+
+def _empty_reply_target_autonomy(reason: str) -> dict[str, Any]:
+    return _reply_target_autonomy(
+        status="needs_discovery",
+        should_continue=True,
+        reason=reason,
+        next_tool_options=_reply_target_recovery_steps(),
+    )
+
+
+def _clamped_tool_limit(value: Any, *, default: int = 5, maximum: int = 20) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def _candidate_reply_targets(
+    conn: sqlite3.Connection,
+    *,
+    pillar: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return scored/draftable reply targets from the persistent queue."""
+    sql = """
+        SELECT id, target_post_url, target_author_handle,
+               target_author_display_name, target_text, like_count,
+               reply_count, repost_count, quote_count, pillar, audience,
+               reply_intent, recommended_action_label,
+               recommended_action_score, score_rationale, discovered_via,
+               last_checked_at_utc
+        FROM reply_targets
+        WHERE status = 'candidate'
+    """
+    params: list[Any] = []
+    if pillar:
+        sql += " AND pillar = ?"
+        params.append(pillar)
+    sql += """
+        ORDER BY COALESCE(recommended_action_score, -1) DESC,
+                 last_checked_at_utc DESC,
+                 id DESC
+        LIMIT ?
+    """
+    params.append(_clamped_tool_limit(limit))
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # 1. query_dashboard_state(slice)
 # ---------------------------------------------------------------------------
@@ -111,6 +220,11 @@ def _query_dashboard_state(conn: sqlite3.Connection, *, slice: str = "all") -> d
             dict(r)
             for r in conn.execute("SELECT * FROM v_lane_performance").fetchall()
         ]
+        out["reply_targets"] = _candidate_reply_targets(conn, limit=5)
+        if not out["lane_performance"] and not out["reply_targets"]:
+            out["autonomy"] = _empty_reply_target_autonomy(
+                "No lane-performance rows or queued reply targets are available."
+            )
     if slice in ("weekly", "all"):
         rows = conn.execute(
             "SELECT * FROM v_account_daily ORDER BY snapshot_date DESC LIMIT 7"
@@ -372,6 +486,8 @@ def _find_reply_targets(
     count: int = 5,
     recency_hours: int = 48,  # noqa: ARG001 — V1.1 will use this against snapshots
 ) -> dict[str, Any]:
+    requested_lane = lane.strip() if isinstance(lane, str) and lane.strip() else None
+    safe_count = _clamped_tool_limit(count)
     sql = """
         SELECT id, x_handle, display_name, notes, lane, priority,
                last_engaged_at
@@ -379,13 +495,38 @@ def _find_reply_targets(
         WHERE is_active = 1
     """
     params: list[Any] = []
-    if lane:
+    if requested_lane:
         sql += " AND lane = ?"
-        params.append(lane)
+        params.append(requested_lane)
     sql += " ORDER BY priority ASC, last_engaged_at ASC NULLS FIRST LIMIT ?"
-    params.append(int(count))
+    params.append(safe_count)
     rows = conn.execute(sql, params).fetchall()
-    return {"accounts": [dict(r) for r in rows]}
+    accounts = [dict(r) for r in rows]
+    reply_targets = _candidate_reply_targets(
+        conn,
+        pillar=requested_lane,
+        limit=safe_count,
+    )
+    if accounts:
+        autonomy = _reply_target_autonomy(
+            status="ready",
+            should_continue=False,
+            reason="Curated target accounts are available.",
+        )
+    elif reply_targets:
+        autonomy = _reply_target_autonomy(
+            status="recovered_from_queue",
+            should_continue=False,
+            reason=(
+                "Curated target accounts are empty; using queued "
+                "reply_targets candidates instead."
+            ),
+        )
+    else:
+        autonomy = _empty_reply_target_autonomy(
+            "Curated target accounts and queued reply targets are both empty."
+        )
+    return {"accounts": accounts, "reply_targets": reply_targets, "autonomy": autonomy}
 
 
 # ---------------------------------------------------------------------------

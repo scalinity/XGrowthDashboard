@@ -152,6 +152,59 @@ def test_agent_x_api_tool_is_read_only_get(monkeypatch, db_conn):
     assert result["raw_response_id"] == 44
 
 
+def test_find_reply_targets_empty_state_returns_agentic_recovery_plan(db_conn):
+    """Empty reply-target sources must tell the agent how to keep working."""
+    result = get_tool("find_reply_targets").handler(db_conn)
+
+    assert result["accounts"] == []
+    assert result["reply_targets"] == []
+    assert result["autonomy"]["should_continue"] is True
+    assert result["autonomy"]["status"] == "needs_discovery"
+    next_tools = {step["tool"] for step in result["autonomy"]["next_tool_options"]}
+    assert "run_local_bash" in next_tools
+    assert "query_x_api" in next_tools
+
+
+def test_find_reply_targets_falls_back_to_existing_reply_queue(db_conn):
+    """If curated accounts are empty, use queued reply targets instead."""
+    db_conn.execute(
+        """
+        INSERT INTO reply_targets
+            (discovered_via, target_post_url, target_author_handle, target_text,
+             like_count, reply_count, repost_count, quote_count, pillar,
+             recommended_action_label, recommended_action_score, score_rationale)
+        VALUES
+            ('manual', 'https://x.com/parentcook/status/123', 'parentcook',
+             'Dinner after work is still the hardest part of the day.',
+             42, 3, 1, 0, 'stir', 'reply_now', 3,
+             'Strong Stir-adjacent pain signal')
+        """
+    )
+
+    result = get_tool("find_reply_targets").handler(db_conn, lane="stir", count=5)
+
+    assert result["accounts"] == []
+    assert len(result["reply_targets"]) == 1
+    target = result["reply_targets"][0]
+    assert target["target_author_handle"] == "parentcook"
+    assert target["target_post_url"] == "https://x.com/parentcook/status/123"
+    assert result["autonomy"]["status"] == "recovered_from_queue"
+
+
+def test_query_dashboard_state_next_rep_empty_state_includes_recovery_plan(db_conn):
+    """An empty Next Rep slice should not strand the chat agent."""
+    result = get_tool("query_dashboard_state").handler(db_conn, slice="next_rep")
+
+    assert result["lane_performance"] == []
+    assert result["reply_targets"] == []
+    assert result["autonomy"]["should_continue"] is True
+    assert result["autonomy"]["status"] == "needs_discovery"
+    assert any(
+        step["tool"] == "run_local_bash"
+        for step in result["autonomy"]["next_tool_options"]
+    )
+
+
 # ===========================================================================
 # 2. IWH counter lives outside agent context
 # ===========================================================================
