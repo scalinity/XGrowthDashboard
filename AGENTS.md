@@ -142,6 +142,28 @@ The point of the per-sub-task push is the same point Linear would serve: an exte
 
 ---
 
+## Agent PR review guidelines
+
+When reviewing pull requests for this repository:
+
+- Treat **API key, OAuth token, or publish-token logging/persistence** without a documented retention policy as **P1** (`ANTHROPIC_API_KEY`, X API tokens, Grok keys, approval/publish tokens).
+- Flag **FastAPI sidecar auth gaps** as **P1**: endpoints reachable without the per-launch bearer token, binding off `127.0.0.1`, or CORS that widens the loopback trust boundary.
+- Verify **publish-flow security** (spec §28.10): two-step confirmation, token consumption, rollback on X API failure, and no bypass of agent invariants.
+- Check **agent invariants and gating**: niche gate on drafts, coach citation refusal, confirmation-token invalidation after edits, boot-time tool-registry scans.
+- Treat **spec drift** as **P1** when implementation contradicts `spec.md` without a spec update in the same PR.
+- **Migrations** must be lexicographic, idempotent where possible, and covered by `tests/test_schema.py`.
+- **Documentation** (`.env.example`, README, Settings labels) must match actual env vars, CLI commands, and slash-free operational paths.
+- Prefer small, testable pure functions; keep Streamlit pages and FastAPI routes thin — business logic stays in `app/agent/`, `app/forms/`, and shared modules.
+- **Native desktop** changes: path resolver (`XGROWTH_DATA_DIR` → App Support → legacy `./data`), Keychain secret storage, and no telemetry/auto-update hooks.
+
+Report **P0/P1 only** in the first-pass review; defer style and nice-to-haves unless they hide a correctness bug.
+
+## Cross-agent debate
+
+After **Codex** posts a review, **Claude** must explicitly **agree or disagree** with each P0/P1 item and surface missing risks. **Cursor** (author) should address or rebut findings in-thread before merge. No agent PR merges without that debate thread.
+
+---
+
 ## What this file is not
 
 This file is project-specific operational rules. Architecture decisions and product reasoning live in `spec.md`. Day-to-day status lives in `docs/index.html` (interactive). `docs/IMPLEMENTATION_STATUS.md` is frozen at Phase 5.8 — don't append to it. Don't duplicate any of this here.
