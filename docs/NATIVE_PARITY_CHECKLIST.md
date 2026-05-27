@@ -6,7 +6,7 @@ Legend for **Known gap**: `none known` | concrete gap description | `unknown` wh
 
 | View ID | Streamlit page | Native view | FastAPI endpoint(s) | Tests | Known gap | Spec |
 | --- | --- | --- | --- | --- | --- | --- |
-| `today` | `app/pages/1_Today.py` | `desktop/src/views/TodayView.tsx` | `GET /views/today`, `GET /api/user-metrics`, `POST /api/sync-today`, `POST /forms/snapshot` | `tests/service/test_service_smoke.py`, `tests/test_dashboard_views.py` | Read-model logic duplicated in sidecar slice vs Streamlit page | §31.7, §31.10 |
+| `today` | `app/pages/1_Today.py` | `desktop/src/views/TodayView.tsx` | `GET /views/today`, `GET /api/user-metrics`, `POST /api/sync-today`, `POST /forms/snapshot` | `tests/read_models/test_parity.py`, `tests/service/test_view_smoke.py` | Streamlit page still uses inline SQL; native/read-model path shared via `app/read_models/today.py` | §31.7, §31.10 |
 | `next-rep` | `app/pages/2_Next_Rep.py` | `desktop/src/views/NextRepView.tsx` | `GET /views/next-rep` | `tests/service/test_service_smoke.py` | Read-model logic duplicated in sidecar slice vs Streamlit page | §31.7 |
 | `progress` | `app/pages/3_Progress.py` | `desktop/src/views/ProgressView.tsx` | `GET /views/progress`, `GET /charts/follower-trend` | `tests/service/test_service_smoke.py` | Read-model logic duplicated in sidecar slice vs Streamlit page | §31.7 |
 | `content-performance` | `app/pages/4_Content_Performance.py` | `desktop/src/views/ContentPerformanceView.tsx` | `GET /views/content-performance`, `GET /charts/lane-scatter` | `tests/service/test_service_smoke.py` | Read-model logic duplicated in sidecar slice vs Streamlit page | §31.7 |
