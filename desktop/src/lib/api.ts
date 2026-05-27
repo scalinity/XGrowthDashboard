@@ -8,6 +8,16 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import type {
+  AgentModePayload,
+  CapabilitiesPayload,
+  DiagnosticsCopyResponse,
+  HealthDetails,
+} from "./contracts";
+
+export type { AgentModePayload, CapabilitiesPayload, HealthDetails } from "./contracts";
+export type SidecarPhase = HealthDetails["sidecar_phase"];
+
 export interface SidecarInfo {
   port: number | null;
   token: string | null;
@@ -17,25 +27,6 @@ export interface SidecarInfo {
    */
   baseUrl?: string | null;
   ready: boolean;
-}
-
-export type SidecarPhase =
-  | "launching_sidecar"
-  | "applying_migrations"
-  | "connecting_db"
-  | "ready"
-  | "failed";
-
-export interface HealthDetails {
-  ready: boolean;
-  sidecar_phase: SidecarPhase;
-  app_version: string;
-  service_version: string;
-  db_path: string;
-  latest_migration: string | null;
-  data_dir_source: string;
-  resource_root: string;
-  capabilities: Record<string, unknown>;
 }
 
 let cached: SidecarInfo | null = null;
@@ -145,8 +136,16 @@ export async function fetchHealthDetails(): Promise<HealthDetails> {
   return apiFetch<HealthDetails>("/health/details");
 }
 
+export async function fetchAgentMode(): Promise<AgentModePayload> {
+  return apiFetch<AgentModePayload>("/agent/mode");
+}
+
+export async function fetchCapabilities(): Promise<CapabilitiesPayload> {
+  return apiFetch<CapabilitiesPayload>("/capabilities");
+}
+
 export async function copyDiagnosticsToClipboard(): Promise<string> {
-  const payload = await apiFetch<{ text: string }>("/diagnostics/copy");
+  const payload = await apiFetch<DiagnosticsCopyResponse>("/diagnostics/copy");
   const text = payload.text;
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);

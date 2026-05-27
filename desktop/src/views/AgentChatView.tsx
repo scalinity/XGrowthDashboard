@@ -11,6 +11,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiFetch, waitForSidecar, apiBaseUrl } from "../lib/api";
+import type { AgentModePayload } from "../lib/contracts";
 import "./AgentChat.css";
 
 // ---------------------------------------------------------------------------
@@ -264,8 +265,18 @@ function summarizeToolResult(toolName: string, value: unknown): string | null {
       return firstLine ? `exit 0 · ${firstLine}` : "exit 0";
     }
     if (status === "refused" || status === "timeout" || status === "error") {
-      return String(record.error ?? status);
+      return String(record.error ?? record.reason ?? status);
     }
+  }
+
+  if (status === "refused") {
+    return String(record.reason ?? record.error ?? "refused");
+  }
+  if (status === "degraded") {
+    return String(record.manual_fallback ?? record.error ?? "degraded");
+  }
+  if (status === "error" || status === "failed") {
+    return String(record.error ?? status);
   }
 
   return null;
@@ -515,6 +526,12 @@ export const AgentChatView = () => {
     retry: 1,
   });
 
+  const { data: agentMode } = useQuery({
+    queryKey: ["agent-mode"],
+    queryFn: () => apiFetch<AgentModePayload>("/agent/mode"),
+    retry: 1,
+  });
+
   const { data: messagesData } = useQuery({
     queryKey: ["agent-messages", activeConvoId],
     queryFn: () =>
@@ -747,6 +764,12 @@ export const AgentChatView = () => {
           {sidebarOpen ? "◀" : "▶"}
         </button>
         <span className="agent-chat__topbar-title">Agent Chat</span>
+        {agentMode && (
+          <span className="agent-chat__mode-chip" title="Agent mode and gates">
+            {agentMode.data_collection_mode}
+            {agentMode.niche_gate.blocked ? " · niche gate" : ""}
+          </span>
+        )}
         <span className="agent-chat__topbar-sub">
           Real-time reasoning &middot; tool use &middot; publish safeguards
         </span>
