@@ -53,6 +53,15 @@ git status --short
 
 Review reports should distinguish committed baseline behavior from dirty-tree changes. Do not auto-revert or auto-stage local work.
 
+## Documentation maps
+
+Authoritative product spec: [`spec.md`](spec.md). Generated / maintained maps:
+
+- [`docs/API_SURFACE.md`](docs/API_SURFACE.md) — FastAPI routes (`uv run python -m scripts.dump_api_surface`)
+- [`docs/AGENT_TOOL_MATRIX.md`](docs/AGENT_TOOL_MATRIX.md) — Growth Agent tools, gates, stub audit
+- [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md) — product areas → code → tests → spec §
+- [`docs/NATIVE_PARITY_CHECKLIST.md`](docs/NATIVE_PARITY_CHECKLIST.md) — 18 native views parity tracker
+
 ## Test
 
 ```bash
