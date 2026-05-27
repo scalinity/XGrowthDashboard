@@ -36,7 +36,6 @@ from app.agent import brain_dump as _brain_dump
 from app.agent import review_drafting as _review_drafting
 from app.agent import campaigns as _campaigns
 from app.agent import inspiration as _inspiration
-from app.agent import monthly_review as _monthly_review
 from app.agent import profile_audit as _profile_audit
 from app.agent import content_types as _content_types
 from app.agent import personality_lore as _personality_lore
