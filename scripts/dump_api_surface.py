@@ -11,8 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "API_SURFACE.md"
 
 
-def _auth_for_route(path: str) -> str:
-    return "none" if path == "/health" else "bearer"
+def _auth_for_route(route) -> str:
+    path = getattr(route, "path", "")
+    if path == "/health":
+        return "none"
+    deps = getattr(route, "dependencies", []) or []
+    dep_names = {getattr(d.dependency, "__name__", "") for d in deps if hasattr(d, "dependency")}
+    if "BearerTokenAuth" in dep_names or any("auth" in n for n in dep_names):
+        return "bearer"
+    return "none"
 
 
 def main() -> None:
@@ -33,7 +40,7 @@ def main() -> None:
                 {
                     "method": method,
                     "path": path,
-                    "auth": _auth_for_route(path),
+                    "auth": _auth_for_route(route),
                     "response_model": model_name or "—",
                     "module": "app.service.routes.registry",
                 }

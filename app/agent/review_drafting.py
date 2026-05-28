@@ -14,6 +14,10 @@ from app.forms import get_setting
 
 ReviewModelCaller = Callable[[str, str, str], tuple[str, int, int]]
 
+
+class MissingAnthropicKeyError(RuntimeError):
+    """Raised when review drafting is requested without a configured API key."""
+
 _WEEKLY_SECTIONS = {
     "interpretation",
     "lesson",
@@ -32,7 +36,7 @@ _MONTHLY_SECTIONS = {
 def _default_model_caller(system_prompt: str, user_message: str, model: str) -> tuple[str, int, int]:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise RuntimeError(
+        raise MissingAnthropicKeyError(
             "Anthropic API key not configured. Set ANTHROPIC_API_KEY in Settings → API keys."
         )
     import anthropic
@@ -97,7 +101,7 @@ def draft_weekly_review_section(
             _build_weekly_prompt(section_name, context),
             _model_name(conn),
         )
-    except RuntimeError as exc:
+    except MissingAnthropicKeyError as exc:
         return {
             "section_name": section_name,
             "week_id": int(week_id),
@@ -163,7 +167,7 @@ def draft_monthly_review_section(
             user_prompt,
             _model_name(conn),
         )
-    except RuntimeError as exc:
+    except MissingAnthropicKeyError as exc:
         return {
             "section_name": section_name,
             "iso_month": iso_month,

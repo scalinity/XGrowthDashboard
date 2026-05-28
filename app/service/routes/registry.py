@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Iterator
-from datetime import date as _date_t
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -40,19 +40,11 @@ from app.jobs import agent_ops, post_classification_sync, x_activity_sync
 from app.secret_store import resolve_secret, store_secret
 from scripts import collect_account_snapshot
 from app.service.agent_status import build_agent_mode, build_capabilities
-from app.service.constants import SERVICE_NAME, SERVICE_VERSION
-from app.service.diagnostics import (
-    build_diagnostics_payload,
-    build_health_details,
-    format_diagnostics_text,
-)
 from app.service.helpers import _automation_queue_row, _form_error, _sse
 from app.service.models import (
     AgentModeResponse,
     CapabilitiesResponse,
     ConversationsResponse,
-    DiagnosticsCopyResponse,
-    HealthDetailsResponse,
     MessagesResponse,
     PublishBody,
     PublishResponse,
@@ -71,6 +63,7 @@ from app.service.settings_schema import (
     assert_known_setting_key,
     assert_valid_setting_value,
 )
+from app.service.routes.health import build_health_router
 from app.service.legacy_handlers import (
     _account_researcher_slice,
     _blog_detail_slice,
@@ -96,23 +89,7 @@ from app.service.legacy_handlers import (
 
 
 def register_routes(app, auth, get_conn, agent_factory, conn_factory):
-        @app.get("/health")
-        def health() -> dict[str, Any]:
-            """Liveness probe for the Tauri shell's sidecar handshake. Unauthenticated."""
-            return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
-
-        @app.get("/health/details", dependencies=[Depends(auth)], response_model=HealthDetailsResponse)
-        def health_details(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-            """Structured non-sensitive sidecar readiness details for the native shell."""
-            return build_health_details(conn, service_version=SERVICE_VERSION)
-
-        @app.get("/diagnostics/copy", dependencies=[Depends(auth)], response_model=DiagnosticsCopyResponse)
-        def diagnostics_copy(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-            payload = build_diagnostics_payload(conn, service_version=SERVICE_VERSION)
-            return {
-                "diagnostics": payload,
-                "text": format_diagnostics_text(payload),
-            }
+        app.include_router(build_health_router(auth, get_conn))
 
         @app.get("/api/user-metrics", dependencies=[Depends(auth)])
         def get_user_metrics(
@@ -127,8 +104,8 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
             row that is already driving Today.
             """
             try:
-                summary = collect_account_snapshot.run(conn)
-                today_iso = _date_t.today().isoformat()
+                today_iso = time.strftime("%Y-%m-%d", time.gmtime())
+                summary = collect_account_snapshot.run(conn, today_iso=today_iso)
                 row = conn.execute(
                     """
                     SELECT username, profile_url, x_user_id, followers_count,
@@ -545,10 +522,12 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
         ) -> dict[str, Any]:
             """Skip a reply target with a reason."""
             reason = payload.get("skip_reason", "not_relevant")
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE reply_targets SET status = 'skipped', skip_reason = ? WHERE id = ?",
                 (reason, rt_id),
             )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Reply target not found")
             conn.commit()
             return {"ok": True, "reply_target_id": rt_id, "status": "skipped"}
 
@@ -559,10 +538,12 @@ def register_routes(app, auth, get_conn, agent_factory, conn_factory):
         ) -> dict[str, Any]:
             """Mark a reply target as posted (with optional posted URL)."""
             posted_url = payload.get("posted_url")
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE reply_targets SET status = 'posted', posted_reply_url = ? WHERE id = ?",
                 (posted_url, rt_id),
             )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Reply target not found")
             conn.commit()
             return {"ok": True, "reply_target_id": rt_id, "status": "posted"}
 

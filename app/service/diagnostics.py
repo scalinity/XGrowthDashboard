@@ -14,7 +14,7 @@ from app.paths import (
     resolve_db_path,
 )
 from app.secret_store import resolve_secret
-from app.service.log_redaction import redact_text, sidecar_log_path
+from app.service.log_redaction import redact_detail, redact_text, sidecar_log_path
 from app.service.settings_schema import MANAGED_SECRETS
 
 # In-memory ring buffer of recent failed requests (path/status only).
@@ -22,11 +22,11 @@ _FAILED_REQUESTS: list[dict[str, Any]] = []
 _MAX_FAILED_REQUESTS = 20
 
 
-def record_failed_request(path: str, status_code: int, detail: str) -> None:
+def record_failed_request(path: str, status_code: int, detail: Any) -> None:
     entry = {
         "path": path,
         "status_code": status_code,
-        "detail": redact_text(detail),
+        "detail": redact_detail(detail),
     }
     _FAILED_REQUESTS.append(entry)
     if len(_FAILED_REQUESTS) > _MAX_FAILED_REQUESTS:
