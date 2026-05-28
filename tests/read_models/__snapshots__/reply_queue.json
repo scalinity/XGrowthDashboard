@@ -1,0 +1,10 @@
+{
+  "counters": {
+    "candidates": 0,
+    "drafted": 0,
+    "posted_today": 0,
+    "skipped_today": 0
+  },
+  "items": [],
+  "slice": "reply_queue"
+}

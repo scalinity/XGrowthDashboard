@@ -14,7 +14,7 @@ Authoritative tool registry: `app/agent/tools.py` (`AGENT_TOOLS`). Publish tools
 | `summarize_winners` | `tools.py` | Winner rollup | sample size | real | insufficient data → empty | agent tests |
 | `find_reply_targets` | `tools.py` | Discovery | data_collection_mode=api | real / refused | manual mode refuses X reads | `tests/test_agent_autonomy.py` |
 | `score_reply_candidates` | `tools.py` | Score reply targets | lint + niche | real | invalid args → errors[] | service agent tests |
-| `extract_lesson` | `tools.py` | Lesson drafting | — | **stub (partial)** | returns context only; `lesson_text` null | — |
+| `extract_lesson` | `tools.py` | Lesson drafting | — | **stub (partial)** | returns context only; `lesson_text` null; Session-2 Anthropic call deferred | — |
 | `draft_weekly_review_section` | `review_drafting.py` | Weekly review prose | Anthropic key | **real** | missing key → degraded + manual_fallback | `tests/test_review_drafting.py` |
 | `save_draft_post` | `tools.py` | Write draft | niche + lint | real | gate failures → refused | agent tests |
 | `save_draft_reply` | `tools.py` | Write reply draft | niche + lint + intent | real | gate failures → refused | agent tests |
