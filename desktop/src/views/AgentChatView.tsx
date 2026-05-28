@@ -10,7 +10,7 @@
 import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiFetch, waitForSidecar, apiBaseUrl } from "../lib/api";
+import { apiFetch, userSafeApiError, waitForSidecar, apiBaseUrl } from "../lib/api";
 import type { AgentModePayload } from "../lib/contracts";
 import "./AgentChat.css";
 
@@ -597,7 +597,7 @@ export const AgentChatView = () => {
         } catch {
           /* keep status summary */
         }
-        throw new Error(detail);
+        throw new Error(userSafeApiError(new Error(detail)));
       }
       if (!res.body) throw new Error("Agent stream returned no body");
 
@@ -639,7 +639,7 @@ export const AgentChatView = () => {
           } else if (eventType === "done") {
             setThinkingText(null);
           } else if (eventType === "error") {
-            const message = payload.error ?? "Agent stream failed.";
+            const message = userSafeApiError(new Error(String(payload.error ?? "Agent stream failed.")));
             setStreamError(message);
             throw new Error(message);
           } else if (eventType === "tool_call") {
@@ -746,9 +746,7 @@ export const AgentChatView = () => {
   const disableActions = sendMessage.isPending || deleteConvo.isPending;
   const errorText =
     streamError ??
-    (sendMessage.error
-      ? String((sendMessage.error as Error).message ?? sendMessage.error)
-      : null);
+    (sendMessage.error ? userSafeApiError(sendMessage.error) : null);
 
   // -- Render ---------------------------------------------------------------
 
@@ -765,7 +763,10 @@ export const AgentChatView = () => {
         </button>
         <span className="agent-chat__topbar-title">Agent Chat</span>
         {agentMode && (
-          <span className="agent-chat__mode-chip" title="Agent mode and gates">
+          <span
+            className={`agent-chat__mode-chip${agentMode.niche_gate.blocked ? " agent-chat__mode-chip--warn" : ""}`}
+            aria-label={`Agent mode ${agentMode.data_collection_mode}${agentMode.niche_gate.blocked ? ", niche gate blocking drafts" : ""}`}
+          >
             {agentMode.data_collection_mode}
             {agentMode.niche_gate.blocked ? " · niche gate" : ""}
           </span>
@@ -800,7 +801,8 @@ export const AgentChatView = () => {
                 deleteConvo.isPending && deleteConvo.variables === c.id;
               return (
                 <div key={c.id} className="agent-chat__convo-row">
-                  <div
+                  <button
+                    type="button"
                     className={`agent-chat__convo-item${c.id === activeConvoId ? " agent-chat__convo-item--active" : ""}`}
                     onClick={() => {
                       if (!isConfirming) setActiveConvoId(c.id);
@@ -817,7 +819,7 @@ export const AgentChatView = () => {
                     <div className="agent-chat__convo-title">
                       {c.title || `Session #${c.id}`}
                     </div>
-                  </div>
+                  </button>
 
                   <div
                     className={`agent-chat__convo-actions${isConfirming ? " agent-chat__convo-actions--visible" : ""}`}

@@ -311,18 +311,29 @@ export const SettingsView = () => {
             Mode: <strong>{agentMode.data_collection_mode}</strong> · publish via{" "}
             {agentMode.publish_mode}. The agent cannot publish or edit secrets from chat.
           </p>
-          <table style={{ width: "100%", maxWidth: 620, fontSize: "0.85rem", marginTop: "0.6rem" }}>
+          <table
+            aria-label="Agent tool permissions"
+            style={{ width: "100%", maxWidth: 620, fontSize: "0.85rem", marginTop: "0.6rem" }}
+          >
             <thead>
               <tr>
-                <th align="left">Capability</th>
-                <th align="left">Allowed</th>
+                <th scope="col">Capability</th>
+                <th scope="col">Allowed</th>
               </tr>
             </thead>
             <tbody>
-              {Object.entries(agentMode.tool_permissions).map(([key, allowed]) => (
+              {(
+                [
+                  "read_dashboard",
+                  "read_x_api",
+                  "write_drafts",
+                  "publish",
+                  "secrets",
+                ] as const
+              ).map((key) => (
                 <tr key={key}>
-                  <td>{key.replaceAll("_", " ")}</td>
-                  <td>{allowed ? "yes" : "no"}</td>
+                  <th scope="row">{key.replaceAll("_", " ")}</th>
+                  <td>{agentMode.tool_permissions[key] ? "yes" : "no"}</td>
                 </tr>
               ))}
             </tbody>

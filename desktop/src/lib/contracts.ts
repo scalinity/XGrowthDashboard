@@ -75,3 +75,25 @@ export interface SecretsResponse {
 export interface DiagnosticsCopyResponse {
   text: string;
 }
+
+export interface TodayResponse {
+  slice: string;
+  today_iso: string;
+  velocity_measurable?: boolean;
+  velocity_7d_per_day?: number | null;
+  content_type_reco?: { under_represented?: string | null; rationale?: string };
+  [key: string]: unknown;
+}
+
+export interface ReplyQueueResponse {
+  slice: string;
+  counters: ReplyQueueCounters;
+  [key: string]: unknown;
+}
+
+export interface ReplyQueueCounters {
+  candidates: number;
+  drafted: number;
+  posted_today: number;
+  skipped_today: number;
+}
