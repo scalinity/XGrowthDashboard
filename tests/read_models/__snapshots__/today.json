@@ -1,0 +1,34 @@
+{
+  "baseline_followers": 61,
+  "content_type_reco": {
+    "rationale": "No classified posts in the last 7 days \u2014 pick what you're moved by today.",
+    "under_represented": null
+  },
+  "current_milestone_target": 100,
+  "daily_reps": {
+    "mix": {},
+    "row": null,
+    "targets": {
+      "candidate_review_daily_target": 15,
+      "high_engagement_mix_pct": 0.5,
+      "post_target": 1,
+      "reply_target": 12,
+      "session_target": 1
+    }
+  },
+  "follower_sparkline": [],
+  "milestone": null,
+  "milestone_progress_pct": null,
+  "pending_drafts": [],
+  "recent_posts": [],
+  "slice": "today",
+  "snapshot": null,
+  "snapshot_defaults": {
+    "baseline_followers": 61,
+    "profile_url": "https://x.com/dannyscalant",
+    "username": "dannyscalant",
+    "x_user_id": null
+  },
+  "velocity_7d_per_day": null,
+  "velocity_measurable": false
+}

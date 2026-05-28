@@ -1,0 +1,16 @@
+{
+  "counterfactual_required": true,
+  "existing_review": null,
+  "past_reviews": [],
+  "slice": "weekly_review",
+  "summary": {
+    "daily_reps_days_completed": 0,
+    "downloads": 0,
+    "follower_delta": null,
+    "posts_shipped": 0,
+    "qualified_icp_testers": 0,
+    "replies_shipped": 0,
+    "reply_sessions_completed": 0,
+    "strongest_pillar_candidate": null
+  }
+}

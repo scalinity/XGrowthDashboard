@@ -1,0 +1,57 @@
+{
+  "current_followers": null,
+  "distribution_milestones": [],
+  "long_arc_reminder": 500000,
+  "noise_floor": 10,
+  "operational_ceiling": 5000,
+  "slice": "progress",
+  "targets": {
+    "post_target": 1,
+    "reply_target": 12,
+    "session_target": 1
+  },
+  "validation_milestones": [],
+  "velocity_projection": null,
+  "weekly_counts": [
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-04-06"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-04-13"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-04-20"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-04-27"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-05-04"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-05-11"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-05-18"
+    },
+    {
+      "posts": 0,
+      "replies": 0,
+      "week_start": "2026-05-25"
+    }
+  ]
+}
