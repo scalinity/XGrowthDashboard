@@ -1,13 +1,9 @@
-"""FastAPI application factory for the sidecar (§31.3).
+"""View slice builders and coach handlers for the FastAPI sidecar (§31.3).
 
-``create_app`` builds an app with:
-
-- a per-request SQLite connection (via the project's ``app.db.connect``),
-- per-launch bearer-token auth on every non-health route,
-- the §28 startup invariants run once at boot (same guarantees as ``streamlit run``).
-
-Endpoints are added incrementally through Phase 11.0. This module owns the
-HTTP shape only; all reads/writes delegate to existing backend code.
+HTTP route registration lives in ``app.service.routes.registry``. Shared
+read models for Today, Progress, Weekly Review, Content Performance, and
+Reply Queue live in ``app/read_models/`` and are re-exported here for
+backward-compatible imports.
 """
 
 from __future__ import annotations
@@ -22,11 +18,6 @@ from typing import Any
 
 
 from app.agent import coach as _coach
-from app.agent.content_types import get_content_type_gaps, get_recommendation_window_days
-from app.agent.velocity import (
-    get_noise_floor,
-    get_velocity_projection,
-)
 from app.components.charts.follower_trend import FollowerPoint, follower_trend_chart
 from app.components.charts.funnel import (
     APP_STORE_GAP_LABEL,
@@ -34,8 +25,6 @@ from app.components.charts.funnel import (
     build_funnel_stages,
     funnel_chart,
 )
-from app.components.charts.lane_grid import confidence_color_for_ui_label, count_rankable_lanes, lane_rows_from_sql
-from app.components.badges.confidence_label import ui_label_for_db_label
 from app.agent.reply_targets import engagement_footnote as _engagement_footnote
 from app.agent.tools import (
     _load_engagement_surface_settings,
@@ -45,206 +34,13 @@ from app.agent import calendar as _calendar
 from app.agent import campaigns as _campaigns
 from app.agent import inspiration as _inspiration
 from app.forms import get_setting
-def _weekly_review_slice(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Gather every data slice the Weekly Review view (§14.6) needs.
-
-    Mirrors the Streamlit page: auto-filled summary metrics for this week,
-    existing review row, counterfactual_required setting, and past review
-    history — all computed server-side (§31.10).
-    """
-
-
-    today = _date_t.today()
-    # Monday-anchored week.
-    week_start = today - _timedelta(days=today.weekday())
-    week_end = week_start + _timedelta(days=6)
-
-    # 1. Summary metrics (same SQL as _summary_for_week in 6_Weekly_Review.py).
-    ws_iso = week_start.isoformat()
-    we_iso = week_end.isoformat()
-
-    foll_row = conn.execute(
-        """
-        SELECT
-            (SELECT followers_count FROM v_account_daily
-              WHERE snapshot_date >= ? AND snapshot_date <= ?
-              ORDER BY snapshot_date ASC LIMIT 1) AS followers_start,
-            (SELECT followers_count FROM v_account_daily
-              WHERE snapshot_date <= ? AND snapshot_date >= ?
-              ORDER BY snapshot_date DESC LIMIT 1) AS followers_end
-        """,
-        (ws_iso, we_iso, we_iso, ws_iso),
-    ).fetchone()
-    followers_start = foll_row["followers_start"]
-    followers_end = foll_row["followers_end"]
-    follower_delta = (
-        (followers_end or 0) - (followers_start or 0)
-        if followers_start is not None and followers_end is not None
-        else None
-    )
-
-    reps = conn.execute(
-        """
-        SELECT
-            COALESCE(SUM(posts_shipped), 0)            AS posts_shipped,
-            COALESCE(SUM(replies_shipped), 0)          AS replies_shipped,
-            COALESCE(SUM(reply_sessions_completed), 0) AS reply_sessions_completed,
-            COALESCE(SUM(minimum_reps_completed), 0)   AS daily_reps_days_completed
-        FROM v_daily_reps
-        WHERE activity_date BETWEEN ? AND ?
-        """,
-        (ws_iso, we_iso),
-    ).fetchone()
-
-    funnel = conn.execute(
-        """
-        SELECT
-            COALESCE(SUM(downloads), 0)             AS downloads,
-            COALESCE(SUM(qualified_icp_testers), 0) AS qualified_icp_testers
-        FROM v_funnel_daily
-        WHERE event_date BETWEEN ? AND ?
-        """,
-        (ws_iso, we_iso),
-    ).fetchone()
-
-    # Strongest pillar candidate.
-    lanes = conn.execute(
-        """
-        SELECT pillar, median_impressions, confidence_label
-        FROM v_lane_performance
-        ORDER BY median_impressions DESC NULLS LAST
-        """
-    ).fetchall()
-    eligible = [
-        r for r in lanes
-        if ui_label_for_db_label(r["confidence_label"]) in {"tentative", "confident"}
-    ]
-    strongest_pillar_candidate = (
-        f"{eligible[0]['pillar']} ({eligible[0]['confidence_label']})"
-        if eligible
-        else None
-    )
-
-    summary = {
-        "follower_delta": follower_delta,
-        "posts_shipped": int(reps["posts_shipped"]),
-        "replies_shipped": int(reps["replies_shipped"]),
-        "reply_sessions_completed": int(reps["reply_sessions_completed"]),
-        "daily_reps_days_completed": int(reps["daily_reps_days_completed"]),
-        "downloads": int(funnel["downloads"]),
-        "qualified_icp_testers": int(funnel["qualified_icp_testers"]),
-        "strongest_pillar_candidate": strongest_pillar_candidate,
-    }
-
-    # 2. Existing review for this week.
-    existing_row = conn.execute(
-        "SELECT * FROM weekly_reviews WHERE week_start_date = ?",
-        (ws_iso,),
-    ).fetchone()
-    existing_review = dict(existing_row) if existing_row else None
-
-    # 3. counterfactual_required setting.
-    counterfactual_required = bool(get_setting(conn, "counterfactual_required", True))
-
-    # 4. Past reviews history.
-    history_rows = conn.execute(
-        """
-        SELECT
-            id, week_start_date, week_end_date, follower_delta,
-            posts_shipped, replies_shipped, downloads,
-            counterfactual_note, lesson, what_moved, what_got_stuck,
-            next_week_experiment, qualified_icp_testers,
-            reply_sessions_completed, daily_reps_days_completed
-        FROM weekly_reviews
-        ORDER BY week_start_date DESC
-        """
-    ).fetchall()
-    past_reviews = [dict(r) for r in history_rows]
-
-    return {
-        "slice": "weekly_review",
-        "week_start": ws_iso,
-        "week_end": we_iso,
-        "summary": summary,
-        "existing_review": existing_review,
-        "counterfactual_required": counterfactual_required,
-        "past_reviews": past_reviews,
-    }
-
-
-def _reply_queue_slice(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Gather every data slice the Reply Target Queue view (§29.7) needs."""
-    eng_settings = _load_engagement_surface_settings(conn)
-
-    # Counters.
-    ctr_row = conn.execute(
-        """
-        SELECT
-            SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END) AS candidates,
-            SUM(CASE WHEN status = 'drafted' THEN 1 ELSE 0 END) AS drafted,
-            SUM(CASE WHEN status = 'posted'
-                      AND DATE(last_checked_at_utc) = DATE('now') THEN 1 ELSE 0 END) AS posted_today,
-            SUM(CASE WHEN status = 'skipped'
-                      AND DATE(last_checked_at_utc) = DATE('now') THEN 1 ELSE 0 END) AS skipped_today
-        FROM reply_targets
-        """
-    ).fetchone()
-    counters = {
-        "candidates": int(ctr_row["candidates"] or 0),
-        "drafted": int(ctr_row["drafted"] or 0),
-        "posted_today": int(ctr_row["posted_today"] or 0),
-        "skipped_today": int(ctr_row["skipped_today"] or 0),
-    }
-
-    # Candidate rows (default: status='candidate', sorted by action score).
-    rows = conn.execute(
-        """SELECT id, target_post_url, target_text, target_author_handle,
-                  target_author_follower_count, like_count, reply_count,
-                  repost_count, relevance_score, engagement_surface_score,
-                  saturation_score, reply_opportunity_score,
-                  recommended_action_label, recommended_action_score,
-                  score_rationale, pillar, reply_intent, status,
-                  discovered_at_utc, discovered_via
-           FROM reply_targets
-           WHERE status = 'candidate'
-           ORDER BY COALESCE(recommended_action_score, -1) DESC,
-                    last_checked_at_utc DESC
-           LIMIT 50"""
-    ).fetchall()
-
-    items = []
-    for r in rows:
-        handle = (r["target_author_handle"] or "unknown").lstrip("@")
-        text = (r["target_text"] or "").strip().replace("\n", " ")
-        if len(text) > 220:
-            text = text[:219] + "…"
-        items.append({
-            "id": int(r["id"]),
-            "handle": handle,
-            "text_excerpt": text or None,
-            "target_post_url": r["target_post_url"],
-            "like_count": int(r["like_count"] or 0),
-            "reply_count": int(r["reply_count"] or 0),
-            "repost_count": int(r["repost_count"] or 0),
-            "relevance_score": r["relevance_score"],
-            "engagement_surface_score": r["engagement_surface_score"],
-            "saturation_score": r["saturation_score"],
-            "reply_opportunity_score": r["reply_opportunity_score"],
-            "recommended_action_label": r["recommended_action_label"],
-            "score_rationale": r["score_rationale"],
-            "pillar": r["pillar"],
-            "reply_intent": r["reply_intent"],
-            "discovered_via": r["discovered_via"],
-            "engagement_footnote": _engagement_footnote(
-                r["target_author_follower_count"], eng_settings
-            ),
-        })
-
-    return {
-        "slice": "reply_queue",
-        "counters": counters,
-        "items": items,
-    }
+from app.read_models.content_performance import (
+    build_content_performance_read_model as _content_performance_slice,
+)
+from app.read_models.progress import build_progress_read_model as _progress_slice
+from app.read_models.reply_queue import build_reply_queue_read_model as _reply_queue_slice
+from app.read_models.today import build_today_read_model as _today_slice
+from app.read_models.weekly_review import build_weekly_review_read_model as _weekly_review_slice
 
 
 def _content_calendar_slice(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -488,383 +284,6 @@ def _account_researcher_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "slice": "account_researcher",
         "accounts": accounts,
-    }
-
-
-def _today_slice(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Gather every data slice the Today view (§14.1) needs.
-
-    All business logic stays here (§31.10: "no business logic in the frontend"):
-    milestone progress pct, velocity gating, high-engagement mix target, text
-    preview truncation. The frontend only renders.
-    """
-    today_iso = _date_t.today().isoformat()
-
-    # 1. Today's snapshot row from v_account_daily.
-    snap = conn.execute(
-        "SELECT * FROM v_account_daily WHERE snapshot_date = ?", (today_iso,)
-    ).fetchone()
-    snapshot = dict(snap) if snap else None
-
-    # 2. Baseline + milestone.
-    baseline = int(get_setting(conn, "baseline_followers", 61) or 61)
-    target = int(get_setting(conn, "current_milestone", 100) or 100)
-    ms_row = conn.execute(
-        "SELECT * FROM milestones WHERE category = 'distribution' AND target_value = ? LIMIT 1",
-        (target,),
-    ).fetchone()
-    milestone = dict(ms_row) if ms_row else None
-    milestone_progress_pct: float | None = None
-    if snapshot and milestone:
-        start = int(milestone.get("start_value") or baseline)
-        end = int(milestone.get("target_value") or target)
-        foll = int(snapshot["followers_count"])
-        milestone_progress_pct = max(0.0, min(1.0, (foll - start) / max(1, end - start)))
-
-    # 3. Velocity gating (§13 rule 6). Uses get_noise_floor so the threshold
-    # is consistent with Progress view (RV5-C3 fix — was hardcoded at 10).
-    delta_7d = snapshot["delta_7d"] if snapshot else None
-    noise_floor = get_noise_floor(conn)
-    velocity_measurable = delta_7d is not None and abs(delta_7d) >= noise_floor
-    velocity_7d = snapshot["velocity_7d_per_day"] if snapshot else None
-
-    # 4. Content-type recommendation (§28.17).
-    ct_window = get_recommendation_window_days(conn)
-    ct_gap = get_content_type_gaps(conn, window_days=ct_window)
-
-    # 5. Daily reps + §29.9 mix.
-    reps_snap = conn.execute(
-        "SELECT * FROM v_daily_reps WHERE activity_date = ?", (today_iso,)
-    ).fetchone()
-    reps_row = dict(reps_snap) if reps_snap else None
-    post_target = int(get_setting(conn, "daily_post_target", 1) or 1)
-    reply_target_val = int(get_setting(conn, "daily_reply_target", 12) or 12)
-    session_target = int(get_setting(conn, "daily_reply_session_target", 1) or 1)
-    high_eng_mix_pct = float(get_setting(conn, "reply_high_engagement_mix_pct", 0.5) or 0.5)
-    cand_review_target = int(get_setting(conn, "reply_candidate_review_daily_target", 15) or 15)
-    mix: dict[str, Any] = {}
-    if reps_row:
-        replies_shipped = int(reps_row.get("replies_shipped") or 0)
-        high_eng = int(reps_row.get("high_engagement_replies_shipped") or 0)
-        high_eng_target = max(1, int(round(high_eng_mix_pct * max(1, replies_shipped))))
-        mix = {
-            "high_eng": high_eng,
-            "icp_intent": int(reps_row.get("icp_intent_replies_shipped") or 0),
-            "candidates_rev": int(reps_row.get("candidates_reviewed_today") or 0),
-            "high_eng_target": high_eng_target,
-            "high_eng_met": replies_shipped > 0 and high_eng >= high_eng_target,
-            "cand_target": cand_review_target,
-            "cand_met": int(reps_row.get("candidates_reviewed_today") or 0) >= cand_review_target,
-        }
-
-    # 6. Pending agent drafts (today, proposed).
-    pending_rows = conn.execute(
-        """
-        SELECT ad.id, ad.text, ad.draft_kind, ad.created_at,
-               ad.similarity_warning_json,
-               ps.composite_label
-        FROM agent_drafts ad
-        LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
-        WHERE date(ad.created_at) = date('now')
-          AND ad.status = 'proposed'
-        ORDER BY ad.id DESC LIMIT 5
-        """,
-    ).fetchall()
-    pending_drafts = []
-    for d in pending_rows:
-        preview = (d["text"] or "").strip().replace("\n", " ")
-        if len(preview) > 160:
-            preview = preview[:157] + "…"
-        pending_drafts.append({
-            "id": d["id"],
-            "text_preview": preview,
-            "draft_kind": d["draft_kind"],
-            "composite_label": d["composite_label"],
-            "similarity_warning_json": d["similarity_warning_json"],
-        })
-
-    # 7. Recent posts (today, last 5).
-    recent_rows = conn.execute(
-        """
-        SELECT p.id, p.created_at_utc, p.text, p.type,
-               p.manual_confirmation_status,
-               pc.pillar, pc.audience, pc.cta
-        FROM posts p
-        LEFT JOIN post_classifications pc ON pc.post_id = p.id
-        WHERE p.created_date = ?
-        ORDER BY p.created_at_utc DESC LIMIT 5
-        """,
-        (today_iso,),
-    ).fetchall()
-    recent_posts = []
-    for r in recent_rows:
-        preview = (r["text"] or "").strip().replace("\n", " ")
-        if len(preview) > 120:
-            preview = preview[:117] + "…"
-        recent_posts.append({
-            "id": r["id"],
-            "type": r["type"],
-            "text_preview": preview,
-            "pillar": r["pillar"],
-            "audience": r["audience"],
-            "cta": r["cta"],
-            "confirm_status": r["manual_confirmation_status"],
-        })
-
-    # 8. Snapshot form defaults (so frontend can pre-fill without another call).
-    snap_defaults = {
-        "username": get_setting(conn, "x_handle", "") or "",
-        "profile_url": get_setting(conn, "profile_url", "") or "",
-        "baseline_followers": baseline,
-        "x_user_id": get_setting(conn, "x_user_id"),
-    }
-
-    # S2: removed unused account_last_7 query (no frontend consumer).
-
-    # 9. Follower sparkline (last 14 days for the Today dashboard mini-chart).
-    sparkline_rows = conn.execute(
-        """SELECT snapshot_date, followers_count
-           FROM v_account_daily
-           ORDER BY snapshot_date DESC LIMIT 14"""
-    ).fetchall()
-    follower_sparkline = [
-        {"date": r["snapshot_date"], "count": int(r["followers_count"])}
-        for r in reversed(sparkline_rows)
-    ]
-
-    return {
-        "slice": "today",
-        "today_iso": today_iso,
-        "snapshot": snapshot,
-        "baseline_followers": baseline,
-        "current_milestone_target": target,
-        "milestone": milestone,
-        "milestone_progress_pct": milestone_progress_pct,
-        "velocity_measurable": velocity_measurable,
-        "velocity_7d_per_day": velocity_7d,
-        "content_type_reco": {
-            "under_represented": ct_gap.get("under_represented"),
-            "rationale": ct_gap.get("rationale", ""),
-        },
-        "daily_reps": {
-            "row": reps_row,
-            "targets": {
-                "post_target": post_target,
-                "reply_target": reply_target_val,
-                "session_target": session_target,
-                "high_engagement_mix_pct": high_eng_mix_pct,
-                "candidate_review_daily_target": cand_review_target,
-            },
-            "mix": mix,
-        },
-        "pending_drafts": pending_drafts,
-        "recent_posts": recent_posts,
-        "snapshot_defaults": snap_defaults,
-        "follower_sparkline": follower_sparkline,
-    }
-
-
-def _progress_slice(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Gather every data slice the Progress view (§14.3) needs."""
-    # 1. Milestones.
-    dist = conn.execute(
-        "SELECT * FROM milestones WHERE category = 'distribution' ORDER BY ladder_position ASC"
-    ).fetchall()
-    val = conn.execute(
-        "SELECT * FROM milestones WHERE category = 'validation' ORDER BY ladder_position ASC"
-    ).fetchall()
-
-    # 2. Current followers.
-    latest = conn.execute(
-        "SELECT followers_count FROM v_account_daily ORDER BY snapshot_date DESC LIMIT 1"
-    ).fetchone()
-    current_followers = int(latest["followers_count"]) if latest else None
-
-    # Compute milestone progress for distribution milestones (server-side §31.10).
-    dist_out = []
-    for m in dist:
-        md = dict(m)
-        target = m["target_value"]
-        start = m["start_value"] or 0
-        if m["status"] == "achieved":
-            md["progress"] = 1.0
-            md["progress_label"] = "achieved"
-        elif target and current_followers is not None and target > start:
-            p = max(0.0, min(1.0, (current_followers - start) / max(1, target - start)))
-            md["progress"] = p
-            md["progress_label"] = f"{p * 100:.1f}%"
-        else:
-            md["progress"] = 0.0
-            md["progress_label"] = "not yet"
-        dist_out.append(md)
-
-    val_out = []
-    for m in val:
-        md = dict(m)
-        md["progress"] = 1.0 if m["status"] == "achieved" else 0.0
-        md["progress_label"] = "achieved" if m["status"] == "achieved" else "not yet"
-        val_out.append(md)
-
-    # 3. Velocity projection.
-    proj = get_velocity_projection(conn)
-    noise_floor = get_noise_floor(conn)
-
-    # 4. Weekly post/reply counts (last 8 ISO weeks).
-    today = _date_t.today()
-    monday = today - _timedelta(days=today.weekday())
-    earliest = (monday - _timedelta(weeks=7)).isoformat()
-    latest_date = (monday + _timedelta(days=6)).isoformat()
-    week_rows = conn.execute(
-        """
-        SELECT
-            DATE(created_date,
-                 '-' || ((CAST(strftime('%w', created_date) AS INTEGER) + 6) % 7)
-                 || ' days') AS week_start,
-            SUM(CASE WHEN type IN ('standalone','thread_root','thread_child','quote')
-                      THEN 1 ELSE 0 END) AS posts,
-            SUM(CASE WHEN type = 'reply' THEN 1 ELSE 0 END) AS replies
-        FROM posts
-        WHERE created_date BETWEEN ? AND ?
-        GROUP BY week_start ORDER BY week_start ASC
-        """,
-        (earliest, latest_date),
-    ).fetchall()
-    by_week = {r["week_start"]: (int(r["posts"] or 0), int(r["replies"] or 0)) for r in week_rows}
-    weekly: list[dict[str, Any]] = []
-    for w in range(7, -1, -1):
-        ws = (monday - _timedelta(weeks=w)).isoformat()
-        posts, replies = by_week.get(ws, (0, 0))
-        weekly.append({"week_start": ws, "posts": posts, "replies": replies})
-
-    # 5. Settings.
-    post_target = int(get_setting(conn, "daily_post_target", 1) or 1)
-    reply_target = int(get_setting(conn, "daily_reply_target", 12) or 12)
-    session_target = int(get_setting(conn, "daily_reply_session_target", 1) or 1)
-    operational_ceiling = int(get_setting(conn, "operational_ceiling", 5000) or 5000)
-    long_arc = int(get_setting(conn, "long_arc_reminder", 500000) or 500000)
-
-    return {
-        "slice": "progress",
-        "current_followers": current_followers,
-        "distribution_milestones": dist_out,
-        "validation_milestones": val_out,
-        "velocity_projection": proj.to_dict() if proj else None,
-        "noise_floor": noise_floor,
-        "weekly_counts": weekly,
-        "targets": {
-            "post_target": post_target,
-            "reply_target": reply_target,
-            "session_target": session_target,
-        },
-        "operational_ceiling": operational_ceiling,
-        "long_arc_reminder": long_arc,
-    }
-
-
-def _content_performance_slice(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Gather every data slice the Content Performance view (§14.4) needs."""
-
-    # 1. Lane performance rows.
-    raw_rows = conn.execute(
-        "SELECT * FROM v_lane_performance ORDER BY post_count DESC"
-    ).fetchall()
-    lane_data = lane_rows_from_sql(raw_rows)
-    rankable_count = count_rankable_lanes(lane_data)
-
-    lanes = []
-    for lr in lane_data:
-        ui_label = ui_label_for_db_label(lr.db_confidence_label)
-        chip_bg = confidence_color_for_ui_label(ui_label)
-        # Format median+IQR server-side (§31.10).
-        if ui_label == "insufficient" or lr.median_impressions is None:
-            median_display = "—"
-        elif lr.iqr_low is None or lr.iqr_high is None:
-            median_display = f"{int(round(lr.median_impressions)):,}"
-        else:
-            median_display = (
-                f"{int(round(lr.median_impressions)):,} "
-                f"[{int(round(lr.iqr_low)):,}–{int(round(lr.iqr_high)):,}]"
-            )
-        lanes.append({
-            "pillar": lr.pillar, "audience": lr.audience, "cta": lr.cta,
-            "post_count": lr.post_count, "days_covered": lr.days_covered,
-            "median_display": median_display,
-            "median_impressions": lr.median_impressions,
-            "iqr_low": lr.iqr_low, "iqr_high": lr.iqr_high,
-            "total_bookmarks": lr.total_bookmarks,
-            "total_replies": lr.total_replies,
-            "stir_signal_count": lr.stir_signal_count,
-            "ui_label": ui_label, "chip_bg": chip_bg,
-        })
-
-    # 2. Best lane (§14.4 anti-overfitting gate).
-    best = None
-    if rankable_count >= 3:
-        rankable = [
-            lr for lr in lane_data
-            if ui_label_for_db_label(lr.db_confidence_label) in {"tentative", "confident"}
-            and lr.median_impressions is not None
-        ]
-        if rankable:
-            b = max(rankable, key=lambda r: r.median_impressions or 0)
-            ui_label = ui_label_for_db_label(b.db_confidence_label)
-            best = {
-                "lane": f"{b.pillar} · {b.audience} · {b.cta}",
-                "median_impressions": int(b.median_impressions or 0),
-                "iqr_low": int(b.iqr_low or 0), "iqr_high": int(b.iqr_high or 0),
-                "ui_label": ui_label,
-                "chip_bg": confidence_color_for_ui_label(ui_label),
-            }
-
-    # 3. V/G/P/P content type table.
-    ct_rows = conn.execute(
-        """SELECT content_type, post_count, days_covered,
-                  median_impressions, iqr_impressions_low, iqr_impressions_high,
-                  median_engagement_rate, confidence_label
-           FROM v_content_type_performance
-           ORDER BY CASE content_type
-              WHEN 'value' THEN 0 WHEN 'growth' THEN 1
-              WHEN 'personality' THEN 2 WHEN 'proof' THEN 3 ELSE 9 END"""
-    ).fetchall()
-    content_types = []
-    for r in ct_rows:
-        ul = ui_label_for_db_label(r["confidence_label"] or "insufficient sample")
-        content_types.append({
-            "content_type": r["content_type"],
-            "post_count": int(r["post_count"] or 0),
-            "days_covered": int(r["days_covered"] or 0),
-            "median_impressions": r["median_impressions"],
-            "median_engagement_rate": r["median_engagement_rate"],
-            "ui_label": ul,
-            "chip_bg": confidence_color_for_ui_label(ul),
-        })
-
-    # 4. Pre-publish scorer calibration.
-    cal_rows = conn.execute(
-        """SELECT ps.composite_label, COUNT(*) AS n,
-                  AVG(plm.impressions) AS avg_impressions,
-                  AVG(plm.engagement_rate) AS avg_engagement_rate,
-                  AVG(ps.screenshot_test_score) AS avg_screenshot_test_score,
-                  COUNT(ps.screenshot_test_score) AS n_with_screenshot_score
-           FROM agent_drafts ad
-           JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
-           JOIN posts p ON p.id = ad.final_post_id
-           JOIN v_post_latest_metrics plm ON plm.post_id = p.id
-           WHERE p.manual_confirmation_status = 'confirmed' AND plm.impressions IS NOT NULL
-           GROUP BY ps.composite_label
-           ORDER BY CASE ps.composite_label
-             WHEN 'strong' THEN 0 WHEN 'viable' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END
-           LIMIT 10"""
-    ).fetchall()
-    calibration = [dict(r) for r in cal_rows]
-
-    return {
-        "slice": "content_performance",
-        "lanes": lanes,
-        "rankable_count": rankable_count,
-        "best_lane": best,
-        "content_types": content_types,
-        "calibration": calibration,
     }
 
 
@@ -1357,3 +776,27 @@ def _coach_turn_stream(
         )
     except Exception as exc:  # noqa: BLE001 — surface all errors to the UI
         yield ("error", {"error": f"{type(exc).__name__}: {exc}"})
+
+
+__all__ = [
+    "_account_researcher_slice",
+    "_blog_detail_slice",
+    "_blogs_slice",
+    "_brain_dump_slice",
+    "_campaigns_slice",
+    "_coach_turn",
+    "_coach_turn_stream",
+    "_content_calendar_slice",
+    "_content_performance_slice",
+    "_follower_trend_figure",
+    "_funnel_chart_figure",
+    "_funnel_daily_chart_figure",
+    "_funnel_slice",
+    "_inspiration_slice",
+    "_lane_scatter_figure",
+    "_next_rep_slice",
+    "_progress_slice",
+    "_reply_queue_slice",
+    "_today_slice",
+    "_weekly_review_slice",
+]

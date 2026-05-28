@@ -25,8 +25,9 @@ import streamlit as st
 from app.agent import monthly_review as _monthly_review
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.components.theme import apply_theme, callout, hairline, kicker
-from app.forms import get_setting, weekly_review
+from app.forms import weekly_review
 from app.pages import open_connection
+from app.read_models.weekly_review import build_weekly_review_read_model
 
 
 def _previous_monday(d: _date_t) -> _date_t:
@@ -151,11 +152,12 @@ def _all_reviews(conn):
 # ---------------------------------------------------------------------------
 apply_theme()
 conn = open_connection()
+weekly_read_model = build_weekly_review_read_model(conn)
 
 today = _date_t.today()
 week_start = _previous_monday(today)
 week_end = week_start + timedelta(days=6)
-counterfactual_required = bool(get_setting(conn, "counterfactual_required", True))
+counterfactual_required = bool(weekly_read_model["counterfactual_required"])
 
 # Phase 5.11 §28.27: cadence toggle at the top. Persisted in session
 # state so navigating away and back keeps the chosen cadence. Defaults

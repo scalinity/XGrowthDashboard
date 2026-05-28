@@ -32,7 +32,6 @@ import streamlit as st
 from app.components.charts.lane_grid import (
     LaneRow,
     confidence_color_for_ui_label,
-    count_rankable_lanes,
     lane_performance_grid,
     lane_rows_from_sql,
 )
@@ -46,6 +45,7 @@ from app.components.theme import (
 )
 from app.components.badges.confidence_label import ui_label_for_db_label
 from app.pages import open_connection
+from app.read_models.content_performance import build_content_performance_read_model
 
 
 def _lane_rows(conn) -> list[LaneRow]:
@@ -162,6 +162,7 @@ def _build_scatter(rows) -> go.Figure:
 # ---------------------------------------------------------------------------
 apply_theme()
 conn = open_connection()
+content_performance_model = build_content_performance_read_model(conn)
 
 kicker("LANE ANALYSIS · §14.4 / §11")
 st.title("Content performance")
@@ -173,7 +174,7 @@ st.caption(
 )
 
 lane_rows = _lane_rows(conn)
-rankable_count = count_rankable_lanes(lane_rows)
+rankable_count = content_performance_model["rankable_count"]
 
 # Best-lane callout — gated on the §14.4 anti-overfitting rule.
 if rankable_count >= 3:
