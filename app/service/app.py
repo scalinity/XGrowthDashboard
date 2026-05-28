@@ -43,20 +43,30 @@ def create_app(
     if run_invariants:
         invariants.run_all()
 
-    app = FastAPI(title="X Growth Dashboard — local service", version=SERVICE_VERSION)
+    docs_kwargs: dict[str, str | None] = {}
+    if dev_cors_origins is None:
+        docs_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+    app = FastAPI(
+        title="X Growth Dashboard — local service",
+        version=SERVICE_VERSION,
+        **docs_kwargs,
+    )
     auth = BearerTokenAuth(token)
 
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(request, exc: HTTPException):  # type: ignore[no-untyped-def]
+        from app.service.log_redaction import redact_detail
+        from fastapi.responses import JSONResponse
+
+        safe_detail = redact_detail(exc.detail)
         if exc.status_code >= 400:
             record_failed_request(
                 request.url.path,
                 exc.status_code,
-                str(exc.detail),
+                safe_detail,
             )
-        from fastapi.responses import JSONResponse
-
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return JSONResponse(status_code=exc.status_code, content={"detail": safe_detail})
 
     if dev_cors_origins:
         app.add_middleware(

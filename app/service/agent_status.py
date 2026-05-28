@@ -52,7 +52,12 @@ def build_capabilities(conn: sqlite3.Connection) -> dict[str, Any]:  # noqa: ARG
     xurl = shutil.which("xurl") is not None
     return {
         "anthropic": {"available": anthropic, "label": "Growth Agent drafting"},
-        "voyage": {"available": bool(os.environ.get("VOYAGE_API_KEY")), "label": "Embeddings / repetition guard"},
+        "voyage": {
+            "available": bool(
+                resolve_secret("VOYAGE_API_KEY") or os.environ.get("VOYAGE_API_KEY")
+            ),
+            "label": "Embeddings / repetition guard",
+        },
         "x_api": {
             "available": xurl and str(get_setting(conn, "data_collection_mode", "api")) == "api",
             "label": "X API reads",

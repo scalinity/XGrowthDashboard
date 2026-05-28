@@ -7,8 +7,11 @@ import os
 import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from app.paths import application_support_dir
+from app.secret_store import resolve_secret
+from app.service.settings_schema import MANAGED_SECRETS
 
 REDACTED = "[REDACTED]"
 
@@ -24,15 +27,12 @@ _PUBLISH_TOKEN_PATTERN = re.compile(r"\bpublish[_-]?token[=:\s]+[^\s\"']+", re.I
 
 def collect_configured_secrets() -> list[str]:
     """Return non-empty secret values currently configured in the process."""
-    names = (
-        "ANTHROPIC_API_KEY",
-        "XAI_API_KEY",
-        "X_API_BEARER_TOKEN",
-        "X_API_ACCESS_TOKEN",
-        "X_API_REFRESH_TOKEN",
-    )
-    values = [os.environ.get(name, "") for name in names]
-    return [value for value in values if value]
+    values: list[str] = []
+    for name in sorted(MANAGED_SECRETS):
+        resolved = resolve_secret(name) or os.environ.get(name, "")
+        if resolved:
+            values.append(resolved)
+    return values
 
 
 def redact_text(text: str, extra_secrets: list[str] | None = None) -> str:
@@ -47,6 +47,17 @@ def redact_text(text: str, extra_secrets: list[str] | None = None) -> str:
         if secret and secret in redacted:
             redacted = redacted.replace(secret, REDACTED)
     return redacted
+
+
+def redact_detail(detail: Any) -> Any:
+    """Redact secrets in HTTP error payloads while preserving structure."""
+    if isinstance(detail, str):
+        return redact_text(detail)
+    if isinstance(detail, dict):
+        return {key: redact_detail(value) for key, value in detail.items()}
+    if isinstance(detail, list):
+        return [redact_detail(value) for value in detail]
+    return detail
 
 
 class RedactingFilter(logging.Filter):
