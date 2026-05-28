@@ -23,6 +23,7 @@ from app.components.charts.follower_trend import FollowerPoint, follower_trend_c
 from app.components.theme import PALETTE, apply_theme, hairline, kicker
 from app.forms import get_setting
 from app.pages import open_connection
+from app.read_models.progress import build_progress_read_model
 
 
 def _milestones_by_category(conn, category: str):
@@ -155,6 +156,7 @@ def _render_ladder(rows, *, current_followers: int | None, ladder_kind: str) -> 
 # ---------------------------------------------------------------------------
 apply_theme()
 conn = open_connection()
+progress_model = build_progress_read_model(conn)
 
 kicker("LONG-ARC TREND · §14.3")
 st.title("Progress")
@@ -220,7 +222,7 @@ from datetime import timedelta as _timedelta  # noqa: E402
 
 st.markdown("## Velocity projection")
 _proj = _velocity.get_velocity_projection(conn)
-_noise_floor = _velocity.get_noise_floor(conn)
+_noise_floor = progress_model["noise_floor"]
 if _proj is None:
     st.markdown(
         "<p class='faint' style='font-size:0.85rem;'>"

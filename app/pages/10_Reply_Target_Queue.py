@@ -60,6 +60,7 @@ from app.jobs.reply_target_maintenance import (
     stale_drafted_candidates,
 )
 from app.pages import UNSELECTED, open_connection
+from app.read_models.reply_queue import build_reply_queue_read_model
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ if _stale_drafted_rows:
 # ---------------------------------------------------------------------------
 # Counter strip
 # ---------------------------------------------------------------------------
-counts = _counters(conn)
+counts = build_reply_queue_read_model(conn)["counters"]
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     readout_card("Candidates", str(counts["candidates"]))

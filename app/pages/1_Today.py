@@ -31,6 +31,8 @@ from app.components.theme import PALETTE, apply_theme, callout, hairline, kicker
 from app.forms import get_setting, snapshot as snapshot_form
 from app.jobs import x_activity_sync
 from app.pages import open_connection
+from app.read_models.today import build_today_read_model
+from app.agent.velocity import get_noise_floor
 
 
 def _format_delta(value: int | None, *, noise_floor: int = 2) -> tuple[str, str]:
@@ -96,6 +98,8 @@ def _current_milestone(conn):
 # ---------------------------------------------------------------------------
 apply_theme()
 conn = open_connection()
+today_model = build_today_read_model(conn)
+noise_floor = get_noise_floor(conn)
 
 today = _date_t.today()
 today_row = _today_followers_snapshot(conn)
@@ -178,14 +182,14 @@ else:
         )
         st.progress(progress_pct, text=f"{progress_pct * 100:.1f}%")
 
-    if today_row["delta_7d"] is None or abs(today_row["delta_7d"]) < 10:
+    if not today_model["velocity_measurable"]:
         callout(
             "<em>7-day velocity not yet measurable.</em> Per §13 rule 6, "
-            "velocity displays only when |Δ7d| ≥ 10. Judge the week, "
+            f"velocity displays only when |Δ7d| ≥ {noise_floor}. Judge the week, "
             "not the morning."
         )
     else:
-        v7 = today_row["velocity_7d_per_day"]
+        v7 = today_model["velocity_7d_per_day"]
         st.markdown(
             f"<div class='callout'><em>7-day velocity:</em> "
             f"<span class='numeric'>{v7:+.1f} followers/day</span> over the last week.</div>",
@@ -194,27 +198,18 @@ else:
 
 hairline()
 
-# Phase 5.9 / §28.17 — content-type recommendation. Surfaces the
-# under-represented V/G/P/P slice over the rolling window so Daniel
-# sees the gap before he picks today's draft. NOT a daily-cadence
-# prescription (the source video pushes V/G/P/P every day; XGrowth
-# explicitly rejects that — see §13 hard rule 5).
-from app.agent.content_types import (  # noqa: E402 — page-local import
-    get_content_type_gaps as _get_ct_gaps,
-    get_recommendation_window_days as _get_ct_window,
-)
-_ct_window = _get_ct_window(conn)
-_ct_gap = _get_ct_gaps(conn, window_days=_ct_window)
-if _ct_gap["under_represented"]:
+# Phase 5.9 / §28.17 — content-type recommendation from shared read model.
+_ct_reco = today_model["content_type_reco"]
+if _ct_reco.get("under_represented"):
     callout(
         f"<em>Today's content-type recommendation:</em> "
-        f"<span class='numeric'>{_ct_gap['under_represented']}</span> · "
-        f"<span class='faint'>{_ct_gap['rationale']}</span>"
+        f"<span class='numeric'>{_ct_reco['under_represented']}</span> · "
+        f"<span class='faint'>{_ct_reco.get('rationale', '')}</span>"
     )
 else:
     callout(
         f"<em>Today's content-type recommendation:</em> "
-        f"<span class='faint'>{_ct_gap['rationale']}</span>"
+        f"<span class='faint'>{_ct_reco.get('rationale', '')}</span>"
     )
 
 hairline()
