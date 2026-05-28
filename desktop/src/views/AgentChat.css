@@ -35,9 +35,10 @@
 /* ── Full-bleed wrapper ── */
 
 .agent-chat-wrapper {
-  margin: -2.2rem -2.4rem -4rem;
+  margin: 0 -2.4rem -4rem;
   width: calc(100% + 4.8rem);
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -94,6 +95,11 @@
   border: 1px solid color-mix(in srgb, var(--phosphor) 35%, transparent);
   border-radius: 999px;
   padding: 0.15rem 0.55rem;
+}
+
+.agent-chat__mode-chip--warn {
+  color: var(--warn-amber);
+  border-color: color-mix(in srgb, var(--warn-amber) 45%, transparent);
 }
 
 .agent-chat__topbar-sub {
@@ -178,10 +184,21 @@
 }
 
 .agent-chat__convo-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
   padding: 0.45rem 0.7rem;
   cursor: pointer;
   border-left: 2px solid transparent;
   transition: background 140ms ease, border-color 140ms ease;
+  color: inherit;
+  font: inherit;
+}
+.agent-chat__convo-item:focus-visible {
+  outline: 2px solid var(--phosphor);
+  outline-offset: -2px;
 }
 .agent-chat__convo-item:hover {
   background: rgba(255, 255, 255, 0.015);
@@ -827,5 +844,23 @@
 .agent-chat__prompt-chip:hover {
   border-color: var(--phosphor);
   color: var(--phosphor);
-  background: rgba(95, 179, 161, 0.04);
+  background: color-mix(in srgb, var(--phosphor) 4%, transparent);
+}
+
+.agent-chat__convo-row:focus-within .agent-chat__convo-actions {
+  opacity: 1;
+}
+
+.capabilities-banner__body {
+  margin-top: 0.45rem;
+  font-size: 0.88rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-stream-chunk,
+  .agent-tool-detail--live,
+  .agent-thinking,
+  .agent-cursor {
+    animation: none !important;
+  }
 }

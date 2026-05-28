@@ -153,4 +153,16 @@ export async function copyDiagnosticsToClipboard(): Promise<string> {
   return text;
 }
 
+export async function fetchToday() {
+  return apiFetch<import("./contracts").TodayResponse>("/views/today");
+}
+
+export async function fetchReplyQueue() {
+  return apiFetch<import("./contracts").ReplyQueueResponse>("/views/reply-queue");
+}
+
+export async function fetchSettings() {
+  return apiFetch<import("./contracts").SettingsResponse>("/settings");
+}
+
 // S3: removed dead api.* convenience wrappers — views use apiFetch<T> directly.

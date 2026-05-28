@@ -63,6 +63,7 @@ export function Layout({
                     key={v.id}
                     type="button"
                     onClick={() => onSelect(v.id)}
+                    aria-current={active ? "page" : undefined}
                     style={{
                       display: "block",
                       width: "100%",
@@ -94,6 +95,9 @@ export function Layout({
           width: "100%",
           padding: "2.2rem 2.4rem 4rem",
           overflowX: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: "100vh",
         }}
       >
         <CapabilitiesBanner />
