@@ -87,6 +87,44 @@ def _normalize_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]
     return normalized
 
 
+_TOOL_ROUND_CAP_USER_MESSAGE = (
+    "Growth Agent stopped after too many tool-use rounds. "
+    "Try narrowing the request and run it again."
+)
+_TOOL_ROUND_CAP_TOOL_ERROR = (
+    "Tool round limit reached for this turn — narrow the request and try again."
+)
+
+
+def _tool_result_content_payload(result: dict[str, Any]) -> Any:
+    """Serialize a dispatch result for persistence and Anthropic replay."""
+    status = result.get("status")
+    if status in {"success", "partial"}:
+        return result.get("result")
+    return result.get("error") or result.get("rationale") or ""
+
+
+def _append_tool_round_cap_results(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    """Synthesize tool_result rows when the per-turn tool round cap is hit.
+
+  Without these rows, the last assistant message leaves dangling tool_use
+  blocks in history and the next Anthropic call fails validation.
+    """
+    for tc in tool_calls:
+        append_message(
+            conn,
+            conversation_id=conversation_id,
+            role="tool_result",
+            content=json.dumps(_TOOL_ROUND_CAP_TOOL_ERROR),
+            tool_call_id=tc.get("id"),
+        )
+
+
 # Phase 10 / §29.5 reply_intent promotion. Cached defaults match the
 # migration 023 INSERT OR IGNORE seed. Settings-row lookups happen on
 # every dispatch — the lookup is sub-millisecond and the value is
@@ -700,10 +738,12 @@ class AgentClient:
             if not tool_calls:
                 break
             if tool_rounds >= MAX_TOOL_ROUNDS:
-                turn.error = (
-                    "Growth Agent stopped after too many tool-use rounds. "
-                    "Try narrowing the request and run it again."
+                _append_tool_round_cap_results(
+                    conn,
+                    conversation_id=conversation_id,
+                    tool_calls=tool_calls,
                 )
+                turn.error = _TOOL_ROUND_CAP_USER_MESSAGE
                 break
 
             tool_rounds += 1
@@ -746,10 +786,7 @@ class AgentClient:
                 # Switch on `status` instead of truthy result — a legitimate empty
                 # result ({} / []) is falsy and used to fall through to error,
                 # which was None, persisted as the literal string "null" (W6).
-                if result.get("status") == "success":
-                    content_payload = result.get("result")
-                else:
-                    content_payload = result.get("error") or result.get("rationale") or ""
+                content_payload = _tool_result_content_payload(result)
                 append_message(
                     conn,
                     conversation_id=conversation_id,
@@ -873,15 +910,12 @@ class AgentClient:
             if not tool_calls:
                 break
             if tool_rounds >= MAX_TOOL_ROUNDS:
-                yield (
-                    "error",
-                    {
-                        "error": (
-                            "Growth Agent stopped after too many tool-use rounds. "
-                            "Try narrowing the request and run it again."
-                        )
-                    },
+                _append_tool_round_cap_results(
+                    conn,
+                    conversation_id=conversation_id,
+                    tool_calls=tool_calls,
                 )
+                yield ("error", {"error": _TOOL_ROUND_CAP_USER_MESSAGE})
                 return
 
             tool_rounds += 1
@@ -920,10 +954,7 @@ class AgentClient:
                     current_attempt_index=current_attempt,
                 )
                 dispatched.append(result)
-                if result.get("status") == "success":
-                    content_payload = result.get("result")
-                else:
-                    content_payload = result.get("error") or result.get("rationale") or ""
+                content_payload = _tool_result_content_payload(result)
                 yield (
                     "tool_result",
                     {
@@ -1142,7 +1173,7 @@ class AgentClient:
                             "type": "tool_use",
                             "id": tc.get("id"),
                             "name": tc["name"],
-                            "input": tc["dispatch_input"],
+                            "input": tc["input"],
                         }
                     )
                 history.append({"role": "assistant", "content": blocks})

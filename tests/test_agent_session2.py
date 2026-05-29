@@ -9,6 +9,7 @@ than the perimeter itself.
 
 from __future__ import annotations
 
+import json
 import os
 import zlib
 
@@ -402,6 +403,109 @@ class TestAgentClientToolLoop:
                 "status": "error",
             }
         ]
+
+    def test_tool_round_cap_synthesizes_tool_results_for_follow_up(self, db_conn):
+        """Fifth tool round must not leave dangling tool_use rows in history."""
+
+        class AlwaysToolClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return (
+                    f"tool round {self.calls}",
+                    [{"id": f"toolu_{self.calls}", "name": "find_reply_targets", "input": {}}],
+                    3,
+                    2,
+                )
+
+        conversation_id = start_conversation(db_conn, title="tool cap test")
+        client = AlwaysToolClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="Keep calling tools",
+        )
+
+        assert turn.error is not None
+        assert "too many tool-use rounds" in turn.error
+        rows = db_conn.execute(
+            "SELECT role, tool_call_id, content FROM agent_messages "
+            "WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        ).fetchall()
+        roles = [row["role"] for row in rows]
+        assert roles.count("assistant") == 5
+        assert roles.count("tool_result") == 5
+        assert roles[-1] == "tool_result"
+        assert rows[-1]["tool_call_id"] == "toolu_5"
+        assert rows[-2]["role"] == "assistant"
+        assert rows[-2]["content"] == "tool round 5"
+
+        class FinalReplyClient(AlwaysToolClient):
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return ("Conversation recovered after the cap.", [], 2, 1)
+
+        recovery_client = FinalReplyClient()
+        recovery_client.calls = client.calls
+        follow_up = recovery_client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="Can we continue?",
+        )
+        assert follow_up.error is None
+        assert follow_up.assistant_text == "Conversation recovered after the cap."
+        assert recovery_client.calls == client.calls + 1
+
+    def test_partial_tool_status_persists_result_payload(self, db_conn, monkeypatch):
+        partial_payload = {
+            "post_id": 42,
+            "context": {"id": 42},
+            "note": "stub lesson context",
+        }
+
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "partial",
+                "result": partial_payload,
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class PartialThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        "Extracting lesson context.",
+                        [{"id": "toolu_lesson", "name": "extract_lesson", "input": {"post_id": 42}}],
+                        4,
+                        3,
+                    )
+                history = self._load_messages_history(conn, conversation_id)
+                tool_result = history[-1]["content"][0]["content"]
+                assert json.loads(tool_result) == partial_payload
+                return ("Lesson drafted from partial context.", [], 5, 4)
+
+        conversation_id = start_conversation(db_conn, title="partial tool result test")
+        turn = PartialThenFinalClient().send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="Extract a lesson",
+        )
+        assert turn.error is None
+        assert turn.assistant_text == "Lesson drafted from partial context."
 
 
 # ===========================================================================
