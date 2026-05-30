@@ -93,10 +93,11 @@ def build_today_read_model(conn: sqlite3.Connection) -> dict[str, Any]:
                ps.composite_label
         FROM agent_drafts ad
         LEFT JOIN prepublish_scores ps ON ps.id = ad.prepublish_score_id
-        WHERE date(ad.created_at) = date('now')
+        WHERE date(ad.created_at) = ?
           AND ad.status = 'proposed'
         ORDER BY ad.id DESC LIMIT 5
         """,
+        (today_iso,),
     ).fetchall()
     pending_drafts = []
     for d in pending_rows:

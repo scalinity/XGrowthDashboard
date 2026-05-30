@@ -33,6 +33,7 @@ from app.agent import blogs as _blogs
 from app.agent import calendar as _calendar
 from app.agent import campaigns as _campaigns
 from app.agent import inspiration as _inspiration
+from app.db import transaction as _db_transaction
 from app.forms import get_setting
 from app.read_models.content_performance import (
     build_content_performance_read_model as _content_performance_slice,
@@ -590,6 +591,61 @@ def _next_rep_slice(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _coach_api_messages(
+    conn: sqlite3.Connection, conversation_id: int, user_text: str
+) -> list[dict[str, str]]:
+    """Build Anthropic messages from persisted history plus the in-hand user turn.
+
+    P510R-3: the pending user message is NOT inserted until the API call succeeds.
+    """
+    rows = conn.execute(
+        "SELECT role, content FROM agent_messages "
+        "WHERE conversation_id = ? ORDER BY id",
+        (conversation_id,),
+    ).fetchall()
+    messages = [
+        {"role": r["role"], "content": r["content"]}
+        for r in rows
+        if r["role"] in ("user", "assistant")
+    ]
+    messages.append({"role": "user", "content": user_text})
+    return messages
+
+
+def _persist_coach_turn(
+    conn: sqlite3.Connection,
+    conversation_id: int,
+    user_text: str,
+    *,
+    clean_text: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    evidence_citations_json: str | None,
+) -> None:
+    """Atomically persist user + assistant rows after a successful Coach API call."""
+    with _db_transaction(conn):
+        conn.execute(
+            "INSERT INTO agent_messages (conversation_id, role, content) "
+            "VALUES (?, 'user', ?)",
+            (conversation_id, user_text),
+        )
+        conn.execute(
+            "INSERT INTO agent_messages "
+            "(conversation_id, role, content, model, input_tokens, output_tokens, "
+            "evidence_citations_json) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+            (
+                conversation_id,
+                clean_text,
+                model,
+                input_tokens,
+                output_tokens,
+                evidence_citations_json,
+            ),
+        )
+
+
 def _coach_turn(
     conn: sqlite3.Connection, conversation_id: int, user_text: str
 ) -> dict[str, Any]:
@@ -613,21 +669,8 @@ def _coach_turn(
 
     import anthropic
 
-    # Persist user message first (matches AgentClient.send_message_sync order).
-    conn.execute(
-        "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'user', ?)",
-        (conversation_id, user_text),
-    )
-    conn.commit()
-
-    # Build the shared system prompt + load conversation history.
     system_prompt = prompt_builder.build_system_prompt(conn)
-    rows = conn.execute(
-        "SELECT role, content FROM agent_messages "
-        "WHERE conversation_id = ? ORDER BY id",
-        (conversation_id,),
-    ).fetchall()
-    messages = [{"role": r["role"], "content": r["content"]} for r in rows]
+    messages = _coach_api_messages(conn, conversation_id, user_text)
 
     model = "claude-sonnet-4-20250514"
     try:
@@ -648,22 +691,21 @@ def _coach_turn(
             conn,
             refuse_without_evidence=bool(get_setting(conn, "coach_refuse_without_evidence", True)),
         )
-
-        # Persist assistant message.
-        conn.execute(
-            "INSERT INTO agent_messages "
-            "(conversation_id, role, content, model, input_tokens, output_tokens, evidence_citations_json) "
-            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
-            (
-                conversation_id,
-                result.clean_text,
-                model,
-                in_tok,
-                out_tok,
-                json.dumps([c.to_dict() for c in result.surviving]) if result.surviving else None,
-            ),
+        evidence_json = (
+            json.dumps([c.to_dict() for c in result.surviving])
+            if result.surviving
+            else None
         )
-        conn.commit()
+        _persist_coach_turn(
+            conn,
+            conversation_id,
+            user_text,
+            clean_text=result.clean_text,
+            model=model,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            evidence_citations_json=evidence_json,
+        )
         return {
             "user_text": user_text, "assistant_text": result.clean_text,
             "tool_calls": [], "input_tokens": in_tok, "output_tokens": out_tok,
@@ -695,19 +737,8 @@ def _coach_turn_stream(
 
     import anthropic
 
-    conn.execute(
-        "INSERT INTO agent_messages (conversation_id, role, content) VALUES (?, 'user', ?)",
-        (conversation_id, user_text),
-    )
-    conn.commit()
-
     system_prompt = prompt_builder.build_system_prompt(conn)
-    rows = conn.execute(
-        "SELECT role, content FROM agent_messages "
-        "WHERE conversation_id = ? ORDER BY id",
-        (conversation_id,),
-    ).fetchall()
-    messages = [{"role": r["role"], "content": r["content"]} for r in rows]
+    messages = _coach_api_messages(conn, conversation_id, user_text)
 
     model = "claude-sonnet-4-20250514"
     try:
@@ -737,21 +768,21 @@ def _coach_turn_stream(
             conn,
             refuse_without_evidence=bool(get_setting(conn, "coach_refuse_without_evidence", True)),
         )
-
-        conn.execute(
-            "INSERT INTO agent_messages "
-            "(conversation_id, role, content, model, input_tokens, output_tokens, evidence_citations_json) "
-            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
-            (
-                conversation_id,
-                result.clean_text,
-                model,
-                in_tok,
-                out_tok,
-                json.dumps([c.to_dict() for c in result.surviving]) if result.surviving else None,
-            ),
+        evidence_json = (
+            json.dumps([c.to_dict() for c in result.surviving])
+            if result.surviving
+            else None
         )
-        conn.commit()
+        _persist_coach_turn(
+            conn,
+            conversation_id,
+            user_text,
+            clean_text=result.clean_text,
+            model=model,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            evidence_citations_json=evidence_json,
+        )
         yield (
             "assistant",
             {
