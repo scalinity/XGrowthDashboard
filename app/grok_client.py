@@ -737,6 +737,264 @@ def _parse_candidates_from_response(
     return out
 
 
+def _extract_assistant_content(body: dict[str, Any] | None) -> str | None:
+    """Return the model's prose from a chat-completions body, if present."""
+    if not body or not isinstance(body, dict):
+        return None
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    return None
+
+
+def fetch_post_by_url(
+    url: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    expected_post_id: str | None = None,
+    api_key: str | None = None,
+    model: str = DEFAULT_GROK_MODEL,
+    endpoint: str | None = None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    retry_attempts: int = _DEFAULT_RETRY_ATTEMPTS,
+) -> dict[str, Any]:
+    """Ask Grok Live Search to cite a specific X status URL.
+
+    Agent Chat comparison path (§28.4) — discovery/text supplement only.
+    Engagement metrics remain xurl's job per §29.2.
+    """
+    clean_url = (url or "").strip()
+    if not clean_url:
+        raise ValueError("url must be a non-empty string")
+
+    post_id = expected_post_id
+    if not post_id:
+        match = _X_URL_RE.match(clean_url)
+        if match is not None:
+            post_id = match.group("post_id")
+
+    audit_query = f"fetch_post_by_url: {clean_url}"
+
+    key = api_key or os.environ.get("XAI_API_KEY", "").strip()
+    if not key:
+        raise GrokUnavailable(
+            "XAI_API_KEY is not set in .env — see .env.example for the line "
+            "and https://console.x.ai/ to mint a key."
+        )
+    if _is_placeholder_key(key):
+        raise GrokUnavailable(
+            "XAI_API_KEY looks like the documented placeholder "
+            f"({key!r:.40}…). Replace it with a real key in .env."
+        )
+
+    if conn is None:
+        _LOG.warning(
+            "grok_client.fetch_post_by_url called with conn=None — "
+            "§28.6 ceiling preflight skipped."
+        )
+    elif cost.is_combined_ceiling_breached(
+        conn, projected_call_cost_usd=GROK_PROJECTED_CALL_COST_GUESS_USD
+    ):
+        _log_grok_response(
+            conn,
+            query=audit_query,
+            request_payload={"preflight": "cost_ceiling_check", "url": clean_url},
+            response_status_code=None,
+            response_body=None,
+            rate_snapshot=None,
+            rejection_reason=_REJECTION_COST_CEILING,
+            duration_ms=0,
+        )
+        raise GrokCostCeilingError(
+            "Grok fetch_post_by_url refused — §28.6 combined ceiling reached."
+        )
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You locate a specific X post by URL. Return live citations "
+                    "for the exact status URL Daniel provided. Quote the post text "
+                    "in your reply when Live Search surfaces it."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Find this exact X post and cite its URL: {clean_url}"
+                ),
+            },
+        ],
+        "search_parameters": {
+            "mode": "on",
+            "sources": [{"type": "x"}],
+            "max_search_results": 10,
+            "return_citations": True,
+        },
+    }
+    post_url = endpoint or GROK_ENDPOINT
+    retry_attempts = max(0, retry_attempts)
+
+    last_server_error: GrokError | None = None
+    attempt = 0
+    started_total = time.perf_counter()
+    while attempt <= retry_attempts:
+        started = time.perf_counter()
+        try:
+            response_status, response_body, retry_after = _http_post_json(
+                url=post_url,
+                payload=payload,
+                api_key=key,
+                timeout_seconds=timeout_seconds,
+            )
+        except GrokUnavailable as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            _log_grok_response(
+                conn,
+                query=audit_query,
+                request_payload=payload,
+                response_status_code=None,
+                response_body=None,
+                rate_snapshot=None,
+                rejection_reason=_REJECTION_OTHER,
+                duration_ms=duration_ms,
+            )
+            raise GrokUnavailable(str(exc)) from exc
+
+        duration_ms = int((time.perf_counter() - started) * 1000)
+
+        if response_status == 429:
+            _log_grok_response(
+                conn,
+                query=audit_query,
+                request_payload=payload,
+                response_status_code=response_status,
+                response_body=response_body,
+                rate_snapshot=None,
+                rejection_reason=_REJECTION_RATE_LIMIT,
+                duration_ms=duration_ms,
+            )
+            raise GrokRateLimitError(
+                "xAI returned 429 for fetch_post_by_url",
+                retry_after_seconds=retry_after,
+            )
+
+        if response_status is not None and response_status >= 500:
+            last_server_error = GrokServerError(
+                f"xAI returned {response_status}: "
+                f"{_safe_truncate(response_body, 300)}",
+                status_code=response_status,
+            )
+            _log_grok_response(
+                conn,
+                query=audit_query,
+                request_payload=payload,
+                response_status_code=response_status,
+                response_body=response_body,
+                rate_snapshot=None,
+                rejection_reason=_REJECTION_5XX,
+                duration_ms=duration_ms,
+            )
+            attempt += 1
+            if attempt > retry_attempts:
+                break
+            if conn is not None and cost.is_combined_ceiling_breached(conn):
+                raise GrokCostCeilingError(
+                    "5xx retry refused — §28.6 combined ceiling reached."
+                )
+            backoff = _DEFAULT_RETRY_SLEEP_SECONDS * (2 ** (attempt - 1))
+            backoff = min(backoff, 5.0) + random.uniform(0, 0.5)
+            time.sleep(backoff)
+            continue
+
+        if response_status is None or response_status >= 400:
+            _log_grok_response(
+                conn,
+                query=audit_query,
+                request_payload=payload,
+                response_status_code=response_status,
+                response_body=response_body,
+                rate_snapshot=None,
+                rejection_reason=_REJECTION_OTHER,
+                duration_ms=duration_ms,
+            )
+            raise GrokError(
+                f"xAI returned {response_status}: "
+                f"{_safe_truncate(response_body, 300)}",
+                status_code=response_status,
+            )
+
+        candidates = _parse_candidates_from_response(response_body)
+        matched = None
+        if post_id:
+            matched = next(
+                (c for c in candidates if c.target_x_post_id == post_id),
+                None,
+            )
+        if matched is None and candidates:
+            matched = candidates[0]
+
+        assistant_text = _extract_assistant_content(response_body)
+        rate_snapshot = _build_rate_snapshot(response_body, model=model)
+        grok_id = _log_grok_response(
+            conn,
+            query=audit_query,
+            request_payload=payload,
+            response_status_code=response_status,
+            response_body=response_body,
+            rate_snapshot=rate_snapshot,
+            rejection_reason=None,
+            duration_ms=duration_ms,
+        )
+
+        citation_matched = (
+            matched is not None
+            and post_id is not None
+            and matched.target_x_post_id == post_id
+        )
+        status = "success" if matched is not None or assistant_text else "error"
+        result: dict[str, Any] = {
+            "status": status,
+            "target_post_url": clean_url,
+            "target_post_id": post_id,
+            "target_post_text": assistant_text,
+            "target_author_handle": matched.target_author_handle if matched else None,
+            "citation_matched": citation_matched,
+            "citations_count": len(candidates),
+            "assistant_excerpt": _safe_truncate(assistant_text, 500) if assistant_text else None,
+            "grok_api_response_id": grok_id,
+            "elapsed_seconds": round(time.perf_counter() - started_total, 3),
+        }
+        if status == "error":
+            result["error"] = (
+                "Grok did not cite the requested status URL"
+                if not matched
+                else "Grok returned no post text"
+            )
+        _LOG.info(
+            "grok_client.fetch_post_by_url url=%r matched=%s duration_ms=%d",
+            clean_url[:80],
+            citation_matched,
+            int((time.perf_counter() - started_total) * 1000),
+        )
+        return result
+
+    if last_server_error is not None:
+        raise last_server_error
+    raise GrokServerError("Grok server error after retry budget exhausted")
+
+
 def _build_rate_snapshot(
     body: dict[str, Any] | None, *, model: str
 ) -> dict[str, Any]:
