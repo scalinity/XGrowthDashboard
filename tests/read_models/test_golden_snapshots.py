@@ -45,6 +45,16 @@ def _stabilize(name: str, payload: dict) -> dict:
     cleaned = dict(payload)
     for key in VOLATILE_KEYS.get(name, set()):
         cleaned.pop(key, None)
+    if name == "progress":
+        # weekly_counts is anchored to the current ISO week, so its week_start
+        # dates move every week. Normalize them to positional placeholders so
+        # the snapshot guards shape (list length + keys), not wall-clock dates.
+        weekly = cleaned.get("weekly_counts")
+        if isinstance(weekly, list):
+            cleaned["weekly_counts"] = [
+                {**entry, "week_start": f"week-{idx}"}
+                for idx, entry in enumerate(weekly)
+            ]
     return cleaned
 
 
