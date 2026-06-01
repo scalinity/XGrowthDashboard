@@ -9,6 +9,7 @@ than the perimeter itself.
 
 from __future__ import annotations
 
+import json
 import os
 import zlib
 
@@ -361,6 +362,142 @@ class TestAgentClientToolLoop:
             "tool_result",
             "assistant",
         ]
+
+    def test_tool_round_cap_persists_tool_results_for_follow_up_turn(
+        self, db_conn, monkeypatch
+    ):
+        """Assistant tool_use at the cap must get tool_result rows or the next turn breaks."""
+
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "success",
+                "result": {"ok": True},
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class AlwaysToolClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.round = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.round += 1
+                if self.round >= 6:
+                    return (f"model round {self.round}", [], 1, 1)
+                return (
+                    f"model round {self.round}",
+                    [
+                        {
+                            "id": f"toolu_{self.round}",
+                            "name": "find_reply_targets",
+                            "input": {},
+                        }
+                    ],
+                    1,
+                    1,
+                )
+
+        conversation_id = start_conversation(db_conn, title="tool cap test")
+        client = AlwaysToolClient()
+        capped = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="keep calling tools",
+        )
+        assert capped.error is not None
+        assert "too many tool-use rounds" in capped.error
+
+        assistant_tool_ids: list[str] = []
+        tool_result_ids: list[str] = []
+        tool_rows = db_conn.execute(
+            """
+            SELECT role, tool_calls_json, tool_call_id, content
+            FROM agent_messages
+            WHERE conversation_id = ?
+            ORDER BY id
+            """,
+            (conversation_id,),
+        ).fetchall()
+        cap_tool_results: list[str] = []
+        for row in tool_rows:
+            if row["role"] == "assistant" and row["tool_calls_json"]:
+                for tc in json.loads(row["tool_calls_json"]):
+                    assistant_tool_ids.append(tc["id"])
+            if row["role"] == "tool_result":
+                tool_result_ids.append(row["tool_call_id"])
+                if "too many tool-use rounds" in row["content"]:
+                    cap_tool_results.append(row["tool_call_id"])
+
+        assert assistant_tool_ids
+        assert set(assistant_tool_ids) == set(tool_result_ids)
+        assert cap_tool_results == [assistant_tool_ids[-1]]
+
+        follow_up = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="try again after cap",
+        )
+        assert follow_up.error is None
+        assert follow_up.assistant_text == "model round 6"
+
+    def test_partial_tool_result_persists_handler_payload(self, db_conn, monkeypatch):
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "partial",
+                "result": {"post_id": 42, "context": {"id": 42}},
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class PartialThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        "extracting lesson",
+                        [
+                            {
+                                "id": "toolu_lesson",
+                                "name": "extract_lesson",
+                                "input": {"post_id": 42},
+                            }
+                        ],
+                        3,
+                        2,
+                    )
+                return ("done", [], 1, 1)
+
+        conversation_id = start_conversation(db_conn, title="partial tool result")
+        client = PartialThenFinalClient()
+        turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="extract a lesson",
+        )
+        assert turn.error is None
+        tool_result = db_conn.execute(
+            """
+            SELECT content FROM agent_messages
+            WHERE conversation_id = ? AND role = 'tool_result'
+            """,
+            (conversation_id,),
+        ).fetchone()
+        payload = json.loads(tool_result["content"])
+        assert payload["post_id"] == 42
+        assert payload["context"]["id"] == 42
 
     def test_unknown_tool_name_returns_structured_error(self, db_conn):
         class UnknownToolThenFinalClient(AgentClient):
