@@ -568,6 +568,47 @@ def test_stream_message_streams_coach_text_before_final_assistant(
     assert messages[1]["output_tokens"] == 5
 
 
+def test_coach_stream_leaves_no_orphan_user_row_on_api_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Failed Coach API calls must not persist a user-only turn."""
+
+    class _FailingMessages:
+        def stream(self, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated outage")
+
+    class _FailingAnthropic:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.messages = _FailingMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stub-key")
+    monkeypatch.setitem(
+        sys.modules,
+        "anthropic",
+        SimpleNamespace(Anthropic=_FailingAnthropic),
+    )
+    client = _build_client(tmp_path / "coach_api_failure.db")
+    cid = client.post(
+        "/agent/conversations",
+        json={"title": "Coach session", "context_seed": "coach"},
+        headers=AUTH,
+    ).json()["conversation_id"]
+
+    resp = client.post(
+        f"/agent/conversations/{cid}/stream",
+        json={"text": "What should I do next?"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    assert "event: error" in resp.text
+    assert "simulated outage" in resp.text
+
+    listed = client.get(f"/agent/conversations/{cid}/messages", headers=AUTH)
+    assert listed.status_code == 200
+    assert listed.json()["messages"] == []
+
+
 def test_stream_message_emits_fetch_x_post_tool_progress(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
