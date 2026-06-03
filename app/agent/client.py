@@ -87,6 +87,37 @@ def _normalize_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]
     return normalized
 
 
+_TOOL_ROUND_CAP_MESSAGE = (
+    "Growth Agent stopped after too many tool-use rounds. "
+    "Try narrowing the request and run it again."
+)
+
+
+def _append_tool_round_cap_results(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    """Persist tool_result rows when the per-turn tool round cap is hit.
+
+  Without these placeholders the last assistant row would carry tool_use
+  blocks with no matching tool_result, which poisons the Anthropic history
+  on the next user message.
+    """
+    for tc in tool_calls:
+        tc_id = tc.get("id")
+        if not isinstance(tc_id, str) or not tc_id.strip():
+            continue
+        append_message(
+            conn,
+            conversation_id=conversation_id,
+            role="tool_result",
+            content=json.dumps({"error": _TOOL_ROUND_CAP_MESSAGE}),
+            tool_call_id=tc_id,
+        )
+
+
 # Phase 10 / §29.5 reply_intent promotion. Cached defaults match the
 # migration 023 INSERT OR IGNORE seed. Settings-row lookups happen on
 # every dispatch — the lookup is sub-millisecond and the value is
@@ -700,10 +731,12 @@ class AgentClient:
             if not tool_calls:
                 break
             if tool_rounds >= MAX_TOOL_ROUNDS:
-                turn.error = (
-                    "Growth Agent stopped after too many tool-use rounds. "
-                    "Try narrowing the request and run it again."
+                _append_tool_round_cap_results(
+                    conn,
+                    conversation_id=conversation_id,
+                    tool_calls=tool_calls,
                 )
+                turn.error = _TOOL_ROUND_CAP_MESSAGE
                 break
 
             tool_rounds += 1
@@ -873,15 +906,12 @@ class AgentClient:
             if not tool_calls:
                 break
             if tool_rounds >= MAX_TOOL_ROUNDS:
-                yield (
-                    "error",
-                    {
-                        "error": (
-                            "Growth Agent stopped after too many tool-use rounds. "
-                            "Try narrowing the request and run it again."
-                        )
-                    },
+                _append_tool_round_cap_results(
+                    conn,
+                    conversation_id=conversation_id,
+                    tool_calls=tool_calls,
                 )
+                yield ("error", {"error": _TOOL_ROUND_CAP_MESSAGE})
                 return
 
             tool_rounds += 1

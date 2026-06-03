@@ -403,6 +403,75 @@ class TestAgentClientToolLoop:
             }
         ]
 
+    def test_tool_round_cap_appends_tool_results_so_history_recoverable(
+        self, db_conn, monkeypatch
+    ):
+        """Fifth tool round hits MAX_TOOL_ROUNDS; placeholder results must unblock the next turn."""
+
+        def fake_dispatch_tool_call(conn, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "tool_name": kwargs["tool_name"],
+                "status": "success",
+                "result": {"ok": True},
+            }
+
+        monkeypatch.setattr(
+            "app.agent.client.dispatch_tool_call",
+            fake_dispatch_tool_call,
+        )
+
+        class ManyToolsThenFinalClient(AgentClient):
+            def __init__(self) -> None:
+                super().__init__(api_key="test-key")
+                self.calls = 0
+
+            def _call_model(self, conn, *, conversation_id):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls <= 5:
+                    return (
+                        f"round {self.calls}",
+                        [
+                            {
+                                "id": f"toolu_{self.calls}",
+                                "name": "find_reply_targets",
+                                "input": {},
+                            }
+                        ],
+                        1,
+                        1,
+                    )
+                return ("Recovered after cap.", [], 2, 3)
+
+        conversation_id = start_conversation(db_conn, title="tool cap test")
+        client = ManyToolsThenFinalClient()
+        capped_turn = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="keep calling tools",
+        )
+        assert capped_turn.error is not None
+        assert "too many tool-use rounds" in capped_turn.error
+
+        cap_rows = db_conn.execute(
+            """
+            SELECT role, tool_call_id, content
+            FROM agent_messages
+            WHERE conversation_id = ?
+              AND tool_call_id = 'toolu_5'
+            """,
+            (conversation_id,),
+        ).fetchall()
+        assert len(cap_rows) == 1
+        assert cap_rows[0]["role"] == "tool_result"
+
+        recovery = client.send_message_sync(
+            db_conn,
+            conversation_id=conversation_id,
+            user_text="continue",
+        )
+        assert recovery.error is None
+        assert recovery.assistant_text == "Recovered after cap."
+
 
 # ===========================================================================
 # IWH decision orchestrator
