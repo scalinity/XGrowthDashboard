@@ -91,6 +91,8 @@ def build_weekly_review_read_model(conn: sqlite3.Connection) -> dict[str, Any]:
     )
 
     summary = {
+        "followers_start": followers_start,
+        "followers_end": followers_end,
         "follower_delta": follower_delta,
         "posts_shipped": int(reps["posts_shipped"]),
         "replies_shipped": int(reps["replies_shipped"]),
